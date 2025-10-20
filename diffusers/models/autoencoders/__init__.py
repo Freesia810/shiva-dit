@@ -1,0 +1,3 @@
+from .autoencoder_kl import AutoencoderKL
+from .autoencoder_kl_qwenimage import AutoencoderKLQwenImage
+from .autoencoder_kl_wan import AutoencoderKLWan
