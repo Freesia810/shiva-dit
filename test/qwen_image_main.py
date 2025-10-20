@@ -1,4 +1,4 @@
-from diffusers.pipelines.qwenimage import QwenImagePipeline
+from diffusers.pipelines import QwenImagePipeline
 import torch
 
 model_name = "../Qwen-Image"
@@ -11,7 +11,7 @@ else:
     torch_dtype = torch.float32
     device = "cpu"
 
-pipe = QwenImagePipeline.from_pretrained(model_name, dtype=torch_dtype)
+pipe = QwenImagePipeline.from_pretrained(model_name, torch_dtype=torch_dtype)
 pipe = pipe.to(device)
 
 positive_magic = {

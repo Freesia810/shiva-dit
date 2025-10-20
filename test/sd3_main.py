@@ -1,8 +1,7 @@
 import torch
-from diffusers.pipelines.flux import FluxPipeline
-from diffusers.pipelines.stable_diffusion_3 import StableDiffusion3Pipeline
+from diffusers.pipelines import StableDiffusion3Pipeline
 
-pipe = StableDiffusion3Pipeline.from_pretrained("../stable-diffusion-3-medium-diffusers", dtype=torch.float16).to("cuda")
+pipe = StableDiffusion3Pipeline.from_pretrained("../stable-diffusion-3-medium-diffusers", torch_dtype=torch.float16).to("cuda")
 image = pipe(
     "A cat holding a sign that says hello world",
     negative_prompt="",

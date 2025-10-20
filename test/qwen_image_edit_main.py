@@ -2,7 +2,7 @@ import os
 from PIL import Image
 import torch
 
-from diffusers.pipelines.qwenimage.pipeline_qwenimage_edit import QwenImageEditPipeline
+from diffusers.pipelines import QwenImageEditPipeline
 
 pipeline = QwenImageEditPipeline.from_pretrained("../Qwen-Image-Edit")
 pipeline.to(torch.bfloat16)

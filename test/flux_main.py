@@ -1,8 +1,7 @@
 import torch
-from diffusers.pipelines.flux import FluxPipeline
-from diffusers.pipelines.stable_diffusion_3 import StableDiffusion3Pipeline
+from diffusers.pipelines import FluxPipeline
 
-pipe = FluxPipeline.from_pretrained("../FLUX.1-dev", dtype=torch.bfloat16).to("cuda")
+pipe = FluxPipeline.from_pretrained("../FLUX.1-dev", torch_dtype=torch.bfloat16).to("cuda")
 prompt = "A cat holding a sign that says hello world"
 image = pipe(
     prompt,

@@ -1,12 +1,12 @@
 import torch
 import numpy as np
-from diffusers.pipelines.wan import WanPipeline
+from diffusers.pipelines import WanPipeline
 from diffusers.models.autoencoders import AutoencoderKLWan
 from diffusers.utils import export_to_video, load_image
 
 dtype = torch.bfloat16
 device = "cuda:0"
-vae = AutoencoderKLWan.from_pretrained("../Wan2.2-T2V-A14B-Diffusers", subfolder="vae", dtype=torch.float32)
+vae = AutoencoderKLWan.from_pretrained("../Wan2.2-T2V-A14B-Diffusers", subfolder="vae", torch_dtype=torch.float32)
 pipe = WanPipeline.from_pretrained("../Wan2.2-T2V-A14B-Diffusers", vae=vae, torch_dtype=dtype)
 pipe.to(device)
 
