@@ -70,12 +70,15 @@ from typing import Literal
 
 
 class BaseDiTBlockHook:
+    def register_name(self, layer_name: str):
+        self.layer_name = layer_name
+
     def close(self):
         pass
 
     def hook_pre_norm(
         self, 
-        layer_name: Literal["self-attn", "cross-attn", "ffn", "parallel"],
+        module_name: Literal["self-attn", "cross-attn", "ffn", "parallel"],
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor = None,
         temb: torch.Tensor = None,
@@ -84,17 +87,20 @@ class BaseDiTBlockHook:
 
     def hook_pre_attn(
         self,
-        layer_name: Literal["self-attn", "cross-attn"],
-        hidden_states_qkv: tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None],
-        encoder_hidden_states_qkv: tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None] = None,
+        module_name: Literal["self-attn", "cross-attn"],
+        hidden_states_qkv: tuple[
+            torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
+        ],
+        encoder_hidden_states_qkv: tuple[
+            torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
+        ] = None,
     ):
-        pass
+        return hidden_states_qkv, encoder_hidden_states_qkv
 
     def hook_after_attn(
         self,
-        layer_name: Literal["self-attn", "cross-attn"],
+        module_name: Literal["self-attn", "cross-attn"],
         attn_weights: torch.Tensor,
         encoder_attn_weights: torch.Tensor = None,
     ):
-        pass
-    
+        return attn_weights, encoder_attn_weights

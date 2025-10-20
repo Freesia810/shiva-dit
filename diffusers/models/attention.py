@@ -658,6 +658,14 @@ class JointTransformerBlock(nn.Module):
         self._chunk_size = None
         self._chunk_dim = 0
 
+        self._hook = None
+    
+    def register_hook(self, name, hook):
+        self._name = name
+        self._hook = hook
+        self.attn.processor.register_hook('self-attn', hook)
+        assert self.use_dual_attention is False, 'Not implemented for dual attention yet.'
+
     # Copied from diffusers.models.attention.BasicTransformerBlock.set_chunk_feed_forward
     def set_chunk_feed_forward(self, chunk_size: Optional[int], dim: int = 0):
         # Sets chunk feed-forward
@@ -671,7 +679,14 @@ class JointTransformerBlock(nn.Module):
         temb: torch.FloatTensor,
         joint_attention_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        ### in SD3, use_dual_attention is always False, omitting that part for now
         joint_attention_kwargs = joint_attention_kwargs or {}
+
+        if self._hook is not None:
+            hidden_states, encoder_hidden_states = self._hook.hook_pre_norm(
+               'self-attn', hidden_states, encoder_hidden_states, temb
+            )
+
         if self.use_dual_attention:
             norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp, norm_hidden_states2, gate_msa2 = self.norm1(
                 hidden_states, emb=temb
@@ -701,6 +716,17 @@ class JointTransformerBlock(nn.Module):
             attn_output2 = self.attn2(hidden_states=norm_hidden_states2, **joint_attention_kwargs)
             attn_output2 = gate_msa2.unsqueeze(1) * attn_output2
             hidden_states = hidden_states + attn_output2
+        
+        if self.context_pre_only:
+            encoder_hidden_states = None
+        else:
+            context_attn_output = c_gate_msa.unsqueeze(1) * context_attn_output
+            encoder_hidden_states = encoder_hidden_states + context_attn_output
+        
+        if self._hook is not None:
+            hidden_states, encoder_hidden_states = self._hook.hook_pre_norm(
+               'ffn', hidden_states, encoder_hidden_states
+            )
 
         norm_hidden_states = self.norm2(hidden_states)
         norm_hidden_states = norm_hidden_states * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
@@ -714,12 +740,7 @@ class JointTransformerBlock(nn.Module):
         hidden_states = hidden_states + ff_output
 
         # Process attention outputs for the `encoder_hidden_states`.
-        if self.context_pre_only:
-            encoder_hidden_states = None
-        else:
-            context_attn_output = c_gate_msa.unsqueeze(1) * context_attn_output
-            encoder_hidden_states = encoder_hidden_states + context_attn_output
-
+        if not self.context_pre_only:
             norm_encoder_hidden_states = self.norm2_context(encoder_hidden_states)
             norm_encoder_hidden_states = norm_encoder_hidden_states * (1 + c_scale_mlp[:, None]) + c_shift_mlp[:, None]
             if self._chunk_size is not None:
