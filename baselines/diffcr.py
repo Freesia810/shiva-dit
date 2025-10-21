@@ -45,3 +45,15 @@ class DiffCRDitBlockHook(BaseDiTBlockHook, nn.Module):
                     token_scores = self.hidden_router(x).squeeze(-1) # (batch, seq_len)
         else:
             return super().hook_pre_norm(module_name, hidden_states, encoder_hidden_states, temb)
+    
+
+    def hook_after_module(
+        self, 
+        module_name: Literal["self-attn", "cross-attn", "ffn"],
+        hidden_output: torch.Tensor,
+        encoder_hidden_output: torch.Tensor = None,
+    ):
+        if module.name == 'ffn':
+            # dit block's end
+            pass
+        return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
