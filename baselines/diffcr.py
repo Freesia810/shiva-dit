@@ -36,16 +36,7 @@ class DiffCRDitBlockHook(BaseDiTBlockHook, nn.Module):
             seq_len = hidden_states.shape[1]
             kept_ratio = torch.clamp(self.diff_ratio, 0.1, 1.0)
             if self.training:
-                nearest_bins, indices = self.find_nearest_bins(kept_ratio)
-
-                lower_bin, upper_bin = nearest_bins[0], nearest_bins[1]
-                lower_weight = (upper_bin - kept_ratio) / (upper_bin - lower_bin)
-                upper_weight = 1.0 - lower_weight
-
-                capacity_lower = ste_ceil(lower_bin * seq_len).to(torch.int32)
-                k_lower = torch.min(capacity_lower, torch.tensor(seq_len, device=x.device))
-                capacity_upper = ste_ceil(upper_bin * seq_len).to(torch.int32)
-                k_upper = torch.min(capacity_upper, torch.tensor(seq_len, device=x.device))
+                pass
             else:
                 with torch.no_grad():
                     kept_ratio = self.find_closest_bin(kept_ratio)
