@@ -79,6 +79,11 @@ class FluxAttnProcessor:
     def __init__(self):
         if not hasattr(F, "scaled_dot_product_attention"):
             raise ImportError(f"{self.__class__.__name__} requires PyTorch 2.0. Please upgrade your pytorch version.")
+        self._hook = None
+
+    def register_hook(self, name, hook):
+        self._name = name
+        self._hook = hook
 
     def __call__(
         self,
@@ -107,13 +112,44 @@ class FluxAttnProcessor:
             encoder_query = attn.norm_added_q(encoder_query)
             encoder_key = attn.norm_added_k(encoder_key)
 
+            if image_rotary_emb is not None:
+                encode_seq_len = encoder_query.shape[1]
+                freqs_enc = tuple(t[:encode_seq_len] for t in image_rotary_emb)
+                freqs = tuple(t[encode_seq_len:] for t in image_rotary_emb)
+
+                encoder_query = apply_rotary_emb(encoder_query, freqs_enc, sequence_dim=1)
+                encoder_key = apply_rotary_emb(encoder_key, freqs_enc, sequence_dim=1)
+                query = apply_rotary_emb(query, freqs, sequence_dim=1)
+                key = apply_rotary_emb(key, freqs, sequence_dim=1)
+
+            if self._hook is not None:
+                (query, key, value), (
+                    encoder_query,
+                    encoder_key,
+                    encoder_value,
+                ) = self._hook.hook_pre_attn(
+                    self._name,
+                    (query, key, value),
+                    (
+                        encoder_query,
+                        encoder_key,
+                        encoder_value,
+                    ),
+                )
+
             query = torch.cat([encoder_query, query], dim=1)
             key = torch.cat([encoder_key, key], dim=1)
             value = torch.cat([encoder_value, value], dim=1)
+        else:
+            if image_rotary_emb is not None:
+                query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
+                key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
 
-        if image_rotary_emb is not None:
-            query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
-            key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
+            if self._hook is not None:
+                (query, key, value), _ = self._hook.hook_pre_attn(
+                    self._name,
+                    (query, key, value),
+                )
 
         hidden_states = dispatch_attention_fn(
             query,
@@ -130,12 +166,22 @@ class FluxAttnProcessor:
             encoder_hidden_states, hidden_states = hidden_states.split_with_sizes(
                 [encoder_hidden_states.shape[1], hidden_states.shape[1] - encoder_hidden_states.shape[1]], dim=1
             )
+
+            if self._hook is not None:
+                hidden_states, encoder_hidden_states = self._hook.hook_after_attn(self._name, hidden_states, encoder_hidden_states)
+
             hidden_states = attn.to_out[0](hidden_states)
             hidden_states = attn.to_out[1](hidden_states)
             encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
 
+            if self._hook is not None:
+                hidden_states, encoder_hidden_states = self._hook.hook_after_module(self._name, hidden_states, encoder_hidden_states)
+
             return hidden_states, encoder_hidden_states
         else:
+            if self._hook is not None:
+                hidden_states, _ = self._hook.hook_after_attn(self._name, hidden_states)
+                hidden_states, _ = self._hook.hook_after_module(self._name, hidden_states)
             return hidden_states
 
 
@@ -374,6 +420,14 @@ class FluxSingleTransformerBlock(nn.Module):
             pre_only=True,
         )
 
+        self._hook = None
+    
+    def register_hook(self, name, hook):
+        self._name = name
+        self._hook = hook
+        self.attn.processor.register_hook('self-attn', hook)
+        hook.on_register_hook(self)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -383,10 +437,22 @@ class FluxSingleTransformerBlock(nn.Module):
         joint_attention_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         text_seq_len = encoder_hidden_states.shape[1]
+
+        # pre norm
+        if self._hook is not None:
+            hidden_states, encoder_hidden_states = self._hook.hook_pre_norm("parallel", hidden_states, encoder_hidden_states, temb)
+
         hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
 
         residual = hidden_states
         norm_hidden_states, gate = self.norm(hidden_states, emb=temb)
+
+        # after norm
+        if self._hook is not None:
+            encoder_hidden_states, hidden_states = hidden_states[:, :text_seq_len], hidden_states[:, text_seq_len:]
+            hidden_states, encoder_hidden_states = self._hook.hook_after_norm("parallel", hidden_states, encoder_hidden_states)
+            hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
+
         mlp_hidden_states = self.act_mlp(self.proj_mlp(norm_hidden_states))
         joint_attention_kwargs = joint_attention_kwargs or {}
         attn_output = self.attn(
@@ -398,6 +464,13 @@ class FluxSingleTransformerBlock(nn.Module):
         hidden_states = torch.cat([attn_output, mlp_hidden_states], dim=2)
         gate = gate.unsqueeze(1)
         hidden_states = gate * self.proj_out(hidden_states)
+
+        # after module
+        if self._hook is not None:
+            encoder_hidden_states, hidden_states = hidden_states[:, :text_seq_len], hidden_states[:, text_seq_len:]
+            hidden_states, encoder_hidden_states = self._hook.hook_after_module("parallel", hidden_states, encoder_hidden_states)
+            hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
+
         hidden_states = residual + hidden_states
         if hidden_states.dtype == torch.float16:
             hidden_states = hidden_states.clip(-65504, 65504)
@@ -434,6 +507,14 @@ class FluxTransformerBlock(nn.Module):
         self.norm2_context = nn.LayerNorm(dim, elementwise_affine=False, eps=1e-6)
         self.ff_context = FeedForward(dim=dim, dim_out=dim, activation_fn="gelu-approximate")
 
+        self._hook = None
+    
+    def register_hook(self, name, hook):
+        self._name = name
+        self._hook = hook
+        self.attn.processor.register_hook('self-attn', hook)
+        hook.on_register_hook(self)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -442,12 +523,23 @@ class FluxTransformerBlock(nn.Module):
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         joint_attention_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        # self-attn's pre norm
+        if self._hook is not None:
+            hidden_states, encoder_hidden_states = self._hook.hook_pre_norm("self-attn", hidden_states, encoder_hidden_states, temb)
+
         norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, emb=temb)
 
         norm_encoder_hidden_states, c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp = self.norm1_context(
             encoder_hidden_states, emb=temb
         )
         joint_attention_kwargs = joint_attention_kwargs or {}
+
+        # self-attn's after norm
+        if self._hook is not None:
+            norm_hidden_states, norm_encoder_hidden_states = self._hook.hook_after_norm(
+               'self-attn', norm_hidden_states, norm_encoder_hidden_states
+            )
 
         # Attention.
         attention_outputs = self.attn(
@@ -466,25 +558,39 @@ class FluxTransformerBlock(nn.Module):
         attn_output = gate_msa.unsqueeze(1) * attn_output
         hidden_states = hidden_states + attn_output
 
-        norm_hidden_states = self.norm2(hidden_states)
-        norm_hidden_states = norm_hidden_states * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
-
-        ff_output = self.ff(norm_hidden_states)
-        ff_output = gate_mlp.unsqueeze(1) * ff_output
-
-        hidden_states = hidden_states + ff_output
-        if len(attention_outputs) == 3:
-            hidden_states = hidden_states + ip_attn_output
-
         # Process attention outputs for the `encoder_hidden_states`.
         context_attn_output = c_gate_msa.unsqueeze(1) * context_attn_output
         encoder_hidden_states = encoder_hidden_states + context_attn_output
 
+        # ffn's pre norm
+        if self._hook is not None:
+            hidden_states, encoder_hidden_states = self._hook.hook_pre_norm("ffn", hidden_states, encoder_hidden_states)
+
+        norm_hidden_states = self.norm2(hidden_states)
+        norm_hidden_states = norm_hidden_states * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
         norm_encoder_hidden_states = self.norm2_context(encoder_hidden_states)
         norm_encoder_hidden_states = norm_encoder_hidden_states * (1 + c_scale_mlp[:, None]) + c_shift_mlp[:, None]
 
+        # ffn's after norm
+        if self._hook is not None:
+            norm_hidden_states, norm_encoder_hidden_states = self._hook.hook_after_norm(
+            'ffn', norm_hidden_states, norm_encoder_hidden_states
+            )
+
+        ff_output = self.ff(norm_hidden_states)
+        ff_output = gate_mlp.unsqueeze(1) * ff_output
+
         context_ff_output = self.ff_context(norm_encoder_hidden_states)
-        encoder_hidden_states = encoder_hidden_states + c_gate_mlp.unsqueeze(1) * context_ff_output
+        context_ff_output = c_gate_mlp.unsqueeze(1) * context_ff_output
+
+        # ffn's after module
+        if self._hook is not None:
+            ff_output, context_ff_output = self._hook.hook_after_module('ffn', ff_output, context_ff_output)
+
+        hidden_states = hidden_states + ff_output
+        if len(attention_outputs) == 3:
+            hidden_states = hidden_states + ip_attn_output
+        encoder_hidden_states = encoder_hidden_states + context_ff_output
         if encoder_hidden_states.dtype == torch.float16:
             encoder_hidden_states = encoder_hidden_states.clip(-65504, 65504)
 

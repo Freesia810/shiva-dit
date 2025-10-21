@@ -5,6 +5,7 @@ datasets>=2.21,<3.0
 fairscale==0.4.13
 ftfy==6.3.1
 httpx=0.28.1
+imageio-ffmpeg==0.6.0
 lpips>=0.1.4,<0.2
 matplotlib>=3.10,<3.11
 numpy>=1.26,<2.0

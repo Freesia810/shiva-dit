@@ -4,7 +4,10 @@ import fnmatch
 from typing import Dict, Type, Optional, Union
 from contextlib import contextmanager
 from copy import deepcopy
-from diffusers.models.attention import JointTransformerBlock
+from diffusers.models.attention import JointTransformerBlock, BasicTransformerBlock
+from diffusers.models.transformers.transformer_flux import FluxTransformerBlock, FluxSingleTransformerBlock
+from diffusers.models.transformers.transformer_qwenimage import QwenImageTransformerBlock
+from diffusers.models.transformers.transformer_wan import WanTransformerBlock
 from project_name.utils.block_hook import BaseDiTBlockHook
 
 
@@ -24,13 +27,20 @@ class HookManager:
     _block_name = {
         'sd3': ('transformer_blocks.*',),
         'flux-dev': ('transformer_blocks.*', 'single_transformer_blocks.*'),
+        'flux-kontext': ('transformer_blocks.*', 'single_transformer_blocks.*'),
         'qwen-image': ('transformer_blocks.*',),
         'qwen-image-edit': ('transformer_blocks.*',),
         'pixart-sigma': ('transformer_blocks.*',),
-        'wan': ('transformer.blocks.*', 'transformer_2.blocks.*'),
+        'wan': ('blocks.*',),
     }
     _block_type = {
         'sd3': JointTransformerBlock,
+        'flux-dev': (FluxTransformerBlock, FluxSingleTransformerBlock),
+        'flux-kontext': (FluxTransformerBlock, FluxSingleTransformerBlock),
+        'qwen-image': QwenImageTransformerBlock,
+        'qwen-image-edit': QwenImageTransformerBlock,
+        'pixart-sigma': BasicTransformerBlock,
+        'wan': WanTransformerBlock,
     }
 
     @classmethod
@@ -87,26 +97,31 @@ class HookManager:
                 cls._hook_config[pattern] = (hook_cls, kwargs)
 
     @classmethod
-    def inject_hooks(cls, model_type: str, model: nn.Module):
+    def inject_hooks(cls, model_type: str, pipe, model_attrs: list[str]):
         if not cls._enabled:
             print("[HookManager] Disabled, skipping hook injection.")
             return
 
         injected = 0
-
-        for name, module in model.named_modules():
-            if isinstance(module, cls._block_type[model_type]):
-                hook_cls, kwargs = cls._resolve_hook_config(name)
-                hook = hook_cls(**deepcopy(kwargs))
-                hook.register_name(name)
-                if hasattr(module, "register_hook"):
-                    module.register_hook(name, hook)
-                else:
-                    raise RuntimeError(f"Module '{name}' does not support hook registration.")
-                cls._hook_map[name] = hook
-                cls._weak_blocks[name] = module
-                injected += 1
-                print(f"[HookManager] Injected hook for layer '{name}', hook class: {hook_cls}")
+        
+        for model_attr in model_attrs:
+            m = getattr(pipe, model_attr)
+            if not isinstance(m, nn.Module):
+                raise TypeError(f"Expected nn.Module, got {type(m)}")
+            for name, module in m.named_modules():
+                if isinstance(module, cls._block_type[model_type]):
+                    hook_cls, kwargs = cls._resolve_hook_config(name)
+                    hook = hook_cls(**deepcopy(kwargs))
+                    hook_name = f"{model_attr}.{name}"
+                    hook.register_name(hook_name)
+                    if hasattr(module, "register_hook"):
+                        module.register_hook(hook_name, hook)
+                    else:
+                        raise RuntimeError(f"Module '{hook_name}' does not support hook registration.")
+                    cls._hook_map[hook_name] = hook
+                    cls._weak_blocks[hook_name] = module
+                    injected += 1
+                    print(f"[HookManager] Injected hook for layer '{hook_name}', hook class: {hook_cls.__name__}")
 
         print(f"[HookManager] Injected {injected} hooks for model '{model_type}'.")
 

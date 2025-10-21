@@ -27,12 +27,15 @@ from typing import Literal
 #           q, k, v = proj(hidden_states or concat(hidden_states, encoder_hidden_states))
 #
 #   (2) Attention Map:
-#           attn = softmax(q @ k^T / sqrt(d))
+#           attn = softmax(q @ k^T / sqrt(d)) @ v
 #
-#   hook_after_attn("self-attn", attn_weights)
+#   hook_after_attn("self-attn", attn_weights) means attention map
+#   
+#   (3) AfterModule:
+#   hook_after_module("self-attn", attn_output)
 #
-#   (3) Output:
-#           hidden_states = hidden_states + attn @ v
+#   (4) Output:
+#           hidden_states = hidden_states + attn_output
 #
 # ---------------------------------------------------------------
 #  ③ Cross-Attention (if exists)
@@ -41,16 +44,19 @@ from typing import Literal
 #   hook_pre_attn("cross-attn", hidden_states_qkv, encoder_hidden_states_qkv)
 #
 #   (1) q from hidden_states, k/v from encoder_hidden_states
-#   (2) attn = softmax(q @ k^T)
+#   (2) attn = softmax(q @ k^T / sqrt(d)) @ v
 #
 #   hook_after_attn("cross-attn", attn_weights)
 #
-#   (3) hidden_states = hidden_states + attn @ v
+#   (3) AfterModule:
+#   hook_after_module("cross-attn", attn_output)
+#
+#   (4) hidden_states = hidden_states + attn_output
 #
 # ---------------------------------------------------------------
 #  ④ FFN Stage
 # ---------------------------------------------------------------
-#   hook_pre_norm("ffn", ...)
+#   hook_pre_norm("ffn", ...) -> after_norm -> after_module
 #
 #   hidden_states -----> Norm3 --> MLP(hidden_states)
 #   hidden_states = hidden_states + MLP_out
@@ -67,13 +73,19 @@ from typing import Literal
 #   hidden_states = hidden_states + attn_out + mlp_out
 #
 # ===============================================================
-
+#
+# prenorm -> (norm) -> afternorm ->     (Attention/FFN)  -> aftermodule
+#                                     preattn -> afterattn
+#                                   (QKV hook) (Attn Map hook)
 
 class BaseDiTBlockHook:
     def register_name(self, layer_name: str):
         self.layer_name = layer_name
 
     def close(self):
+        pass
+
+    def on_register_hook(self, block: nn.Module):
         pass
 
     def hook_pre_norm(
@@ -84,6 +96,23 @@ class BaseDiTBlockHook:
         temb: torch.Tensor = None,
     ):
         return hidden_states, encoder_hidden_states
+    
+    def hook_after_norm(
+        self, 
+        module_name: Literal["self-attn", "cross-attn", "ffn"],
+        norm_hidden_states: torch.Tensor,
+        norm_encoder_hidden_states: torch.Tensor = None,
+        temb: torch.Tensor = None,
+    ):
+        return norm_hidden_states, norm_encoder_hidden_states
+    
+    def hook_after_module(
+        self, 
+        module_name: Literal["self-attn", "cross-attn", "ffn"],
+        hidden_output: torch.Tensor,
+        encoder_hidden_output: torch.Tensor = None,
+    ):
+        return hidden_output, encoder_hidden_output
 
     def hook_pre_attn(
         self,

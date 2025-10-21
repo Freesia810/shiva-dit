@@ -272,6 +272,11 @@ class QwenDoubleStreamAttnProcessor2_0:
             raise ImportError(
                 "QwenDoubleStreamAttnProcessor2_0 requires PyTorch 2.0, to use it, please upgrade PyTorch to 2.0."
             )
+        self._hook = None
+
+    def register_hook(self, name, hook):
+        self._name = name
+        self._hook = hook
 
     def __call__(
         self,
@@ -323,6 +328,17 @@ class QwenDoubleStreamAttnProcessor2_0:
             img_key = apply_rotary_emb_qwen(img_key, img_freqs, use_real=False)
             txt_query = apply_rotary_emb_qwen(txt_query, txt_freqs, use_real=False)
             txt_key = apply_rotary_emb_qwen(txt_key, txt_freqs, use_real=False)
+        
+        if self._hook is not None:
+            (img_query, img_key, img_value), (
+                txt_query,
+                txt_key,
+                txt_value,
+            ) = self._hook.hook_pre_attn(
+                self._name,
+                (img_query, img_key, img_value),
+                (txt_query, txt_key, txt_value),
+            )
 
         # Concatenate for joint attention
         # Order: [text, image]
@@ -350,12 +366,18 @@ class QwenDoubleStreamAttnProcessor2_0:
         txt_attn_output = joint_hidden_states[:, :seq_txt, :]  # Text part
         img_attn_output = joint_hidden_states[:, seq_txt:, :]  # Image part
 
+        if self._hook is not None:
+            img_attn_output, txt_attn_output = self._hook.hook_after_attn(self._name, img_attn_output, txt_attn_output)
+
         # Apply output projections
         img_attn_output = attn.to_out[0](img_attn_output)
         if len(attn.to_out) > 1:
             img_attn_output = attn.to_out[1](img_attn_output)  # dropout
 
         txt_attn_output = attn.to_add_out(txt_attn_output)
+
+        if self._hook is not None:
+            img_attn_output, txt_attn_output = self._hook.hook_after_module(self._name, img_attn_output, txt_attn_output)
 
         return img_attn_output, txt_attn_output
 
@@ -403,6 +425,14 @@ class QwenImageTransformerBlock(nn.Module):
         self.txt_norm2 = nn.LayerNorm(dim, elementwise_affine=False, eps=eps)
         self.txt_mlp = FeedForward(dim=dim, dim_out=dim, activation_fn="gelu-approximate")
 
+        self._hook = None
+
+    def register_hook(self, name, hook):
+        self._name = name
+        self._hook = hook
+        self.attn.processor.register_hook('self-attn', hook)
+        hook.on_register_hook(self)
+
     def _modulate(self, x, mod_params):
         """Apply modulation to input tensor"""
         shift, scale, gate = mod_params.chunk(3, dim=-1)
@@ -425,6 +455,10 @@ class QwenImageTransformerBlock(nn.Module):
         img_mod1, img_mod2 = img_mod_params.chunk(2, dim=-1)  # Each [B, 3*dim]
         txt_mod1, txt_mod2 = txt_mod_params.chunk(2, dim=-1)  # Each [B, 3*dim]
 
+        # self-attn's pre norm
+        if self._hook is not None:
+            hidden_states, encoder_hidden_states = self._hook.hook_pre_norm("self-attn", hidden_states, encoder_hidden_states, temb)
+
         # Process image stream - norm1 + modulation
         img_normed = self.img_norm1(hidden_states)
         img_modulated, img_gate1 = self._modulate(img_normed, img_mod1)
@@ -432,6 +466,10 @@ class QwenImageTransformerBlock(nn.Module):
         # Process text stream - norm1 + modulation
         txt_normed = self.txt_norm1(encoder_hidden_states)
         txt_modulated, txt_gate1 = self._modulate(txt_normed, txt_mod1)
+        
+        # self-attn's after norm
+        if self._hook is not None:
+            img_modulated, txt_modulated = self._hook.hook_after_norm("self-attn", img_modulated, txt_modulated)
 
         # Use QwenAttnProcessor2_0 for joint attention computation
         # This directly implements the DoubleStreamLayerMegatron logic:
@@ -455,16 +493,29 @@ class QwenImageTransformerBlock(nn.Module):
         hidden_states = hidden_states + img_gate1 * img_attn_output
         encoder_hidden_states = encoder_hidden_states + txt_gate1 * txt_attn_output
 
+        # ffn's pre norm
+        if self._hook is not None:
+            hidden_states, encoder_hidden_states = self._hook.hook_pre_norm("ffn", hidden_states, encoder_hidden_states)
+
         # Process image stream - norm2 + MLP
+        # Process text stream - norm2 + MLP
         img_normed2 = self.img_norm2(hidden_states)
         img_modulated2, img_gate2 = self._modulate(img_normed2, img_mod2)
-        img_mlp_output = self.img_mlp(img_modulated2)
-        hidden_states = hidden_states + img_gate2 * img_mlp_output
-
-        # Process text stream - norm2 + MLP
         txt_normed2 = self.txt_norm2(encoder_hidden_states)
         txt_modulated2, txt_gate2 = self._modulate(txt_normed2, txt_mod2)
+        
+        # ffn's after norm
+        if self._hook is not None:
+            img_modulated2, txt_modulated2 = self._hook.hook_after_norm("ffn", img_modulated2, txt_modulated2)
+
+        img_mlp_output = self.img_mlp(img_modulated2)
         txt_mlp_output = self.txt_mlp(txt_modulated2)
+
+        # ffn's after module
+        if self._hook is not None:
+            img_mlp_output, txt_mlp_output = self._hook.hook_after_module('ffn', img_mlp_output, txt_mlp_output)
+
+        hidden_states = hidden_states + img_gate2 * img_mlp_output
         encoder_hidden_states = encoder_hidden_states + txt_gate2 * txt_mlp_output
 
         # Clip to prevent overflow for fp16
