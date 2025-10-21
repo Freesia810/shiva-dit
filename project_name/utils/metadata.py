@@ -1,3 +1,4 @@
+import torch.nn as nn
 from diffusers.models.attention import JointTransformerBlock, BasicTransformerBlock
 from diffusers.models.transformers.transformer_flux import FluxTransformerBlock, FluxSingleTransformerBlock
 from diffusers.models.transformers.transformer_qwenimage import QwenImageTransformerBlock

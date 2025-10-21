@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 from typing import Literal
 
 # ===============================================================
@@ -30,7 +31,7 @@ from typing import Literal
 #           attn = softmax(q @ k^T / sqrt(d)) @ v
 #
 #   hook_after_attn("self-attn", attn_weights) means attention map
-#   
+#
 #   (3) AfterModule:
 #   hook_after_module("self-attn", attn_output)
 #
