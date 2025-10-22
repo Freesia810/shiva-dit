@@ -214,6 +214,13 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         self.prompt_template_encode_start_idx = 64
         self.default_sample_size = 128
 
+        from project_name.utils.context import global_context
+        global_context.update(
+            model_name="qwen-image-edit",
+            hidden_dim=self.transformer.inner_dim,
+            encoder_hidden_dim=self.transformer.inner_dim,
+        )
+
     # Copied from diffusers.pipelines.qwenimage.pipeline_qwenimage.QwenImagePipeline._extract_masked_hidden
     def _extract_masked_hidden(self, hidden_states: torch.Tensor, mask: torch.Tensor):
         bool_mask = mask.bool()
@@ -796,6 +803,19 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist() if prompt_embeds_mask is not None else None
         negative_txt_seq_lens = (
             negative_prompt_embeds_mask.sum(dim=1).tolist() if negative_prompt_embeds_mask is not None else None
+        )
+
+        from project_name.utils.context import global_context
+        # todo: image
+        global_context.update(
+            hidden_seq_height=img_shapes[0][0][1],
+            hidden_seq_width=img_shapes[0][0][2],
+            hidden_seq_len=image_seq_len,
+            hidden_extra_seq_height=img_shapes[0][1][1] if image_latents is not None else None,
+            hidden_extra_seq_width=img_shapes[0][1][2] if image_latents is not None else None,
+            hidden_extra_seq_len= image_latents.shape[1] if image_latents is not None else None,
+            encoder_hidden_seq_len=txt_seq_lens,
+            negetive_encoder_hidden_seq_len=negative_txt_seq_lens,
         )
 
         # 6. Denoising loop

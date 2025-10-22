@@ -154,6 +154,13 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         self.vae_scale_factor_spatial = self.vae.config.scale_factor_spatial if getattr(self, "vae", None) else 8
         self.video_processor = VideoProcessor(vae_scale_factor=self.vae_scale_factor_spatial)
 
+        from project_name.utils.context import global_context
+        global_context.update(
+            model_name="wan",
+            hidden_dim=self.transformer.config.dim,
+            encoder_hidden_dim=self.transformer.config.dim,
+        )
+
     def _get_t5_prompt_embeds(
         self,
         prompt: Union[str, List[str]] = None,
@@ -554,6 +561,16 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         )
 
         mask = torch.ones(latents.shape, dtype=torch.float32, device=device)
+
+        from project_name.utils.context import global_context
+        global_context.update(
+            hidden_seq_height=(latents.shape[-2] // self.transformer.config.patch_size[1]),
+            hidden_seq_width=(latents.shape[-1] // self.transformer.config.patch_size[2]),
+            hidden_seq_frame=(num_frames // self.transformer.config.patch_size[0]),
+            hidden_seq_len=(latents.shape[-2] // self.transformer.config.patch_size[1]) * (latents.shape[-1] // self.transformer.config.patch_size[2]) * (num_frames // self.transformer.config.patch_size[0]),
+            encoder_hidden_seq_len=prompt_embeds.shape[1],
+            negative_encoder_hidden_seq_len=negative_prompt_embeds.shape[1],
+        )
 
         # 6. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order

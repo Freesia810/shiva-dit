@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from typing import Literal
 from project_name.hook import BaseDiTBlockHook
-from project_name.utils.metadata import get_block_metadata
+from project_name.utils.context import global_context
 from project_name.utils.ste import ceil_ste
 from project_name.utils.token_utils import (
     reconstruct_tokens_by_topk,
@@ -30,8 +30,10 @@ class DiffCRDitBlockHook(BaseDiTBlockHook, nn.Module):
         return self.kept_ratio_candidate[closest_index]
 
     def on_register_hook(self, block: nn.Module):
-        metadata = get_block_metadata(block)
-        self.hidden_router = nn.Linear(metadata['hidden_states_dim'], 1, bias=False)
+        hidden_dim = global_context.hidden_dim
+        if hidden_dim is None:
+            raise ValueError("hidden_dim must be set in global_context")
+        self.hidden_router = nn.Linear(hidden_dim, 1, bias=False)
 
     def hook_pre_norm(
         self, 

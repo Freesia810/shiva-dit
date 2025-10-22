@@ -177,6 +177,13 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         self.prompt_template_encode_start_idx = 34
         self.default_sample_size = 128
 
+        from project_name.utils.context import global_context
+        global_context.update(
+            model_name="qwen-image",
+            hidden_dim=self.transformer.inner_dim,
+            encoder_hidden_dim=self.transformer.inner_dim,
+        )
+
     def _extract_masked_hidden(self, hidden_states: torch.Tensor, mask: torch.Tensor):
         bool_mask = mask.bool()
         valid_lengths = bool_mask.sum(dim=1)
@@ -675,6 +682,15 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         txt_seq_lens = prompt_embeds_mask.sum(dim=1).tolist() if prompt_embeds_mask is not None else None
         negative_txt_seq_lens = (
             negative_prompt_embeds_mask.sum(dim=1).tolist() if negative_prompt_embeds_mask is not None else None
+        )
+
+        from project_name.utils.context import global_context
+        global_context.update(
+            hidden_seq_height=img_shapes[0][0][1],
+            hidden_seq_width=img_shapes[0][0][2],
+            hidden_seq_len=image_seq_len,
+            encoder_hidden_seq_len=txt_seq_lens,
+            negetive_encoder_hidden_seq_len=negative_txt_seq_lens,
         )
 
         # 6. Denoising loop

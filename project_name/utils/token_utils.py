@@ -20,7 +20,6 @@ def select_topk_tokens(x: torch.Tensor, token_scores: torch.Tensor, k: int):
 
     return selected_x, topk_indices
 
-
 def reconstruct_tokens_by_topk(
     x: torch.Tensor,
     selected_tokens: torch.Tensor,
@@ -44,3 +43,132 @@ def reconstruct_tokens_by_topk(
         1, topk_indices.unsqueeze(-1).expand(-1, -1, x.size(-1)), selected_tokens
     )
     return reconstructed
+
+
+def sample_dst_src_with_2D_stride(
+    size: Union[int, Tuple[int, int]],
+    stride: Union[int, Tuple[int, int]],
+    generator: torch.Generator = None,
+    rand: bool = True,
+    device: torch.device = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Sample destination (dst) and source (src) token indices from a 2D token grid, 
+    by dividing the input feature map into non-overlapping blocks of given stride.
+
+    Each stride-sized block will have exactly one dst token (randomly chosen), 
+    and all remaining tokens in the block are marked as src.
+
+    size (h, w) -> h * w == N
+    """
+    with torch.no_grad():
+        if isinstance(size, int):
+            h = w = size
+        else:
+            h, w = size
+        if isinstance(stride, int):
+            stride_h = stride_w = stride
+        else:
+            stride_h, stride_w = stride
+
+        h_stride_num, w_stride_num = h // stride_h, w // stride_w
+
+        if rand:
+            rand_idx = torch.randint(
+                stride_h * stride_w, size=(h_stride_num, w_stride_num, 1), device=device, generator=generator
+            ) # (h_stride_num, w_stride_num, 1)
+        else:
+            rand_idx = torch.zeros(h_stride_num, w_stride_num, 1, device=device, dtype=torch.int64) # (h_stride_num, w_stride_num, 1)
+
+        idx_buffer_view = torch.zeros(h_stride_num, w_stride_num, stride_h * stride_w, device=device, dtype=torch.int64) # (h_stride_num, w_stride_num, stride_h * stride_w)
+        idx_buffer_view.scatter_(
+            dim=2, index=rand_idx, src=-torch.ones_like(rand_idx, dtype=torch.int64)
+        ) # (h_stride_num, w_stride_num, stride_h * stride_w) dst_index = -1
+
+        idx_buffer_view = (
+            idx_buffer_view.view(h_stride_num, w_stride_num, stride_h, stride_w)
+            .transpose(1, 2)
+            .reshape(h_stride_num * stride_h, w_stride_num * stride_w)
+        ) # (h_stride_num * stride_h, w_stride_num * stride_w)
+
+        if (h_stride_num * stride_h) < h or (w_stride_num * stride_w) < w:
+            idx_buffer = torch.zeros(h, w, device=device, dtype=torch.int64)
+            idx_buffer[: (h_stride_num * stride_h), : (w_stride_num * stride_w)] = idx_buffer_view
+        else:
+            idx_buffer = idx_buffer_view
+
+        # [dst_1, dst_2, ..., src_1, src_2, ...] because -1 < 1
+        rand_idx = idx_buffer.reshape(1, -1, 1).argsort(dim=1)
+
+        # Split indices into dst (front) and src (remaining)
+        num_dst = h_stride_num * w_stride_num
+        dst_idx = rand_idx[:, :num_dst, :] # (1, num_dst, 1)
+        src_idx = rand_idx[:, num_dst:, :] # (1, N - num_dst, 1)
+
+        return dst_idx, src_idx
+
+def get_dst_src_tokens(x: torch.Tensor, dst_idx: torch.Tensor, src_idx: torch.Tensor):
+    # x: (B, N, D)
+    # dst_idx: (1, num_dst, 1)
+    # src_idx: (1, N - num_dst, 1)
+    B, N, C = x.shape
+    num_dst = dst_idx.shape[1]
+    dst_tokens = torch.gather(x, dim=1, index=dst_idx.expand(B, num_dst, C))
+    src_tokens = torch.gather(x, dim=1, index=src_idx.expand(B, N - num_dst, C))
+    return dst_tokens, src_tokens
+
+def select_dst_src_tokens(scores: torch.Tensor, dst_idx: torch.Tensor, src_idx: torch.Tensor, k: int):
+    # scores: (B, num_src, num_dst)
+    # dst_idx: (1, num_dst, 1)
+    # src_idx: (1, N - num_dst, 1)
+    k = min(k, scores.shape[1])
+    node_max, node_idx = scores.max(dim=-1, keepdim=True) # (B, N - num_dst, 1)
+    edge_idx = node_max.argsort(dim=-1, descending=True) # (B, N - num_dst, 1)
+
+    merge_src_idx = edge_idx[..., :k, :]  # (B, k, 1)
+    unmerge_src_idx = edge_idx[..., k:, :]  # (B, N - num_dst - k, 1)
+    merge_dst_idx = torch.gather(node_idx, dim=-2, index=merge_src_idx) # (B, k, 1)
+
+    return merge_dst_idx, merge_src_idx, unmerge_src_idx
+
+def merge_dst_src_tokens(x: torch.Tensor, dst_idx: torch.Tensor, src_idx: torch.Tensor, merge_dst_idx: torch.Tensor, merge_src_idx: torch.Tensor, unmerge_src_idx: torch.Tensor, reduce_mode: str = "mean"):
+    # x: (B, N, D)
+    # dst_idx: (1, num_dst, 1)
+    # src_idx: (1, N - num_dst, 1)
+    # merge_dst_idx: (B, k, 1)
+    # merge_src_idx: (B, k, 1)
+    # unmerge_src_idx: (B, N - num_dst - k, 1)
+    dst_tokens, src_tokens = get_dst_src_tokens(x, dst_idx, src_idx) # (B, num_dst, D), (B, N - num_dst, D)
+    
+    B, N, C = x.shape
+    num_src = src_idx.shape[1]
+    k = merge_dst_idx.shape[1]
+    
+    merge_src_tokens = torch.gather(src_tokens, dim=-2, index=merge_src_idx.expand(B, k, C)) # (B, k, D)
+    unmerge_src_tokens = torch.gather(src_tokens, dim=-2, index=unmerge_src_idx.expand(B, num_src - k, C)) # (B, N - num_dst - k, D)
+    merge_dst_tokens = dst_tokens.scatter_reduce(-2, merge_dst_idx.expand(B, k, C), merge_src_tokens, reduce=reduce_mode) # (B, num_dst, D)
+
+    return torch.cat([unmerge_src_tokens, merge_dst_tokens], dim=1) # (B, N - k, D)
+
+def unmerge_dst_src_tokens(merged_x: torch.Tensor, dst_idx: torch.Tensor, src_idx: torch.Tensor, merge_dst_idx: torch.Tensor, merge_src_idx: torch.Tensor, unmerge_src_idx: torch.Tensor):
+    # merged_x: (B, N - k, D)
+    # dst_idx: (1, num_dst, 1)
+    # src_idx: (1, N - num_dst, 1)
+    # merge_dst_idx: (B, k, 1)
+    # merge_src_idx: (B, k, 1)
+    # unmerge_src_idx: (B, N - num_dst - k, 1)
+    B, N_k, C = merged_x.shape
+    num_dst = dst_idx.shape[1]
+    k = merge_dst_idx.shape[1]
+    N = N_k + k
+    unmerge_len = N - num_dst - k
+
+    unmerge_src_tokens, merge_dst_tokens = merged_x[..., :unmerge_len, :], merged_x[..., unmerge_len:, :] # (B, N - num_dst - k, D), (B, num_dst, D)
+    simulated_merged_src_tokens = torch.gather(merge_dst_tokens, dim=-2, index=merge_dst_idx.expand(B, k, C)) # use dst tokens to simulate src tokens
+
+    out = torch.zeros(B, N, C, device=merged_x.device, dtype=merged_x.dtype) # (B, N, C)
+    out.scatter_(dim=-2, index=dst_idx.expand(B, num_dst, C), src=merge_dst_tokens)
+    out.scatter_(dim=-2, index=torch.gather(src_idx.expand(B, N - num_dst, 1), dim=1, index=unmerge_src_idx).expand(B, unmerge_len, C), src=unmerge_src_tokens)
+    out.scatter_(dim=-2, index=torch.gather(src_idx.expand(B, N - num_dst, 1), dim=1, index=merge_src_idx).expand(B, k, C), src=simulated_merged_src_tokens)
+
+    return out

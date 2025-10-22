@@ -243,6 +243,13 @@ class PixArtSigmaPipeline(DiffusionPipeline):
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1) if getattr(self, "vae", None) else 8
         self.image_processor = PixArtImageProcessor(vae_scale_factor=self.vae_scale_factor)
 
+        from project_name.utils.context import global_context
+        global_context.update(
+            model_name="pixart-sigma",
+            hidden_dim=self.transformer.inner_dim,
+            encoder_hidden_dim=self.transformer.inner_dim,
+        )
+
     # Copied from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha.PixArtAlphaPipeline.encode_prompt with 120->300
     def encode_prompt(
         self,
@@ -821,6 +828,15 @@ class PixArtSigmaPipeline(DiffusionPipeline):
             device,
             generator,
             latents,
+        )
+
+        from project_name.utils.context import global_context
+        global_context.update(
+            encoder_hidden_seq_len=prompt_embeds.shape[1], # cfg enable, prompt_embeds batch = 2
+            negetive_encoder_hidden_seq_len=prompt_embeds.shape[1], # cfg enable, prompt_embeds batch = 2
+            hidden_seq_height=(latents.shape[-2] // self.transformer.config.patch_size),
+            hidden_seq_width=(latents.shape[-1] // self.transformer.config.patch_size),
+            hidden_seq_len=(latents.shape[-2] // self.transformer.config.patch_size) * (latents.shape[-1] // self.transformer.config.patch_size)
         )
 
         # 6. Prepare extra step kwargs. TODO: Logic should ideally just be moved out of the pipeline

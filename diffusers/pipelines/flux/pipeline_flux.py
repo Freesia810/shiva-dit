@@ -215,6 +215,13 @@ class FluxPipeline(
         )
         self.default_sample_size = 128
 
+        from project_name.utils.context import global_context
+        global_context.update(
+            model_name="flux-dev",
+            hidden_dim=self.transformer.norm2.normalized_shape[0],
+            encoder_hidden_dim=self.transformer.norm2.normalized_shape[0],
+        )
+
     def _get_t5_prompt_embeds(
         self,
         prompt: Union[str, List[str]] = None,
@@ -869,6 +876,16 @@ class FluxPipeline(
         if hasattr(self.scheduler.config, "use_flow_sigmas") and self.scheduler.config.use_flow_sigmas:
             sigmas = None
         image_seq_len = latents.shape[1]
+
+        from project_name.utils.context import global_context
+        global_context.update(
+            hidden_seq_height=(height // (self.vae_scale_factor) // 2),
+            hidden_seq_width=(width // (self.vae_scale_factor) // 2),
+            hidden_seq_len=image_seq_len,
+            encoder_hidden_seq_len=prompt_embeds.shape[1],
+            negative_encoder_hidden_seq_len=negative_prompt_embeds.shape[1],
+        )
+
         mu = calculate_shift(
             image_seq_len,
             self.scheduler.config.get("base_image_seq_len", 256),

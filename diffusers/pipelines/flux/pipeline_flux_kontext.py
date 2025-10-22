@@ -260,6 +260,13 @@ class FluxKontextPipeline(
         )
         self.default_sample_size = 128
 
+        from project_name.utils.context import global_context
+        global_context.update(
+            model_name="flux-kontext",
+            hidden_dim=self.transformer.norm2.normalized_shape[0],
+            encoder_hidden_dim=self.transformer.norm2.normalized_shape[0],
+        )
+
     # Copied from diffusers.pipelines.flux.pipeline_flux.FluxPipeline._get_t5_prompt_embeds
     def _get_t5_prompt_embeds(
         self,
@@ -1066,6 +1073,19 @@ class FluxKontextPipeline(
                 device,
                 batch_size * num_images_per_prompt,
             )
+        
+        from project_name.utils.context import global_context
+        # todo
+        global_context.update(
+            hidden_seq_height=(height // (self.vae_scale_factor) // 2),
+            hidden_seq_width=(width // (self.vae_scale_factor) // 2),
+            hidden_seq_len=image_seq_len,
+            hidden_extra_seq_height=?,
+            hidden_extra_seq_width=?,
+            hidden_extra_seq_len=image_latents.shape[1],
+            encoder_hidden_seq_len=prompt_embeds.shape[1],
+            negative_encoder_hidden_seq_len=negative_prompt_embeds.shape[1],
+        )
 
         # 6. Denoising loop
         # We set the index here to remove DtoH sync, helpful especially during compilation.
