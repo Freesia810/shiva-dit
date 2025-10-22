@@ -74,8 +74,8 @@ def test_global_context(model_type):
         prompt = "A small cactus with a happy face in the Sahara desert."
         image = pipe(
             prompt,
-            height=512,
-            width=1024,
+            height=1024,
+            width=2048,
         ).images[0]
     elif model_type == "qwen-image":
         positive_magic = {
@@ -130,4 +130,4 @@ def test_global_context(model_type):
 
 
 if __name__ == "__main__":
-    test_global_context("flux-dev")
+    test_global_context("pixart-sigma")
