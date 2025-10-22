@@ -716,6 +716,13 @@ class FluxKontextPipeline(
                 image_latents = torch.cat([image_latents], dim=0)
 
             image_latent_height, image_latent_width = image_latents.shape[2:]
+
+            from project_name.utils.context import global_context
+            global_context.update(
+                hidden_extra_seq_height=image_latent_height,
+                hidden_extra_seq_width=image_latent_width,
+            )
+
             image_latents = self._pack_latents(
                 image_latents, batch_size, num_channels_latents, image_latent_height, image_latent_width
             )
@@ -1075,13 +1082,10 @@ class FluxKontextPipeline(
             )
         
         from project_name.utils.context import global_context
-        # todo
         global_context.update(
             hidden_seq_height=(height // (self.vae_scale_factor) // 2),
             hidden_seq_width=(width // (self.vae_scale_factor) // 2),
             hidden_seq_len=image_seq_len,
-            hidden_extra_seq_height=?,
-            hidden_extra_seq_width=?,
             hidden_extra_seq_len=image_latents.shape[1],
             encoder_hidden_seq_len=prompt_embeds.shape[1],
             negative_encoder_hidden_seq_len=negative_prompt_embeds.shape[1],

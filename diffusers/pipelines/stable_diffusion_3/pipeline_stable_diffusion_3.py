@@ -1018,10 +1018,10 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
         from project_name.utils.context import global_context
         global_context.update(
             encoder_hidden_seq_len=prompt_embeds.shape[1], # cfg enable, prompt_embeds batch = 2
-            negetive_encoder_hidden_seq_len=prompt_embeds.shape[1], # cfg enable, prompt_embeds batch = 2
-            hidden_seq_height=(latents.shape[-2 // self.transformer.config.patch_size),
+            negetive_encoder_hidden_seq_len=prompt_embeds.shape[1] if self.do_classifier_free_guidance else None, # cfg enable, prompt_embeds batch = 2
+            hidden_seq_height=(latents.shape[-2] // self.transformer.config.patch_size),
             hidden_seq_width=(latents.shape[-1] // self.transformer.config.patch_size),
-            hidden_seq_len=(latents.shape[-2 // self.transformer.config.patch_size) * (latents.shape[-1] // self.transformer.config.patch_size)
+            hidden_seq_len=(latents.shape[-2] // self.transformer.config.patch_size) * (latents.shape[-1] // self.transformer.config.patch_size)
         )
 
         # 5. Prepare timesteps

@@ -1,12 +1,5 @@
-import torch.nn as nn
-
-from dataclasses import dataclass, field
-from typing import Dict, Any, Optional
-
-from diffusers.models.attention import JointTransformerBlock, BasicTransformerBlock
-from diffusers.models.transformers.transformer_flux import FluxTransformerBlock, FluxSingleTransformerBlock
-from diffusers.models.transformers.transformer_qwenimage import QwenImageTransformerBlock
-from diffusers.models.transformers.transformer_wan import WanTransformerBlock
+from dataclasses import dataclass
+from typing import Optional
 
 @dataclass
 class PipelineContext:
@@ -35,12 +28,44 @@ class PipelineContext:
                 setattr(self, k, v)
             else:
                 raise ValueError(f"Unknown attribute {k}")
-    
+
     def clear(self):
         for k in self.__dict__.keys():
             setattr(self, k, None)
-    
+
+    def pretty(self) -> str:
+        """Format the context as a nicely aligned multi-section string."""
+        groups = {
+            "Basic Info": ["model_name"],
+            "Dims": ["hidden_dim", "encoder_hidden_dim"],
+            "Hidden Seq": [
+                "hidden_seq_len",
+                "hidden_seq_height",
+                "hidden_seq_width",
+                "hidden_seq_frame",
+            ],
+            "Encoder Seq": [
+                "encoder_hidden_seq_len",
+                "negetive_encoder_hidden_seq_len",
+            ],
+            "Edit Extra": [
+                "hidden_extra_seq_len",
+                "hidden_extra_seq_height",
+                "hidden_extra_seq_width",
+            ],
+        }
+
+        lines = ["PipelineContext {"]
+        for section, keys in groups.items():
+            lines.append(f"  [{section}]")
+            for k in keys:
+                v = getattr(self, k, None)
+                lines.append(f"    {k:<32}: {v}")
+        lines.append("}")
+        return "\n".join(lines)
+
     def __repr__(self):
-        return str(self.__dict__)
+        return self.pretty()
+
 
 global_context = PipelineContext()

@@ -218,8 +218,8 @@ class FluxPipeline(
         from project_name.utils.context import global_context
         global_context.update(
             model_name="flux-dev",
-            hidden_dim=self.transformer.norm2.normalized_shape[0],
-            encoder_hidden_dim=self.transformer.norm2.normalized_shape[0],
+            hidden_dim=self.transformer.inner_dim,
+            encoder_hidden_dim=self.transformer.inner_dim,
         )
 
     def _get_t5_prompt_embeds(
@@ -883,7 +883,7 @@ class FluxPipeline(
             hidden_seq_width=(width // (self.vae_scale_factor) // 2),
             hidden_seq_len=image_seq_len,
             encoder_hidden_seq_len=prompt_embeds.shape[1],
-            negative_encoder_hidden_seq_len=negative_prompt_embeds.shape[1],
+            negetive_encoder_hidden_seq_len=negative_prompt_embeds.shape[1] if negative_prompt_embeds is not None else None,
         )
 
         mu = calculate_shift(
