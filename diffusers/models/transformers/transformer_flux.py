@@ -174,14 +174,10 @@ class FluxAttnProcessor:
             hidden_states = attn.to_out[1](hidden_states)
             encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
 
-            if self._hook is not None:
-                hidden_states, encoder_hidden_states = self._hook.hook_after_module(self._name, hidden_states, encoder_hidden_states)
-
             return hidden_states, encoder_hidden_states
         else:
             if self._hook is not None:
                 hidden_states, _ = self._hook.hook_after_attn(self._name, hidden_states)
-                hidden_states, _ = self._hook.hook_after_module(self._name, hidden_states)
             return hidden_states
 
 
@@ -450,7 +446,7 @@ class FluxSingleTransformerBlock(nn.Module):
         # after norm
         if self._hook is not None:
             encoder_hidden_states, hidden_states = hidden_states[:, :text_seq_len], hidden_states[:, text_seq_len:]
-            hidden_states, encoder_hidden_states = self._hook.hook_after_norm("parallel", hidden_states, encoder_hidden_states)
+            hidden_states, encoder_hidden_states, image_rotary_emb = self._hook.hook_after_norm("parallel", hidden_states, encoder_hidden_states, image_rotary_emb)
             hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
 
         mlp_hidden_states = self.act_mlp(self.proj_mlp(norm_hidden_states))
@@ -537,8 +533,8 @@ class FluxTransformerBlock(nn.Module):
 
         # self-attn's after norm
         if self._hook is not None:
-            norm_hidden_states, norm_encoder_hidden_states = self._hook.hook_after_norm(
-               'self-attn', norm_hidden_states, norm_encoder_hidden_states
+            norm_hidden_states, norm_encoder_hidden_states, image_rotary_emb = self._hook.hook_after_norm(
+               'self-attn', norm_hidden_states, norm_encoder_hidden_states, image_rotary_emb
             )
 
         # Attention.
@@ -554,12 +550,16 @@ class FluxTransformerBlock(nn.Module):
         elif len(attention_outputs) == 3:
             attn_output, context_attn_output, ip_attn_output = attention_outputs
 
-        # Process attention outputs for the `hidden_states`.
         attn_output = gate_msa.unsqueeze(1) * attn_output
-        hidden_states = hidden_states + attn_output
-
-        # Process attention outputs for the `encoder_hidden_states`.
         context_attn_output = c_gate_msa.unsqueeze(1) * context_attn_output
+
+        # self-attn's after module
+        if self._hook is not None:
+            attn_output, context_attn_output = self._hook.hook_after_module("self-attn", attn_output, context_attn_output)
+
+        # Process attention outputs for the `hidden_states`.
+        hidden_states = hidden_states + attn_output
+        # Process attention outputs for the `encoder_hidden_states`.
         encoder_hidden_states = encoder_hidden_states + context_attn_output
 
         # ffn's pre norm

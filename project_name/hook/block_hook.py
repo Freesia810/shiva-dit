@@ -80,6 +80,9 @@ from typing import Literal
 #                                   (QKV hook) (Attn Map hook)
 
 class BaseDiTBlockHook:
+    def __init__(self, **kwargs):
+        pass
+
     def register_name(self, layer_name: str):
         self.layer_name = layer_name
 
@@ -103,9 +106,13 @@ class BaseDiTBlockHook:
         module_name: Literal["self-attn", "cross-attn", "ffn"],
         norm_hidden_states: torch.Tensor,
         norm_encoder_hidden_states: torch.Tensor = None,
-        temb: torch.Tensor = None,
+        image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):
-        return norm_hidden_states, norm_encoder_hidden_states
+        if image_rotary_emb is not None:
+            return norm_hidden_states, norm_encoder_hidden_states, image_rotary_emb
+        else:
+            return norm_hidden_states, norm_encoder_hidden_states
+        
     
     def hook_after_module(
         self, 

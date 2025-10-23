@@ -718,19 +718,24 @@ class JointTransformerBlock(nn.Module):
 
         # Process attention outputs for the `hidden_states`.
         attn_output = gate_msa.unsqueeze(1) * attn_output
+        if self.context_pre_only:
+            context_attn_output = None
+        else:
+            context_attn_output = c_gate_msa.unsqueeze(1) * context_attn_output
+        
+        # self-attn's after module
+        if self._hook is not None:
+            attn_output, context_attn_output = self._hook.hook_after_module('self-attn', attn_output, context_attn_output)
+
         hidden_states = hidden_states + attn_output
+        if not self.context_pre_only:
+            encoder_hidden_states = encoder_hidden_states + context_attn_output
 
         if self.use_dual_attention:
             attn_output2 = self.attn2(hidden_states=norm_hidden_states2, **joint_attention_kwargs)
             attn_output2 = gate_msa2.unsqueeze(1) * attn_output2
             hidden_states = hidden_states + attn_output2
-        
-        if self.context_pre_only:
-            encoder_hidden_states = None
-        else:
-            context_attn_output = c_gate_msa.unsqueeze(1) * context_attn_output
-            encoder_hidden_states = encoder_hidden_states + context_attn_output
-        
+
         # ffn's pre norm
         if self._hook is not None:
             hidden_states, encoder_hidden_states = self._hook.hook_pre_norm(
@@ -742,10 +747,6 @@ class JointTransformerBlock(nn.Module):
         if not self.context_pre_only:
             norm_encoder_hidden_states = self.norm2_context(encoder_hidden_states)
             norm_encoder_hidden_states = norm_encoder_hidden_states * (1 + c_scale_mlp[:, None]) + c_shift_mlp[:, None]
-            if self._hook is not None:
-                norm_hidden_states, norm_encoder_hidden_states = self._hook.hook_after_norm(
-                'ffn', norm_hidden_states, norm_encoder_hidden_states
-                )
         else:
             norm_encoder_hidden_states = None
         
@@ -1069,6 +1070,10 @@ class BasicTransformerBlock(nn.Module):
             attn_output = gate_msa.unsqueeze(1) * attn_output
         elif self.norm_type == "ada_norm_single":
             attn_output = gate_msa * attn_output
+        
+        # self-attn's after module
+        if self._hook is not None:
+            attn_output, _ = self._hook.hook_after_module("self-attn", attn_output, None)
 
         hidden_states = attn_output + hidden_states
         if hidden_states.ndim == 4:
@@ -1109,6 +1114,11 @@ class BasicTransformerBlock(nn.Module):
                 attention_mask=encoder_attention_mask,
                 **cross_attention_kwargs,
             )
+
+            # cross-attn's after module
+            if self._hook is not None:
+                attn_output, _ = self._hook.hook_after_module("cross-attn", attn_output, None)
+
             hidden_states = attn_output + hidden_states
 
         # 4. Feed-forward

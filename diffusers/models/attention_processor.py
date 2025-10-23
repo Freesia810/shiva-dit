@@ -1532,12 +1532,8 @@ class JointAttnProcessor2_0:
         hidden_states = attn.to_out[1](hidden_states)
 
         if encoder_hidden_states is not None:
-            if self._hook is not None:
-                hidden_states, encoder_hidden_states = self._hook.hook_after_module(self._name, hidden_states, encoder_hidden_states)
             return hidden_states, encoder_hidden_states
         else:
-            if self._hook is not None:
-                hidden_states, _ = self._hook.hook_after_module(self._name, hidden_states)
             return hidden_states
 
 
@@ -2833,10 +2829,6 @@ class AttnProcessor2_0:
             hidden_states = hidden_states + residual
 
         hidden_states = hidden_states / attn.rescale_output_factor
-
-        # attn's after module
-        if self._hook is not None:
-            hidden_states, _ = self._hook.hook_after_module(self._name, hidden_states, None)
 
         return hidden_states
 

@@ -124,7 +124,7 @@ def select_dst_src_tokens(scores: torch.Tensor, dst_idx: torch.Tensor, src_idx: 
     # src_idx: (1, N - num_dst, 1)
     k = min(k, scores.shape[1])
     node_max, node_idx = scores.max(dim=-1, keepdim=True) # (B, N - num_dst, 1)
-    edge_idx = node_max.argsort(dim=-1, descending=True) # (B, N - num_dst, 1)
+    edge_idx = node_max.argsort(dim=-2, descending=True) # (B, N - num_dst, 1)
 
     merge_src_idx = edge_idx[..., :k, :]  # (B, k, 1)
     unmerge_src_idx = edge_idx[..., k:, :]  # (B, N - num_dst - k, 1)
@@ -147,7 +147,7 @@ def merge_dst_src_tokens(x: torch.Tensor, dst_idx: torch.Tensor, src_idx: torch.
     
     merge_src_tokens = torch.gather(src_tokens, dim=-2, index=merge_src_idx.expand(B, k, C)) # (B, k, D)
     unmerge_src_tokens = torch.gather(src_tokens, dim=-2, index=unmerge_src_idx.expand(B, num_src - k, C)) # (B, N - num_dst - k, D)
-    merge_dst_tokens = dst_tokens.scatter_reduce(-2, merge_dst_idx.expand(B, k, C), merge_src_tokens, reduce=reduce_mode) # (B, num_dst, D)
+    merge_dst_tokens = dst_tokens.scatter_reduce(dim=-2, index=merge_dst_idx.expand(B, k, C), src=merge_src_tokens, reduce=reduce_mode) # (B, num_dst, D)
 
     return torch.cat([unmerge_src_tokens, merge_dst_tokens], dim=1) # (B, N - k, D)
 

@@ -8,7 +8,7 @@ from diffusers.models.attention import JointTransformerBlock, BasicTransformerBl
 from diffusers.models.transformers.transformer_flux import FluxTransformerBlock, FluxSingleTransformerBlock
 from diffusers.models.transformers.transformer_qwenimage import QwenImageTransformerBlock
 from diffusers.models.transformers.transformer_wan import WanTransformerBlock
-from project_name.utils.block_hook import BaseDiTBlockHook
+from project_name.hook.block_hook import BaseDiTBlockHook
 
 
 # SD3 -> JointTransformerBlock
