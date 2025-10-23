@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import Literal, Tuple, Union
+from typing import Literal, Optional, Tuple, Union
 from diffusers.models.transformers.transformer_flux import FluxSingleTransformerBlock
 from project_name.hook import BaseDiTBlockHook, HookManager
 from project_name.utils import (
@@ -8,6 +8,7 @@ from project_name.utils import (
     get_dst_src_tokens,
     sample_dst_src_with_2D_stride,
     select_dst_src_tokens,
+    gather_dst_unmerge_tokens,
     merge_dst_src_tokens,
     unmerge_dst_src_tokens,
     get_pipeline,
@@ -66,7 +67,7 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
             'merge_src_idx': None,
             'unmerge_src_idx': None,
         }
-    
+
     def on_register_hook(self, block: nn.Module):
         if isinstance(block, FluxSingleTransformerBlock):
             for key in ('self-attn', 'cross-attn', 'ffn'):
@@ -75,7 +76,7 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
         else:
             if self.merge_config.get('parallel'):
                 self.merge_config['parallel'] = False
-        
+
         self.enable = any(self.merge_config.values())
 
     def calculate_scores(self, x: torch.Tensor, dst_idx: torch.Tensor, src_idx: torch.Tensor) -> torch.Tensor:
@@ -165,12 +166,28 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
                     indices_dict['merge_src_idx'],
                     indices_dict['unmerge_src_idx'],
                 )
-            
+
             def _select_image_rotary_emb(image_rotary_emb, encoder_hidden_seq_len, hidden_seq_len, hidden_extra_seq_len=None):
                 ## normal [encoder, hidden]
                 ## flux-kontext, qwen-edit [encoder, hidden, extra_hidden]
                 cos, sin = image_rotary_emb
-
+                cos_encoder = cos[:encoder_hidden_seq_len, ...]
+                sin_encoder = sin[:encoder_hidden_seq_len, ...]
+                cos_hidden = cos[encoder_hidden_seq_len:encoder_hidden_seq_len + hidden_seq_len, ...]
+                sin_hidden = sin[encoder_hidden_seq_len:encoder_hidden_seq_len + hidden_seq_len, ...]
+                cos_hidden = gather_dst_unmerge_tokens(cos_hidden, self.indices_dict['dst_idx'], self.indices_dict['src_idx'], self.indices_dict['merge_dst_idx'], self.indices_dict['unmerge_src_idx'])
+                sin_hidden = gather_dst_unmerge_tokens(sin_hidden, self.indices_dict['dst_idx'], self.indices_dict['src_idx'], self.indices_dict['merge_dst_idx'], self.indices_dict['unmerge_src_idx'])
+                if hidden_extra_seq_len is not None:
+                    cos_extra_hidden = cos[encoder_hidden_seq_len + hidden_seq_len:, ...]
+                    sin_extra_hidden = sin[encoder_hidden_seq_len + hidden_seq_len:, ...]
+                    cos_extra_hidden = gather_dst_unmerge_tokens(cos_extra_hidden, self.extra_indices_dict['dst_idx'], self.extra_indices_dict['src_idx'], self.extra_indices_dict['merge_dst_idx'], self.extra_indices_dict['unmerge_src_idx'])
+                    sin_extra_hidden = gather_dst_unmerge_tokens(sin_extra_hidden, self.extra_indices_dict['dst_idx'], self.extra_indices_dict['src_idx'], self.extra_indices_dict['merge_dst_idx'], self.extra_indices_dict['unmerge_src_idx'])
+                    cos = torch.cat([cos_encoder, cos_hidden, cos_extra_hidden], dim=0)
+                    sin = torch.cat([sin_encoder, sin_hidden, sin_extra_hidden], dim=0)
+                else:
+                    cos = torch.cat([cos_encoder, cos_hidden], dim=0)
+                    sin = torch.cat([sin_encoder, sin_hidden], dim=0)
+                return (cos, sin)
 
             if global_context.hidden_extra_seq_len is not None:
                 # dual hidden states for edit task
@@ -180,6 +197,16 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
                 # normal case
                 norm_hidden_states = _merge(norm_hidden_states, self.indices_dict)
 
+            if image_rotary_emb is not None:
+                image_rotary_emb = _select_image_rotary_emb(
+                    image_rotary_emb,
+                    encoder_hidden_seq_len=global_context.encoder_hidden_seq_len,
+                    hidden_seq_len=global_context.hidden_seq_len,
+                    hidden_extra_seq_len=global_context.hidden_extra_seq_len,
+                )
+
+        if image_rotary_emb is not None:
+            return norm_hidden_states, norm_encoder_hidden_states, image_rotary_emb
         return norm_hidden_states, norm_encoder_hidden_states
 
     def hook_after_module(
@@ -208,7 +235,7 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
             else:
                 # normal case
                 hidden_output = _unmerge(hidden_output, self.indices_dict)
-            
+
         if module_name in ("ffn", "parallel"):
             # clear indices after ffn
             self._clear()
@@ -221,12 +248,12 @@ if __name__ == "__main__":
 
     tomesd_config = {
         "stride": (2, 2),
-        "merged_ratio": 0.1,
+        "merged_ratio": 0.2,
         "merge_config": {
             "self-attn": True,
             "cross-attn": False,
             "ffn": False,
-            "parallel": False,
+            "parallel": True,
         },
         "generator": torch.Generator("cuda").manual_seed(0),
     }

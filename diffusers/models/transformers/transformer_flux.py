@@ -417,7 +417,7 @@ class FluxSingleTransformerBlock(nn.Module):
         )
 
         self._hook = None
-    
+
     def register_hook(self, name, hook):
         self._name = name
         self._hook = hook
@@ -445,9 +445,21 @@ class FluxSingleTransformerBlock(nn.Module):
 
         # after norm
         if self._hook is not None:
-            encoder_hidden_states, hidden_states = hidden_states[:, :text_seq_len], hidden_states[:, text_seq_len:]
-            hidden_states, encoder_hidden_states, image_rotary_emb = self._hook.hook_after_norm("parallel", hidden_states, encoder_hidden_states, image_rotary_emb)
-            hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
+            norm_encoder_hidden_states, norm_hidden_states = (
+                norm_hidden_states[:, :text_seq_len],
+                norm_hidden_states[:, text_seq_len:],
+            )
+            norm_hidden_states, norm_encoder_hidden_states, image_rotary_emb = (
+                self._hook.hook_after_norm(
+                    "parallel",
+                    norm_hidden_states,
+                    norm_encoder_hidden_states,
+                    image_rotary_emb,
+                )
+            )
+            norm_hidden_states = torch.cat(
+                [norm_encoder_hidden_states, norm_hidden_states], dim=1
+            )
 
         mlp_hidden_states = self.act_mlp(self.proj_mlp(norm_hidden_states))
         joint_attention_kwargs = joint_attention_kwargs or {}

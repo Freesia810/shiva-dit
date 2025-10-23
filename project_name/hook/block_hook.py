@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import Literal
+from typing import Literal, Optional, Tuple
 
 # ===============================================================
 #                    DiT Block Forward Overview
