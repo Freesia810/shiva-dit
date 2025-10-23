@@ -119,6 +119,8 @@ def test_global_context(model_type):
         image = pipe(
             image=input_image,
             prompt=prompt,
+            height=1024,
+            width=1024,
             generator=torch.manual_seed(0),
             true_cfg_scale=4.0,
             negative_prompt=" ",
@@ -130,4 +132,4 @@ def test_global_context(model_type):
 
 
 if __name__ == "__main__":
-    test_global_context("pixart-sigma")
+    test_global_context("qwen-image-edit")

@@ -12,7 +12,7 @@ class PipelineContext:
     hidden_seq_width: Optional[int] = None
 
     encoder_hidden_seq_len: Optional[int] = None
-    negetive_encoder_hidden_seq_len: Optional[int] = None
+    negative_encoder_hidden_seq_len: Optional[int] = None
 
     # for edit task
     hidden_extra_seq_len: Optional[int] = None
@@ -46,7 +46,7 @@ class PipelineContext:
             ],
             "Encoder Seq": [
                 "encoder_hidden_seq_len",
-                "negetive_encoder_hidden_seq_len",
+                "negative_encoder_hidden_seq_len",
             ],
             "Edit Extra": [
                 "hidden_extra_seq_len",

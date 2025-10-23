@@ -263,8 +263,8 @@ class FluxKontextPipeline(
         from project_name.utils.context import global_context
         global_context.update(
             model_name="flux-kontext",
-            hidden_dim=self.transformer.norm2.normalized_shape[0],
-            encoder_hidden_dim=self.transformer.norm2.normalized_shape[0],
+            hidden_dim=self.transformer.inner_dim,
+            encoder_hidden_dim=self.transformer.inner_dim,
         )
 
     # Copied from diffusers.pipelines.flux.pipeline_flux.FluxPipeline._get_t5_prompt_embeds
@@ -719,8 +719,8 @@ class FluxKontextPipeline(
 
             from project_name.utils.context import global_context
             global_context.update(
-                hidden_extra_seq_height=image_latent_height,
-                hidden_extra_seq_width=image_latent_width,
+                hidden_extra_seq_height=image_latent_height // 2,
+                hidden_extra_seq_width=image_latent_width // 2,
             )
 
             image_latents = self._pack_latents(
@@ -1088,7 +1088,7 @@ class FluxKontextPipeline(
             hidden_seq_len=image_seq_len,
             hidden_extra_seq_len=image_latents.shape[1],
             encoder_hidden_seq_len=prompt_embeds.shape[1],
-            negative_encoder_hidden_seq_len=negative_prompt_embeds.shape[1],
+            negative_encoder_hidden_seq_len=negative_prompt_embeds.shape[1] if negative_prompt_embeds is not None else None,
         )
 
         # 6. Denoising loop

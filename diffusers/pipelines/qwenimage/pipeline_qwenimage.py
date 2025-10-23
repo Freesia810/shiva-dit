@@ -689,8 +689,8 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
             hidden_seq_height=img_shapes[0][0][1],
             hidden_seq_width=img_shapes[0][0][2],
             hidden_seq_len=image_seq_len,
-            encoder_hidden_seq_len=txt_seq_lens,
-            negetive_encoder_hidden_seq_len=negative_txt_seq_lens,
+            encoder_hidden_seq_len=txt_seq_lens[0] if txt_seq_lens is not None else None,
+            negative_encoder_hidden_seq_len=negative_txt_seq_lens[0] if negative_txt_seq_lens is not None else None,
         )
 
         # 6. Denoising loop

@@ -883,7 +883,7 @@ class FluxPipeline(
             hidden_seq_width=(width // (self.vae_scale_factor) // 2),
             hidden_seq_len=image_seq_len,
             encoder_hidden_seq_len=prompt_embeds.shape[1],
-            negetive_encoder_hidden_seq_len=negative_prompt_embeds.shape[1] if negative_prompt_embeds is not None else None,
+            negative_encoder_hidden_seq_len=negative_prompt_embeds.shape[1] if negative_prompt_embeds is not None else None,
         )
 
         mu = calculate_shift(
