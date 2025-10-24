@@ -20,6 +20,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from project_name.hook.hook_manager import delegated_forward
+
 from ...configuration_utils import ConfigMixin, register_to_config
 from ...loaders import FluxTransformer2DLoadersMixin, FromOriginalModelMixin, PeftAdapterMixin
 from ...utils import USE_PEFT_BACKEND, logging, scale_lora_layers, unscale_lora_layers
@@ -424,6 +426,7 @@ class FluxSingleTransformerBlock(nn.Module):
         self.attn.processor.register_hook('self-attn', hook)
         hook.on_register_hook(self)
 
+    @delegated_forward
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -485,7 +488,7 @@ class FluxSingleTransformerBlock(nn.Module):
         # final's after module
         if self._hook is not None:
             hidden_states, encoder_hidden_states = self._hook.hook_after_module('dit', hidden_states, encoder_hidden_states)
-        
+
         if hidden_states.dtype == torch.float16:
             hidden_states = hidden_states.clip(-65504, 65504)
         if encoder_hidden_states.dtype == torch.float16:
@@ -523,13 +526,14 @@ class FluxTransformerBlock(nn.Module):
         self.ff_context = FeedForward(dim=dim, dim_out=dim, activation_fn="gelu-approximate")
 
         self._hook = None
-    
+
     def register_hook(self, name, hook):
         self._name = name
         self._hook = hook
         self.attn.processor.register_hook('self-attn', hook)
         hook.on_register_hook(self)
 
+    @delegated_forward
     def forward(
         self,
         hidden_states: torch.Tensor,

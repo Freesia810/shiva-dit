@@ -21,6 +21,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from project_name.hook.delegate import delegated_forward
+
 from ...configuration_utils import ConfigMixin, register_to_config
 from ...loaders import FromOriginalModelMixin, PeftAdapterMixin
 from ...utils import USE_PEFT_BACKEND, logging, scale_lora_layers, unscale_lora_layers
@@ -435,6 +437,7 @@ class QwenImageTransformerBlock(nn.Module):
         shift, scale, gate = mod_params.chunk(3, dim=-1)
         return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1), gate.unsqueeze(1)
 
+    @delegated_forward
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -463,7 +466,7 @@ class QwenImageTransformerBlock(nn.Module):
         # Process text stream - norm1 + modulation
         txt_normed = self.txt_norm1(encoder_hidden_states)
         txt_modulated, txt_gate1 = self._modulate(txt_normed, txt_mod1)
-        
+
         # self-attn's after norm
         if self._hook is not None:
             img_modulated, txt_modulated = self._hook.hook_after_norm("self-attn", img_modulated, txt_modulated)
@@ -507,7 +510,7 @@ class QwenImageTransformerBlock(nn.Module):
         img_modulated2, img_gate2 = self._modulate(img_normed2, img_mod2)
         txt_normed2 = self.txt_norm2(encoder_hidden_states)
         txt_modulated2, txt_gate2 = self._modulate(txt_normed2, txt_mod2)
-        
+
         # ffn's after norm
         if self._hook is not None:
             img_modulated2, txt_modulated2 = self._hook.hook_after_norm("ffn", img_modulated2, txt_modulated2)

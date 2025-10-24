@@ -92,8 +92,6 @@ class BaseDiTBlockHook:
 
     def on_register_hook(self, block: nn.Module):
         pass
-    
-    #### decorator: hook out of blocks
 
     #### hook in blocks
     def hook_pre_norm(
@@ -107,7 +105,7 @@ class BaseDiTBlockHook:
         if image_rotary_emb is not None:
             return hidden_states, encoder_hidden_states, image_rotary_emb
         return hidden_states, encoder_hidden_states
-    
+
     def hook_after_norm(
         self, 
         module_name: Literal["self-attn", "cross-attn", "ffn", "dit"],
@@ -115,7 +113,7 @@ class BaseDiTBlockHook:
         norm_encoder_hidden_states: torch.Tensor = None,
     ):
         return norm_hidden_states, norm_encoder_hidden_states
-        
+
     def hook_after_module(
         self, 
         module_name: Literal["self-attn", "cross-attn", "ffn"],

@@ -1,5 +1,5 @@
 import torch
-from typing import Literal
+from typing import Literal, Optional, Tuple
 from project_name.hook import BaseDiTBlockHook,HookManager
 
 

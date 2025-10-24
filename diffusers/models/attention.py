@@ -18,6 +18,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from project_name.hook.delegate import delegated_forward
+
 from ..utils import deprecate, logging
 from ..utils.import_utils import is_torch_npu_available, is_torch_xla_available, is_xformers_available
 from ..utils.torch_utils import maybe_allow_in_graph
@@ -659,7 +661,7 @@ class JointTransformerBlock(nn.Module):
         self._chunk_dim = 0
 
         self._hook = None
-    
+
     def register_hook(self, name, hook):
         self._name = name
         self._hook = hook
@@ -673,6 +675,7 @@ class JointTransformerBlock(nn.Module):
         self._chunk_size = chunk_size
         self._chunk_dim = dim
 
+    @delegated_forward
     def forward(
         self,
         hidden_states: torch.FloatTensor,
@@ -702,7 +705,7 @@ class JointTransformerBlock(nn.Module):
             norm_encoder_hidden_states, c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp = self.norm1_context(
                 encoder_hidden_states, emb=temb
             )
-        
+
         # self-attn's after norm
         if self._hook is not None:
             norm_hidden_states, norm_encoder_hidden_states = self._hook.hook_after_norm(
@@ -722,7 +725,7 @@ class JointTransformerBlock(nn.Module):
             context_attn_output = None
         else:
             context_attn_output = c_gate_msa.unsqueeze(1) * context_attn_output
-        
+
         # self-attn's after module
         if self._hook is not None:
             attn_output, context_attn_output = self._hook.hook_after_module('self-attn', attn_output, context_attn_output)
@@ -749,7 +752,7 @@ class JointTransformerBlock(nn.Module):
             norm_encoder_hidden_states = norm_encoder_hidden_states * (1 + c_scale_mlp[:, None]) + c_shift_mlp[:, None]
         else:
             norm_encoder_hidden_states = None
-        
+
         # ffn's after norm
         if self._hook is not None:
             norm_hidden_states, norm_encoder_hidden_states = self._hook.hook_after_norm(
@@ -992,7 +995,7 @@ class BasicTransformerBlock(nn.Module):
         self._chunk_dim = 0
 
         self._hook = None
-    
+
     def register_hook(self, name, hook):
         self._name = name
         self._hook = hook
@@ -1006,6 +1009,7 @@ class BasicTransformerBlock(nn.Module):
         self._chunk_size = chunk_size
         self._chunk_dim = dim
 
+    @delegated_forward
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1050,7 +1054,7 @@ class BasicTransformerBlock(nn.Module):
 
         if self.pos_embed is not None:
             norm_hidden_states = self.pos_embed(norm_hidden_states)
-        
+
         # self-attn's after norm
         if self._hook is not None:
             norm_hidden_states, _ = self._hook.hook_after_norm("self-attn", norm_hidden_states, None)
@@ -1070,7 +1074,7 @@ class BasicTransformerBlock(nn.Module):
             attn_output = gate_msa.unsqueeze(1) * attn_output
         elif self.norm_type == "ada_norm_single":
             attn_output = gate_msa * attn_output
-        
+
         # self-attn's after module
         if self._hook is not None:
             attn_output, _ = self._hook.hook_after_module("self-attn", attn_output, None)
@@ -1103,7 +1107,7 @@ class BasicTransformerBlock(nn.Module):
 
             if self.pos_embed is not None and self.norm_type != "ada_norm_single":
                 norm_hidden_states = self.pos_embed(norm_hidden_states)
-            
+
             # cross-attn's after norm
             if self._hook is not None:
                 norm_hidden_states, encoder_hidden_states = self._hook.hook_after_norm("cross-attn", norm_hidden_states, encoder_hidden_states)
@@ -1138,7 +1142,7 @@ class BasicTransformerBlock(nn.Module):
         if self.norm_type == "ada_norm_single":
             norm_hidden_states = self.norm2(hidden_states)
             norm_hidden_states = norm_hidden_states * (1 + scale_mlp) + shift_mlp
-        
+
         # ffn's after norm
         if self._hook is not None:
             norm_hidden_states, _ = self._hook.hook_after_norm("ffn", norm_hidden_states, None)
@@ -1153,7 +1157,7 @@ class BasicTransformerBlock(nn.Module):
             ff_output = gate_mlp.unsqueeze(1) * ff_output
         elif self.norm_type == "ada_norm_single":
             ff_output = gate_mlp * ff_output
-        
+
         # ffn's after module
         if self._hook is not None:
             ff_output, _ = self._hook.hook_after_module("ffn", ff_output, None)

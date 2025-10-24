@@ -118,7 +118,7 @@ def process_quick_start(pipeline: DiffusionPipeline, **kwargs):
         kwargs.setdefault('num_inference_steps', 40)
         return pipeline(**kwargs).frames[0]
 
-def parse_image_rotary_emb(model_type: Literal["sd3", "flux-dev", "pixart-sigma", "qwen-image", "flux-kontext", "qwen-image-edit", "wan"], image_rotary_emb: any, hidden_seq_len, encoder_hidden_seq_len, extra_hidden_seq_len=None):
+def parse_image_rotary_emb(model_type: Literal["sd3", "flux-dev", "pixart-sigma", "qwen-image", "flux-kontext", "qwen-image-edit", "wan"], image_rotary_emb: any, hidden_seq_len, encoder_hidden_seq_len, split_extra: bool = True):
     ## flux-dev ([encoder + hidden], [encoder + hidden])
     ## flux-kontext ([encoder + hidden + extra_hidden], [encoder + hidden + extra_hidden])
     ## qwen-image (([hidden], [hidden]), ([encoder], [encoder])) or ([hidden], [encoder])
@@ -133,9 +133,25 @@ def parse_image_rotary_emb(model_type: Literal["sd3", "flux-dev", "pixart-sigma"
     elif model_type == "flux-kontext":
         # ([encoder + hidden + extra_hidden], [encoder + hidden + extra_hidden])
         cos, sin = image_rotary_emb
-        hidden_rotary_emb = (cos[encoder_hidden_seq_len:encoder_hidden_seq_len + hidden_seq_len, ...], sin[encoder_hidden_seq_len:encoder_hidden_seq_len + hidden_seq_len, ...])
-        encoder_rotary_emb = (cos[:encoder_hidden_seq_len, ...], sin[:encoder_hidden_seq_len, ...])
-        extra_hidden_rotary_emb = (cos[encoder_hidden_seq_len + hidden_seq_len:, ...], sin[encoder_hidden_seq_len + hidden_seq_len:, ...])
+        encoder_rotary_emb = (
+            cos[:encoder_hidden_seq_len, ...],
+            sin[:encoder_hidden_seq_len, ...],
+        )
+        if split_extra:
+            hidden_rotary_emb = (
+                cos[encoder_hidden_seq_len:encoder_hidden_seq_len + hidden_seq_len, ...],
+                sin[encoder_hidden_seq_len:encoder_hidden_seq_len + hidden_seq_len, ...],
+            )
+            extra_hidden_rotary_emb = (
+                cos[encoder_hidden_seq_len + hidden_seq_len:, ...],
+                sin[encoder_hidden_seq_len + hidden_seq_len:, ...],
+            )
+        else:
+            hidden_rotary_emb = (
+                cos[encoder_hidden_seq_len:, ...],
+                sin[encoder_hidden_seq_len:, ...],
+            )
+            extra_hidden_rotary_emb = None
         return hidden_rotary_emb, encoder_rotary_emb, extra_hidden_rotary_emb
     elif model_type == "qwen-image":
         # (([hidden], [hidden]), ([encoder], [encoder])) or ([hidden], [encoder])
@@ -148,13 +164,21 @@ def parse_image_rotary_emb(model_type: Literal["sd3", "flux-dev", "pixart-sigma"
         # (([hidden + extra_hidden], [hidden + extra_hidden]), ([encoder], [encoder])) or ([hidden + extra_hidden], [encoder])
         hidden_emb, encoder_emb = image_rotary_emb
         if not isinstance(hidden_emb, tuple):
-            hidden_rotary_emb = (hidden_emb[:hidden_seq_len, ...],)
-            extra_hidden_rotary_emb = (hidden_emb[hidden_seq_len:, ...],)
             encoder_emb = (encoder_emb,)
+            if split_extra:
+                hidden_rotary_emb = (hidden_emb[:hidden_seq_len, ...],)
+                extra_hidden_rotary_emb = (hidden_emb[hidden_seq_len:, ...],)
+            else:
+                hidden_rotary_emb = (hidden_emb,)
+                extra_hidden_rotary_emb = None
         else:
             hidden_rotary_emb_cos, hidden_rotary_emb_sin = hidden_emb
-            hidden_rotary_emb = (hidden_rotary_emb_cos[:hidden_seq_len, ...], hidden_rotary_emb_sin[:hidden_seq_len, ...])
-            extra_hidden_rotary_emb = (hidden_rotary_emb_cos[hidden_seq_len:, ...], hidden_rotary_emb_sin[hidden_seq_len:, ...])
+            if split_extra:
+                hidden_rotary_emb = (hidden_rotary_emb_cos[:hidden_seq_len, ...], hidden_rotary_emb_sin[:hidden_seq_len, ...])
+                extra_hidden_rotary_emb = (hidden_rotary_emb_cos[hidden_seq_len:, ...], hidden_rotary_emb_sin[hidden_seq_len:, ...])
+            else:
+                hidden_rotary_emb = (hidden_rotary_emb_cos, hidden_rotary_emb_sin)
+                extra_hidden_rotary_emb = None
         return hidden_rotary_emb, encoder_emb, extra_hidden_rotary_emb
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
@@ -165,20 +189,31 @@ def join_image_rotary_emb(model_type: Literal["sd3", "flux-dev", "pixart-sigma",
         sin = torch.cat([encoder_rotary_emb[1], hidden_rotary_emb[1]], dim=0)
         return (cos, sin)
     elif model_type == 'flux-kontext':
-        cos = torch.cat([encoder_rotary_emb[0], hidden_rotary_emb[0], extra_hidden_rotary_emb[0]], dim=0)
-        sin = torch.cat([encoder_rotary_emb[1], hidden_rotary_emb[1], extra_hidden_rotary_emb[1]], dim=0)
-        return (cos, sin)
+        if extra_hidden_rotary_emb is None:
+            cos = torch.cat([encoder_rotary_emb[0], hidden_rotary_emb[0]], dim=0)
+            sin = torch.cat([encoder_rotary_emb[1], hidden_rotary_emb[1]], dim=0)
+            return (cos, sin)
+        else:
+            cos = torch.cat([encoder_rotary_emb[0], hidden_rotary_emb[0], extra_hidden_rotary_emb[0]], dim=0)
+            sin = torch.cat([encoder_rotary_emb[1], hidden_rotary_emb[1], extra_hidden_rotary_emb[1]], dim=0)
+            return (cos, sin)
     elif model_type == 'qwen-image':
         if len(hidden_rotary_emb) == 1:
             return (hidden_rotary_emb[0], encoder_rotary_emb[0])
         return (hidden_rotary_emb, encoder_rotary_emb)
     elif model_type == 'qwen-image-edit':
         if len(hidden_rotary_emb) == 1:
-            hidden_rotary_emb = torch.cat([hidden_rotary_emb[0], extra_hidden_rotary_emb[0]], dim=0)
-            return (hidden_rotary_emb, encoder_rotary_emb[0])
+            if extra_hidden_rotary_emb is None:
+                return (hidden_rotary_emb[0], encoder_rotary_emb[0])
+            else:
+                hidden_rotary_emb = torch.cat([hidden_rotary_emb[0], extra_hidden_rotary_emb[0]], dim=0)
+                return (hidden_rotary_emb, encoder_rotary_emb[0])
         else:
-            cos = torch.cat([hidden_rotary_emb[0], extra_hidden_rotary_emb[0]], dim=0)
-            sin = torch.cat([hidden_rotary_emb[1], extra_hidden_rotary_emb[1]], dim=0)
-            return ((cos, sin), encoder_rotary_emb)
+            if extra_hidden_rotary_emb is None:
+                return (hidden_rotary_emb, encoder_rotary_emb)
+            else:
+                cos = torch.cat([hidden_rotary_emb[0], extra_hidden_rotary_emb[0]], dim=0)
+                sin = torch.cat([hidden_rotary_emb[1], extra_hidden_rotary_emb[1]], dim=0)
+                return ((cos, sin), encoder_rotary_emb)
     else:
         raise ValueError(f"Unsupported model type: {model_type}")
