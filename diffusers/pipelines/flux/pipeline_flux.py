@@ -958,6 +958,8 @@ class FluxPipeline(
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
 
                 with self.transformer.cache_context("cond"):
+                    from project_name.utils.context import global_context
+                    global_context.update(encoder_flag=True)
                     noise_pred = self.transformer(
                         hidden_states=latents,
                         timestep=timestep / 1000,
@@ -975,6 +977,8 @@ class FluxPipeline(
                         self._joint_attention_kwargs["ip_adapter_image_embeds"] = negative_image_embeds
 
                     with self.transformer.cache_context("uncond"):
+                        from project_name.utils.context import global_context
+                        global_context.update(encoder_flag=False)
                         neg_noise_pred = self.transformer(
                             hidden_states=latents,
                             timestep=timestep / 1000,

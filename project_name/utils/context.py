@@ -11,6 +11,8 @@ class PipelineContext:
     hidden_seq_height: Optional[int] = None
     hidden_seq_width: Optional[int] = None
 
+    encoder_flag: Optional[bool] = None
+
     encoder_hidden_seq_len: Optional[int] = None
     negative_encoder_hidden_seq_len: Optional[int] = None
 

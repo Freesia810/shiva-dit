@@ -1109,6 +1109,8 @@ class FluxKontextPipeline(
                     latent_model_input = torch.cat([latents, image_latents], dim=1)
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
 
+                from project_name.utils.context import global_context
+                global_context.update(encoder_flag=True)
                 noise_pred = self.transformer(
                     hidden_states=latent_model_input,
                     timestep=timestep / 1000,
@@ -1125,6 +1127,8 @@ class FluxKontextPipeline(
                 if do_true_cfg:
                     if negative_image_embeds is not None:
                         self._joint_attention_kwargs["ip_adapter_image_embeds"] = negative_image_embeds
+                    from project_name.utils.context import global_context
+                    global_context.update(encoder_flag=False)
                     neg_noise_pred = self.transformer(
                         hidden_states=latent_model_input,
                         timestep=timestep / 1000,

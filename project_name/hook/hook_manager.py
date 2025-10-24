@@ -113,7 +113,7 @@ class HookManager:
                     hook_cls, kwargs = cls._resolve_hook_config(name)
                     hook = hook_cls(**deepcopy(kwargs))
                     hook_name = f"{model_attr}.{name}"
-                    hook.register_name(hook_name)
+                    hook.register_name(model_type, hook_name)
                     if hasattr(module, "register_hook"):
                         module.register_hook(hook_name, hook)
                     else:

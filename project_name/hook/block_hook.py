@@ -83,7 +83,8 @@ class BaseDiTBlockHook:
     def __init__(self, **kwargs):
         pass
 
-    def register_name(self, layer_name: str):
+    def register_name(self, model_type:str, layer_name: str):
+        self.model_type = model_type
         self.layer_name = layer_name
 
     def close(self):

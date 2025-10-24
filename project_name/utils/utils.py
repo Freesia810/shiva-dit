@@ -1,6 +1,8 @@
 import torch
-from typing import Literal
+from typing import Literal, Tuple
+from PIL import Image
 from diffusers import DiffusionPipeline
+from diffusers.utils import load_image
 from diffusers.models.autoencoders import AutoencoderKLWan
 from diffusers.pipelines import (
     StableDiffusion3Pipeline,
@@ -92,6 +94,7 @@ def process_quick_start(pipeline: DiffusionPipeline, **kwargs):
         kwargs.setdefault('image', input_image)
         kwargs.setdefault('prompt', "Add a hat to the cat")
         kwargs.setdefault('guidance_scale', 2.5)
+        kwargs.setdefault('generator', torch.Generator(device="cuda").manual_seed(0))
         return pipeline(**kwargs).images[0]
     elif isinstance(pipeline, QwenImageEditPipeline):
         input_image = Image.open("pic/rabbit.png").convert("RGB")
@@ -114,3 +117,68 @@ def process_quick_start(pipeline: DiffusionPipeline, **kwargs):
         kwargs.setdefault('guidance_scale_2', 3.0)
         kwargs.setdefault('num_inference_steps', 40)
         return pipeline(**kwargs).frames[0]
+
+def parse_image_rotary_emb(model_type: Literal["sd3", "flux-dev", "pixart-sigma", "qwen-image", "flux-kontext", "qwen-image-edit", "wan"], image_rotary_emb: any, hidden_seq_len, encoder_hidden_seq_len, extra_hidden_seq_len=None):
+    ## flux-dev ([encoder + hidden], [encoder + hidden])
+    ## flux-kontext ([encoder + hidden + extra_hidden], [encoder + hidden + extra_hidden])
+    ## qwen-image (([hidden], [hidden]), ([encoder], [encoder])) or ([hidden], [encoder])
+    ## qwen-image-edit (([hidden + extra_hidden], [hidden + extra_hidden]), ([encoder] + [encoder])) or ([hidden + extra_hidden], [encoder])
+
+    if model_type == "flux-dev":
+        # ([encoder + hidden], [encoder + hidden])
+        cos, sin = image_rotary_emb
+        hidden_rotary_emb = (cos[encoder_hidden_seq_len:, ...], sin[encoder_hidden_seq_len:, ...])
+        encoder_rotary_emb = (cos[:encoder_hidden_seq_len, ...], sin[:encoder_hidden_seq_len, ...])
+        return hidden_rotary_emb, encoder_rotary_emb, None
+    elif model_type == "flux-kontext":
+        # ([encoder + hidden + extra_hidden], [encoder + hidden + extra_hidden])
+        cos, sin = image_rotary_emb
+        hidden_rotary_emb = (cos[encoder_hidden_seq_len:encoder_hidden_seq_len + hidden_seq_len, ...], sin[encoder_hidden_seq_len:encoder_hidden_seq_len + hidden_seq_len, ...])
+        encoder_rotary_emb = (cos[:encoder_hidden_seq_len, ...], sin[:encoder_hidden_seq_len, ...])
+        extra_hidden_rotary_emb = (cos[encoder_hidden_seq_len + hidden_seq_len:, ...], sin[encoder_hidden_seq_len + hidden_seq_len:, ...])
+        return hidden_rotary_emb, encoder_rotary_emb, extra_hidden_rotary_emb
+    elif model_type == "qwen-image":
+        # (([hidden], [hidden]), ([encoder], [encoder])) or ([hidden], [encoder])
+        hidden_emb, encoder_emb = image_rotary_emb
+        if not isinstance(hidden_emb, tuple):
+            hidden_emb = (hidden_emb,)
+            encoder_emb = (encoder_emb,)
+        return hidden_emb, encoder_emb, None
+    elif model_type == "qwen-image-edit":
+        # (([hidden + extra_hidden], [hidden + extra_hidden]), ([encoder], [encoder])) or ([hidden + extra_hidden], [encoder])
+        hidden_emb, encoder_emb = image_rotary_emb
+        if not isinstance(hidden_emb, tuple):
+            hidden_rotary_emb = (hidden_emb[:hidden_seq_len, ...],)
+            extra_hidden_rotary_emb = (hidden_emb[hidden_seq_len:, ...],)
+            encoder_emb = (encoder_emb,)
+        else:
+            hidden_rotary_emb_cos, hidden_rotary_emb_sin = hidden_emb
+            hidden_rotary_emb = (hidden_rotary_emb_cos[:hidden_seq_len, ...], hidden_rotary_emb_sin[:hidden_seq_len, ...])
+            extra_hidden_rotary_emb = (hidden_rotary_emb_cos[hidden_seq_len:, ...], hidden_rotary_emb_sin[hidden_seq_len:, ...])
+        return hidden_rotary_emb, encoder_emb, extra_hidden_rotary_emb
+    else:
+        raise ValueError(f"Unsupported model type: {model_type}")
+
+def join_image_rotary_emb(model_type: Literal["sd3", "flux-dev", "pixart-sigma", "qwen-image", "flux-kontext", "qwen-image-edit", "wan"], hidden_rotary_emb: Tuple[torch.Tensor, torch.Tensor], encoder_rotary_emb: Tuple[torch.Tensor, torch.Tensor], extra_hidden_rotary_emb: Tuple[torch.Tensor, torch.Tensor] = None):
+    if model_type == 'flux-dev':
+        cos = torch.cat([encoder_rotary_emb[0], hidden_rotary_emb[0]], dim=0)
+        sin = torch.cat([encoder_rotary_emb[1], hidden_rotary_emb[1]], dim=0)
+        return (cos, sin)
+    elif model_type == 'flux-kontext':
+        cos = torch.cat([encoder_rotary_emb[0], hidden_rotary_emb[0], extra_hidden_rotary_emb[0]], dim=0)
+        sin = torch.cat([encoder_rotary_emb[1], hidden_rotary_emb[1], extra_hidden_rotary_emb[1]], dim=0)
+        return (cos, sin)
+    elif model_type == 'qwen-image':
+        if len(hidden_rotary_emb) == 1:
+            return (hidden_rotary_emb[0], encoder_rotary_emb[0])
+        return (hidden_rotary_emb, encoder_rotary_emb)
+    elif model_type == 'qwen-image-edit':
+        if len(hidden_rotary_emb) == 1:
+            hidden_rotary_emb = torch.cat([hidden_rotary_emb[0], extra_hidden_rotary_emb[0]], dim=0)
+            return (hidden_rotary_emb, encoder_rotary_emb[0])
+        else:
+            cos = torch.cat([hidden_rotary_emb[0], extra_hidden_rotary_emb[0]], dim=0)
+            sin = torch.cat([hidden_rotary_emb[1], extra_hidden_rotary_emb[1]], dim=0)
+            return ((cos, sin), encoder_rotary_emb)
+    else:
+        raise ValueError(f"Unsupported model type: {model_type}")

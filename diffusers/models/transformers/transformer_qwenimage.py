@@ -376,9 +376,6 @@ class QwenDoubleStreamAttnProcessor2_0:
 
         txt_attn_output = attn.to_add_out(txt_attn_output)
 
-        if self._hook is not None:
-            img_attn_output, txt_attn_output = self._hook.hook_after_module(self._name, img_attn_output, txt_attn_output)
-
         return img_attn_output, txt_attn_output
 
 
@@ -469,7 +466,7 @@ class QwenImageTransformerBlock(nn.Module):
         
         # self-attn's after norm
         if self._hook is not None:
-            img_modulated, txt_modulated = self._hook.hook_after_norm("self-attn", img_modulated, txt_modulated)
+            img_modulated, txt_modulated, image_rotary_emb = self._hook.hook_after_norm("self-attn", img_modulated, txt_modulated, image_rotary_emb)
 
         # Use QwenAttnProcessor2_0 for joint attention computation
         # This directly implements the DoubleStreamLayerMegatron logic:
@@ -489,9 +486,16 @@ class QwenImageTransformerBlock(nn.Module):
         # QwenAttnProcessor2_0 returns (img_output, txt_output) when encoder_hidden_states is provided
         img_attn_output, txt_attn_output = attn_output
 
+        img_attn_output = img_gate1 * img_attn_output
+        txt_attn_output = txt_gate1 * txt_attn_output
+
+        # self-attn's after module
+        if self._hook is not None:
+            img_attn_output, txt_attn_output = self._hook.hook_after_module("self-attn", img_attn_output, txt_attn_output)
+
         # Apply attention gates and add residual (like in Megatron)
-        hidden_states = hidden_states + img_gate1 * img_attn_output
-        encoder_hidden_states = encoder_hidden_states + txt_gate1 * txt_attn_output
+        hidden_states = hidden_states + img_attn_output
+        encoder_hidden_states = encoder_hidden_states + txt_attn_output
 
         # ffn's pre norm
         if self._hook is not None:
@@ -508,15 +512,15 @@ class QwenImageTransformerBlock(nn.Module):
         if self._hook is not None:
             img_modulated2, txt_modulated2 = self._hook.hook_after_norm("ffn", img_modulated2, txt_modulated2)
 
-        img_mlp_output = self.img_mlp(img_modulated2)
-        txt_mlp_output = self.txt_mlp(txt_modulated2)
+        img_mlp_output = img_gate2 * self.img_mlp(img_modulated2)
+        txt_mlp_output = txt_gate2 * self.txt_mlp(txt_modulated2)
 
         # ffn's after module
         if self._hook is not None:
             img_mlp_output, txt_mlp_output = self._hook.hook_after_module('ffn', img_mlp_output, txt_mlp_output)
 
-        hidden_states = hidden_states + img_gate2 * img_mlp_output
-        encoder_hidden_states = encoder_hidden_states + txt_gate2 * txt_mlp_output
+        hidden_states = hidden_states + img_mlp_output
+        encoder_hidden_states = encoder_hidden_states + txt_mlp_output
 
         # Clip to prevent overflow for fp16
         if encoder_hidden_states.dtype == torch.float16:
