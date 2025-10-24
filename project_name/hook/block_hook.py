@@ -92,7 +92,10 @@ class BaseDiTBlockHook:
 
     def on_register_hook(self, block: nn.Module):
         pass
+    
+    #### decorator: hook out of blocks
 
+    #### hook in blocks
     def hook_pre_norm(
         self, 
         module_name: Literal["self-attn", "cross-attn", "ffn", "parallel"],
@@ -113,7 +116,6 @@ class BaseDiTBlockHook:
     ):
         return norm_hidden_states, norm_encoder_hidden_states
         
-    
     def hook_after_module(
         self, 
         module_name: Literal["self-attn", "cross-attn", "ffn"],
