@@ -4,10 +4,6 @@ import fnmatch
 from typing import Dict, Type, Optional, Union
 from contextlib import contextmanager
 from copy import deepcopy
-from diffusers.models.attention import JointTransformerBlock, BasicTransformerBlock
-from diffusers.models.transformers.transformer_flux import FluxTransformerBlock, FluxSingleTransformerBlock
-from diffusers.models.transformers.transformer_qwenimage import QwenImageTransformerBlock
-from diffusers.models.transformers.transformer_wan import WanTransformerBlock
 from project_name.hook.block_hook import BaseDiTBlockHook
 
 
@@ -33,15 +29,43 @@ class HookManager:
         'pixart-sigma': ('transformer_blocks.*',),
         'wan': ('blocks.*',),
     }
-    _block_type = {
-        'sd3': JointTransformerBlock,
-        'flux-dev': (FluxTransformerBlock, FluxSingleTransformerBlock),
-        'flux-kontext': (FluxTransformerBlock, FluxSingleTransformerBlock),
-        'qwen-image': QwenImageTransformerBlock,
-        'qwen-image-edit': QwenImageTransformerBlock,
-        'pixart-sigma': BasicTransformerBlock,
-        'wan': WanTransformerBlock,
-    }
+
+    @classmethod
+    def _resolve_block_type(cls, model_type: str):
+        """
+        Lazy import transformer block types to avoid circular imports.
+        """
+        if model_type in ('sd3',):
+            from diffusers.models.attention import JointTransformerBlock
+            return JointTransformerBlock
+
+        elif model_type in ('pixart-sigma',):
+            from diffusers.models.attention import BasicTransformerBlock
+            return BasicTransformerBlock
+
+        elif model_type in ('flux-dev', 'flux-kontext'):
+            from diffusers.models.transformers.transformer_flux import FluxTransformerBlock, FluxSingleTransformerBlock
+            return (FluxTransformerBlock, FluxSingleTransformerBlock)
+
+        elif model_type in ('qwen-image', 'qwen-image-edit'):
+            from diffusers.models.transformers.transformer_qwenimage import QwenImageTransformerBlock
+            return QwenImageTransformerBlock
+
+        elif model_type == 'wan':
+            from diffusers.models.transformers.transformer_wan import WanTransformerBlock
+            return WanTransformerBlock
+
+        else:
+            raise ValueError(f"Unknown model_type: {model_type}")
+
+    @classmethod
+    def get_block_type(cls, model_type: str):
+        """Public accessor — cached resolver."""
+        if not hasattr(cls, "_block_type_cache"):
+            cls._block_type_cache = {}
+        if model_type not in cls._block_type_cache:
+            cls._block_type_cache[model_type] = cls._resolve_block_type(model_type)
+        return cls._block_type_cache[model_type]
 
     @classmethod
     def enable(cls):
@@ -109,7 +133,7 @@ class HookManager:
             if not isinstance(m, nn.Module):
                 raise TypeError(f"Expected nn.Module, got {type(m)}")
             for name, module in m.named_modules():
-                if isinstance(module, cls._block_type[model_type]):
+                if isinstance(module, cls.get_block_type(model_type)):
                     hook_cls, kwargs = cls._resolve_hook_config(name)
                     hook = hook_cls(**deepcopy(kwargs))
                     hook_name = f"{model_attr}.{name}"

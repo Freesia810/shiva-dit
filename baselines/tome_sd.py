@@ -114,10 +114,10 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
                     scores, indices_dict['dst_idx'], indices_dict['src_idx'], k
                 )
             
-            def _select_image_rotary_emb(image_rotary_emb, encoder_hidden_seq_len, hidden_seq_len, hidden_extra_seq_len=None):
+            def _select_image_rotary_emb(image_rotary_emb, encoder_hidden_seq_len, hidden_seq_len):
                 hidden_emb, encoder_emb, extra_emb = parse_image_rotary_emb(
                     self.model_type, image_rotary_emb,
-                    hidden_seq_len, encoder_hidden_seq_len, hidden_extra_seq_len
+                    hidden_seq_len, encoder_hidden_seq_len
                 )
 
                 def _gather_pair(rotary_pair, indices_dict):
@@ -183,7 +183,6 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
                     image_rotary_emb,
                     encoder_hidden_seq_len=global_context.encoder_hidden_seq_len if global_context.encoder_flag else global_context.negative_encoder_hidden_seq_len,
                     hidden_seq_len=global_context.hidden_seq_len,
-                    hidden_extra_seq_len=global_context.hidden_extra_seq_len,
                 )
 
         return super().hook_pre_norm(module_name, hidden_states, encoder_hidden_states, image_rotary_emb, temb)
@@ -258,7 +257,7 @@ if __name__ == "__main__":
         "merge_config": {
             "self-attn": True,
             "cross-attn": False,
-            "ffn": True,
+            "ffn": False,
             "parallel": True,
         },
         "generator": torch.Generator("cuda").manual_seed(0),

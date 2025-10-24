@@ -2,24 +2,30 @@ import inspect
 import torch
 import torch.nn as nn
 from typing import Literal, Optional, Tuple
-from project_name.hook import BaseDiTBlockHook, Delegator
-from project_name.utils.context import global_context
-from project_name.utils.ste import ceil_ste
-from project_name.utils.utils import join_image_rotary_emb, parse_image_rotary_emb
+from project_name.hook import BaseDiTBlockHook, BaseDelegator, HookManager
+from project_name.utils import (
+    ceil_ste,
+    global_context,
+    get_pipeline,
+    process_quick_start,
+    parse_image_rotary_emb,
+    join_image_rotary_emb,
+)
 
-class DiffCRDitBlockHook(Delegator, BaseDiTBlockHook, nn.Module):
+class DiffCRDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
     def __init__(self, ratio_min=0.2, ratio_max=1.0, ratio_step=-0.1, **kwargs):
         '''
             ratio in (ratio_min, ratio_max]
         '''
         super().__init__(**kwargs)
+        nn.Module.__init__(self)
         self.register_buffer("kept_ratio_candidate", torch.arange(ratio_max, ratio_min, ratio_step).float())
         self.diff_ratio = nn.Parameter(torch.tensor(1.0))
 
         self.token_scores = None
         self.index = None
 
-    def _select_topk_and_remaining_tokens(x, token_scores, k, C):
+    def _select_topk_and_remaining_tokens(self, x, token_scores, k, C):
         B, N, _ = x.shape
         token_scores, topk_indices = torch.topk(torch.sigmoid(token_scores), k=k, sorted=False)
         sorted_indices, index = torch.sort(topk_indices, dim=1)
@@ -48,6 +54,8 @@ class DiffCRDitBlockHook(Delegator, BaseDiTBlockHook, nn.Module):
         if hidden_dim is None:
             raise ValueError("hidden_dim must be set in global_context")
         self.hidden_router = nn.Linear(hidden_dim, 1, bias=False)
+        self.to(next(block.parameters()).device)
+        self.dtype = torch.float32
 
     def delegated_call(self, func, module_self, *args, **kwargs):
         sig = inspect.signature(func)
@@ -61,49 +69,50 @@ class DiffCRDitBlockHook(Delegator, BaseDiTBlockHook, nn.Module):
         seq_len = hidden_states.shape[1]
         kept_ratio = torch.clamp(self.diff_ratio, 0.1, 1.0)
 
-        def _process(kept_ratio):
+        def _process(kept_ratio, hidden_states, encoder_hidden_states, image_rotary_emb):
             capacity = ceil_ste(kept_ratio * seq_len).to(torch.int32)
             k = torch.min(capacity, torch.tensor(seq_len, device=hidden_states.device))
-            token_scores = self.hidden_router(hidden_states).squeeze(-1)  # (batch, seq_len)
+            token_scores = self.hidden_router(hidden_states.to(self.dtype)).squeeze(-1)  # (batch, seq_len)
             self.token_scores, topk_x, remaining_x, sorted_indices, self.index = (
                 self._select_topk_and_remaining_tokens(
                     hidden_states, token_scores, k, hidden_states.shape[-1]
                 )
             )
 
-            hidden_emb, encoder_emb, _ = parse_image_rotary_emb(
-                self.model_type,
-                image_rotary_emb,
-                global_context.hidden_seq_len,
-                global_context.encoder_hidden_seq_len if global_context.encoder_flag else global_context.negative_encoder_hidden_seq_len,
-                global_context.hidden_extra_seq_len,
-                split_extra=False
-            )
-
-            hidden_emb = tuple(
-                torch.gather(
-                    x,
-                    dim=1,
-                    index=sorted_indices.unsqueeze(-1).expand(-1, x.shape[-1]),
-                )
-                for x in hidden_emb
-            )
-
-            image_rotary_emb = join_image_rotary_emb(
-                self.model_type, hidden_emb, encoder_emb
-            )
-
             bound.arguments["hidden_states"] = topk_x
             if encoder_hidden_states is not None:
                 bound.arguments["encoder_hidden_states"] = encoder_hidden_states
+
             if image_rotary_emb is not None:
+                assert hidden_states.shape[0] == 1, "image_rotary_emb only supports batch size 1"
+                hidden_emb, encoder_emb, _ = parse_image_rotary_emb(
+                    self.model_type,
+                    image_rotary_emb,
+                    global_context.hidden_seq_len,
+                    global_context.encoder_hidden_seq_len if global_context.encoder_flag else global_context.negative_encoder_hidden_seq_len,
+                    split_extra=False
+                )
+
+                hidden_emb = tuple(
+                    torch.gather(
+                        x,
+                        dim=0,
+                        index=sorted_indices[0].unsqueeze(-1).expand(-1, x.shape[-1]),
+                    )
+                    for x in hidden_emb
+                )
+
+                image_rotary_emb = join_image_rotary_emb(
+                    self.model_type, hidden_emb, encoder_emb
+                )
+
                 bound.arguments["image_rotary_emb"] = image_rotary_emb
 
             # call original function
             result = func(module_self, *bound.args, **bound.kwargs)
 
             if isinstance(result, tuple) and len(result) == 2:
-                hidden_states, encoder_hidden_states = result
+                encoder_hidden_states, hidden_states = result
                 ret_tuple = True
             else:
                 hidden_states = result
@@ -117,7 +126,7 @@ class DiffCRDitBlockHook(Delegator, BaseDiTBlockHook, nn.Module):
             )
 
             if ret_tuple:
-                return hidden_states, encoder_hidden_states
+                return encoder_hidden_states, hidden_states
             else:
                 return hidden_states
 
@@ -134,13 +143,13 @@ class DiffCRDitBlockHook(Delegator, BaseDiTBlockHook, nn.Module):
                 else:
                     return lw * lower_output + uw * upper_output
 
-            lower_output = _process(lower_bin)
-            upper_output = _process(upper_bin)
+            lower_output = _process(lower_bin, hidden_states, encoder_hidden_states, image_rotary_emb)
+            upper_output = _process(upper_bin, hidden_states, encoder_hidden_states, image_rotary_emb)
             return _blend(lower_output, upper_output, lower_weight, upper_weight)
         else:
             with torch.no_grad():
                 kept_ratio = self.find_closest_bin(kept_ratio)
-                return _process(kept_ratio)
+                return _process(kept_ratio, hidden_states, encoder_hidden_states, image_rotary_emb)
 
     def hook_after_module(
         self, 
@@ -148,11 +157,35 @@ class DiffCRDitBlockHook(Delegator, BaseDiTBlockHook, nn.Module):
         hidden_output: torch.Tensor,
         encoder_hidden_output: torch.Tensor = None,
     ):
-        if module_name == "ffn":
-            # gate with topk scores
-            hidden_output = hidden_output * self.token_scores.gather(dim=1, index=self.index).unsqueeze(2)
+        # if module_name == "ffn":
+        #     # gate with topk scores
+        #     hidden_output = hidden_output * (self.token_scores.gather(dim=1, index=self.index).unsqueeze(2).to(hidden_output.dtype))
 
         return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
+
+
+if __name__ == "__main__":
+    model_type = "flux-dev"
+    pipe, model_attrs = get_pipeline(model_type)
+
+    diffcr_config = {
+        "ratio_min": 0.1,
+        "ratio_max": 1.0,
+        "ratio_step": -0.1,
+    }
+
+    HookManager.configure_hooks(
+        model_type=model_type,
+        default=(DiffCRDitBlockHook, diffcr_config),
+    )
+
+    with HookManager.enabled():
+        HookManager.inject_hooks(model_type=model_type, pipe=pipe, model_attrs=model_attrs)
+        res = process_quick_start(pipe)
+        res.save(f"{model_type}_diffcr.png")
+    
+    print(global_context)
+
 
 
 # def calculate_diffcr_loss(self, ratios, target_ratio):
