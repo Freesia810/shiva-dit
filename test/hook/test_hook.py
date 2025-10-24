@@ -15,6 +15,7 @@ class PrintDiTBlockHook(BaseDiTBlockHook):
         module_name: Literal["self-attn", "cross-attn", "ffn", "parallel"],
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor = None,
+        image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         temb: torch.Tensor = None,
     ):
         print(f"{self.layer_name}-{module_name} prenorm [{hidden_states.shape}], [{encoder_hidden_states.shape if encoder_hidden_states is not None else 'None'}]")
@@ -25,7 +26,6 @@ class PrintDiTBlockHook(BaseDiTBlockHook):
         module_name: Literal["self-attn", "cross-attn", "ffn"],
         norm_hidden_states: torch.Tensor,
         norm_encoder_hidden_states: torch.Tensor = None,
-        temb: torch.Tensor = None,
     ):
         print(f"{self.layer_name}-{module_name} afternorm [{norm_hidden_states.shape}], [{norm_encoder_hidden_states.shape if norm_encoder_hidden_states is not None else 'None'}]")
         return norm_hidden_states, norm_encoder_hidden_states

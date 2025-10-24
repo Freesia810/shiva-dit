@@ -15,11 +15,11 @@ def select_topk_tokens(x: torch.Tensor, token_scores: torch.Tensor, k: int):
         selected_x (torch.Tensor): Selected tokens of shape (B, K, D)
         topk_indices (torch.Tensor): Indices of selected tokens of shape (B, K)
     """
-    _, topk_indices = torch.topk(token_scores, k, dim=1)  # (B, K)
+    topk_scores, topk_indices = torch.topk(token_scores, k, dim=1)  # (B, K)
     idx_expanded = topk_indices.unsqueeze(-1).expand(-1, -1, x.size(-1))  # (B, K, D)
     selected_x = torch.gather(x, dim=1, index=idx_expanded)  # (B, K, D)
 
-    return selected_x, topk_indices
+    return selected_x, topk_indices, topk_scores
 
 
 def reconstruct_tokens_by_topk(

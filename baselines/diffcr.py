@@ -17,6 +17,23 @@ class DiffCRDitBlockHook(BaseDiTBlockHook, nn.Module):
         super().__init__(**kwargs)
         self.register_buffer("kept_ratio_candidate", torch.arange(ratio_max, ratio_min, ratio_step).float())
         self.diff_ratio = nn.Parameter(torch.tensor(1.0))
+    
+    def _select_topk_and_remaining_tokens(x, token_scores, k, C):
+        B, N, _ = x.shape
+        token_scores, topk_indices = torch.topk(torch.sigmoid(token_scores), k=k, sorted=False)
+        sorted_indices, index = torch.sort(topk_indices, dim=1)
+
+        # Get top-k tokens
+        topk_x = x.gather(
+            dim=1,
+            index=repeat(sorted_indices, 'b t -> b t d', d=C)
+        )
+
+        # Get remaining tokens
+        remaining_x = x.clone()
+        remaining_x.scatter_(1, repeat(sorted_indices, 'b t -> b t d', d=C), torch.zeros_like(topk_x))
+
+        return token_scores, topk_x, remaining_x, sorted_indices, index
 
     def find_neighbour_bins(self, kept_ratio):
         differences = torch.abs(self.kept_ratio_candidate - kept_ratio)
@@ -40,6 +57,7 @@ class DiffCRDitBlockHook(BaseDiTBlockHook, nn.Module):
         module_name: Literal["self-attn", "cross-attn", "ffn", "parallel"],
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor = None,
+        image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         temb: torch.Tensor = None,
     ):
         if module_name == "self-attn":
@@ -59,12 +77,14 @@ class DiffCRDitBlockHook(BaseDiTBlockHook, nn.Module):
                 upper_k = torch.min(
                     upper_capacity, torch.tensor(seq_len, device=hidden_states.device)
                 )
-                token_scores = torch.sigmoid(
-                    self.hidden_router(hidden_states).squeeze(-1)
-                )  # (batch, seq_len)
+                token_scores = self.hidden_router(hidden_states).squeeze(-1)  # (batch, seq_len)
 
-                lower_selected, lower_idx = select_topk_tokens(hidden_states, token_scores, lower_k)  # (B, lower_k, D)
-                upper_selected, upper_idx = select_topk_tokens(hidden_states, token_scores, upper_k)  # (B, upper_k, D)
+                self.metadata = {
+                    'lower': {},
+                    'upper': {},
+                }
+                self.metadata['lower']['token_scores'], lower_selected, self.metadata['lower']['remaining_x'], self.metadata['lower']['sorted_indices'], self.metadata['lower']['index'] = self._select_topk_and_remaining_tokens(hidden_states, token_scores, k, hidden_states.shape[-1]) # (B, lower_k, D)
+                self.metadata['upper']['token_scores'], upper_selected, self.metadata['upper']['remaining_x'], self.metadata['upper']['sorted_indices'], self.metadata['upper']['index'] = self._select_topk_and_remaining_tokens(hidden_states, token_scores, k, hidden_states.shape[-1]) # (B, upper_k, D)
 
                 # padding to max k
                 k_max = max(lower_k, upper_k)
@@ -83,9 +103,6 @@ class DiffCRDitBlockHook(BaseDiTBlockHook, nn.Module):
                     "B": hidden_states.shape[0],
                     "lower_k": lower_k,
                     "upper_k": upper_k,
-                    "lower_idx": lower_idx,  # shape (B, lower_k)
-                    "upper_idx": upper_idx,  # shape (B, upper_k)
-                    "orig_hidden": hidden_states,  # (B, S, D)
                     "lw": lower_weight,
                     "uw": upper_weight,
                 }
@@ -103,54 +120,79 @@ class DiffCRDitBlockHook(BaseDiTBlockHook, nn.Module):
                     k = torch.min(
                         capacity, torch.tensor(seq_len, device=hidden_states.device)
                     )
-                    token_scores = torch.sigmoid(
-                        self.hidden_router(hidden_states).squeeze(-1)
-                    )  # (batch, seq_len)
-                    selected_hidden_states, topk_indices = select_topk_tokens(
-                        hidden_states, token_scores, k
-                    )
-                    self.topk_indices = topk_indices
-                    self.original_hidden_states = hidden_states
-                    return selected_hidden_states, encoder_hidden_states
-        else:
-            return super().hook_pre_norm(module_name, hidden_states, encoder_hidden_states, temb)
+                    token_scores = self.hidden_router(hidden_states).squeeze(-1)  # (batch, seq_len)
+                    token_scores, topk_x, remaining_x, sorted_indices, index = self._select_topk_and_remaining_tokens(hidden_states, token_scores, k, hidden_states.shape[-1])
+                    self.metadata = {
+                        'token_scores': token_scores,
+                        'remaining_x': remaining_x,
+                        'sorted_indices': sorted_indices,
+                        'index': index
+                    }
+                    return topk_x, encoder_hidden_states
+        return super().hook_pre_norm(module_name, hidden_states, encoder_hidden_states, image_rotary_emb, temb)
 
     def hook_after_module(
         self, 
-        module_name: Literal["self-attn", "cross-attn", "ffn"],
+        module_name: Literal["self-attn", "cross-attn", "ffn", "dit"],
         hidden_output: torch.Tensor,
         encoder_hidden_output: torch.Tensor = None,
     ):
         if module_name == "ffn":
+            # gate with topk scores
+            if self.training:
+                B = self._train_meta["B"]
+                lower_k = self._train_meta["lower_k"]
+                upper_k = self._train_meta["upper_k"]
+                k_max = max(lower_k, upper_k)
+
+                out_upper_combined = hidden_output[:B, :upper_k, :]   # (B, upper_k, D)
+                out_lower_combined = hidden_output[B:, :lower_k, :]   # (B, lower_k, D)
+
+                upper_scores = self.metadata['upper']['token_scores'].gather(dim=1, index=self.metadata['upper']['index']).unsqueeze(2)  # (B, upper_k, 1)
+                lower_scores = self.metadata['lower']['token_scores'].gather(dim=1, index=self.metadata['lower']['index']).unsqueeze(2)  # (B, lower_k, 1)
+
+                pad_upper = k_max - upper_k
+                pad_lower = k_max - lower_k
+
+                if pad_upper > 0:
+                    upper_scores = torch.nn.functional.pad(upper_scores, (0, 0, 0, pad_upper))
+                    out_upper_combined = torch.nn.functional.pad(out_upper_combined, (0, 0, 0, pad_upper))
+                if pad_lower > 0:
+                    lower_scores = torch.nn.functional.pad(lower_scores, (0, 0, 0, pad_lower))
+                    out_lower_combined = torch.nn.functional.pad(out_lower_combined, (0, 0, 0, pad_lower))
+
+                out_upper_combined = out_upper_combined * upper_scores
+                out_lower_combined = out_lower_combined * lower_scores
+
+                hidden_output = torch.cat([out_upper_combined, out_lower_combined], dim=0)  # (2B, k_max, D)
+            else:
+                hidden_output = hidden_output * self.metadata['token_scores'].gather(dim=1, index=self.metadata['index']).unsqueeze(2)
+        elif module_name == "dit":
             # dit block's end
             if self.training:
                 meta = self.__dict__.pop("_train_meta", None)
                 B = meta["B"]
                 lower_k = meta["lower_k"]
                 upper_k = meta["upper_k"]
-                lower_idx = meta["lower_idx"] # (B, lower_k)
-                upper_idx = meta["upper_idx"] # (B, upper_k)
-                orig_hidden = meta["orig_hidden"]
                 lw = meta["lw"]
                 uw = meta["uw"]
                 out_upper_combined = hidden_output[:B, :upper_k, :]   # (B, upper_k, D)
                 out_lower_combined = hidden_output[B:, :lower_k, :]   # (B, lower_k, D)
 
-                out_upper_restored = reconstruct_tokens_by_topk(
-                    orig_hidden,  # (B, S, D)
-                    out_upper_combined,  # (B, upper_k, D)
-                    upper_idx, # (B, upper_k)
-                    zero_out_remain=True,
+                out_upper_restored = self.metadata['upper']['remaining_x'].scatter_add(
+                    dim=1,
+                    index=repeat(self.metadata['upper']['sorted_indices'], 'b t -> b t d', d=out_upper_combined.shape[-1]),
+                    src=out_upper_combined
                 )
-                out_lower_restored = reconstruct_tokens_by_topk(
-                    orig_hidden,
-                    out_lower_combined,
-                    lower_idx,
-                    zero_out_remain=True,
+
+                out_lower_restored = self.metadata['lower']['remaining_x'].scatter_add(
+                    dim=1,
+                    index=repeat(self.metadata['lower']['sorted_indices'], 'b t -> b t d', d=out_lower_combined.shape[-1]),
+                    src=out_lower_combined
                 )
 
                 # blend
-                blended = lw * out_lower_restored + uw * out_upper_restored
+                hidden_output = lw * out_lower_restored + uw * out_upper_restored
 
                 if encoder_hidden_output is not None:
                     # for concat-attn like sd3 and flux
@@ -159,17 +201,16 @@ class DiffCRDitBlockHook(BaseDiTBlockHook, nn.Module):
                         uw * encoder_hidden_output[:B, :, :]
                         + lw * encoder_hidden_output[B:, :, :]
                     )
-
-                return blended, encoder_hidden_output
             else:
                 with torch.no_grad():
-                    restored_hidden_states = reconstruct_tokens_by_topk(
-                        self.original_hidden_states,
-                        hidden_output,
-                        self.topk_indices,
-                        zero_out_remain=True,
+                    # Combine bypassed tokens and processed topk tokens
+                    hidden_output = self.metadata['remaining_x'].scatter_add(
+                        dim=1,
+                        index=repeat(self.metadata['sorted_indices'], 'b t -> b t d', d=hidden_states.shape[-1]),
+                        src=hidden_output
                     )
-                    return restored_hidden_states, encoder_hidden_output
+            self.metadata = None
+            return hidden_output, encoder_hidden_output
         return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
 
 

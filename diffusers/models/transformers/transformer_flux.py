@@ -436,7 +436,7 @@ class FluxSingleTransformerBlock(nn.Module):
 
         # pre norm
         if self._hook is not None:
-            hidden_states, encoder_hidden_states = self._hook.hook_pre_norm("parallel", hidden_states, encoder_hidden_states, temb)
+            hidden_states, encoder_hidden_states, image_rotary_emb = self._hook.hook_pre_norm("parallel", hidden_states, encoder_hidden_states, image_rotary_emb, temb)
 
         hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
 
@@ -449,12 +449,11 @@ class FluxSingleTransformerBlock(nn.Module):
                 norm_hidden_states[:, :text_seq_len],
                 norm_hidden_states[:, text_seq_len:],
             )
-            norm_hidden_states, norm_encoder_hidden_states, image_rotary_emb = (
+            norm_hidden_states, norm_encoder_hidden_states = (
                 self._hook.hook_after_norm(
                     "parallel",
                     norm_hidden_states,
                     norm_encoder_hidden_states,
-                    image_rotary_emb,
                 )
             )
             norm_hidden_states = torch.cat(
@@ -480,10 +479,18 @@ class FluxSingleTransformerBlock(nn.Module):
             hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
 
         hidden_states = residual + hidden_states
-        if hidden_states.dtype == torch.float16:
-            hidden_states = hidden_states.clip(-65504, 65504)
 
         encoder_hidden_states, hidden_states = hidden_states[:, :text_seq_len], hidden_states[:, text_seq_len:]
+
+        # final's after module
+        if self._hook is not None:
+            hidden_states, encoder_hidden_states = self._hook.hook_after_module('dit', hidden_states, encoder_hidden_states)
+        
+        if hidden_states.dtype == torch.float16:
+            hidden_states = hidden_states.clip(-65504, 65504)
+        if encoder_hidden_states.dtype == torch.float16:
+            encoder_hidden_states = encoder_hidden_states.clip(-65504, 65504)
+
         return encoder_hidden_states, hidden_states
 
 
@@ -534,7 +541,7 @@ class FluxTransformerBlock(nn.Module):
 
         # self-attn's pre norm
         if self._hook is not None:
-            hidden_states, encoder_hidden_states = self._hook.hook_pre_norm("self-attn", hidden_states, encoder_hidden_states, temb)
+            hidden_states, encoder_hidden_states, image_rotary_emb = self._hook.hook_pre_norm("self-attn", hidden_states, encoder_hidden_states, image_rotary_emb, temb)
 
         norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.norm1(hidden_states, emb=temb)
 
@@ -545,8 +552,8 @@ class FluxTransformerBlock(nn.Module):
 
         # self-attn's after norm
         if self._hook is not None:
-            norm_hidden_states, norm_encoder_hidden_states, image_rotary_emb = self._hook.hook_after_norm(
-               'self-attn', norm_hidden_states, norm_encoder_hidden_states, image_rotary_emb
+            norm_hidden_states, norm_encoder_hidden_states = self._hook.hook_after_norm(
+               'self-attn', norm_hidden_states, norm_encoder_hidden_states
             )
 
         # Attention.
@@ -603,6 +610,11 @@ class FluxTransformerBlock(nn.Module):
         if len(attention_outputs) == 3:
             hidden_states = hidden_states + ip_attn_output
         encoder_hidden_states = encoder_hidden_states + context_ff_output
+
+        # final's after module
+        if self._hook is not None:
+            hidden_states, encoder_hidden_states = self._hook.hook_after_module('dit', hidden_states, encoder_hidden_states)
+
         if encoder_hidden_states.dtype == torch.float16:
             encoder_hidden_states = encoder_hidden_states.clip(-65504, 65504)
 

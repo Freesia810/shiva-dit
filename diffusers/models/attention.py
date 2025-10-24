@@ -686,7 +686,7 @@ class JointTransformerBlock(nn.Module):
         # self-attn's pre norm
         if self._hook is not None:
             hidden_states, encoder_hidden_states = self._hook.hook_pre_norm(
-               'self-attn', hidden_states, encoder_hidden_states, temb
+               'self-attn', hidden_states, encoder_hidden_states, None, temb
             )
 
         if self.use_dual_attention:
@@ -1027,7 +1027,7 @@ class BasicTransformerBlock(nn.Module):
 
         # self-attn's pre norm
         if self._hook is not None:
-            hidden_states, _ = self._hook.hook_pre_norm("self-attn", hidden_states, None, timestep)
+            hidden_states, _ = self._hook.hook_pre_norm("self-attn", hidden_states, None, None, timestep)
 
         if self.norm_type == "ada_norm":
             norm_hidden_states = self.norm1(hidden_states, timestep)

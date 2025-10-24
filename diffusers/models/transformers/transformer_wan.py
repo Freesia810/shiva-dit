@@ -488,7 +488,7 @@ class WanTransformerBlock(nn.Module):
     ) -> torch.Tensor:
         # self-attn's pre norm
         if self._hook is not None:
-            hidden_states, _ = self._hook.hook_pre_norm("self-attn", hidden_states, None, temb)
+            hidden_states, _ = self._hook.hook_pre_norm("self-attn", hidden_states, None, None, temb)
 
         if temb.ndim == 4:
             # temb: batch_size, seq_len, 6, inner_dim (wan2.2 ti2v)

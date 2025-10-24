@@ -71,6 +71,9 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
         }
 
     def on_register_hook(self, block: nn.Module):
+        if self.model_type == 'wan':
+            raise NotImplementedError("wan model is not supported")
+
         if isinstance(block, FluxSingleTransformerBlock):
             for key in ('self-attn', 'cross-attn', 'ffn'):
                 if self.merge_config.get(key):
@@ -97,6 +100,7 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
         module_name: Literal["self-attn", "cross-attn", "ffn", "parallel"],
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor = None,
+        image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         temb: torch.Tensor = None,
     ):
         if module_name in ("self-attn", "parallel") and self.enable:
@@ -109,6 +113,31 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
                 indices_dict['merge_dst_idx'], indices_dict['merge_src_idx'], indices_dict['unmerge_src_idx'] = select_dst_src_tokens(
                     scores, indices_dict['dst_idx'], indices_dict['src_idx'], k
                 )
+            
+            def _select_image_rotary_emb(image_rotary_emb, encoder_hidden_seq_len, hidden_seq_len, hidden_extra_seq_len=None):
+                hidden_emb, encoder_emb, extra_emb = parse_image_rotary_emb(
+                    self.model_type, image_rotary_emb,
+                    hidden_seq_len, encoder_hidden_seq_len, hidden_extra_seq_len
+                )
+
+                def _gather_pair(rotary_pair, indices_dict):
+                    if rotary_pair is None:
+                        return None
+                    dst, src, m_dst, u_src = (
+                        indices_dict['dst_idx'],
+                        indices_dict['src_idx'],
+                        indices_dict['merge_dst_idx'],
+                        indices_dict['unmerge_src_idx']
+                    )
+                    return tuple(
+                        gather_dst_unmerge_tokens(x, dst, src, m_dst, u_src)
+                        for x in rotary_pair
+                    )
+                
+                hidden_emb = _gather_pair(hidden_emb, self.indices_dict)
+                if extra_emb is not None:
+                    extra_emb = _gather_pair(extra_emb, self.extra_indices_dict)
+                return join_image_rotary_emb(self.model_type, hidden_emb, encoder_emb, extra_emb)
 
             if global_context.hidden_extra_seq_len is not None:
                 # dual hidden states for edit task
@@ -149,14 +178,21 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
                     self.k = int(self.ratio * self.size[0] * self.size[1])
                 _select(self.size, self.indices_dict, hidden_states, self.k)
 
-        return hidden_states, encoder_hidden_states
+            if image_rotary_emb is not None:
+                image_rotary_emb = _select_image_rotary_emb(
+                    image_rotary_emb,
+                    encoder_hidden_seq_len=global_context.encoder_hidden_seq_len if global_context.encoder_flag else global_context.negative_encoder_hidden_seq_len,
+                    hidden_seq_len=global_context.hidden_seq_len,
+                    hidden_extra_seq_len=global_context.hidden_extra_seq_len,
+                )
+
+        return super().hook_pre_norm(module_name, hidden_states, encoder_hidden_states, image_rotary_emb, temb)
 
     def hook_after_norm(
         self, 
         module_name: Literal["self-attn", "cross-attn", "ffn", "parallel"],
         norm_hidden_states: torch.Tensor,
         norm_encoder_hidden_states: torch.Tensor = None,
-        image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):
         if self.merge_config.get(module_name, False):
             def _merge(x, indices_dict):
@@ -169,31 +205,6 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
                     indices_dict['unmerge_src_idx'],
                 )
 
-            def _select_image_rotary_emb(image_rotary_emb, encoder_hidden_seq_len, hidden_seq_len, hidden_extra_seq_len=None):
-                hidden_emb, encoder_emb, extra_emb = parse_image_rotary_emb(
-                    self.model_type, image_rotary_emb,
-                    hidden_seq_len, encoder_hidden_seq_len, hidden_extra_seq_len
-                )
-
-                def _gather_pair(rotary_pair, indices_dict):
-                    if rotary_pair is None:
-                        return None
-                    dst, src, m_dst, u_src = (
-                        indices_dict['dst_idx'],
-                        indices_dict['src_idx'],
-                        indices_dict['merge_dst_idx'],
-                        indices_dict['unmerge_src_idx']
-                    )
-                    return tuple(
-                        gather_dst_unmerge_tokens(x, dst, src, m_dst, u_src)
-                        for x in rotary_pair
-                    )
-                
-                hidden_emb = _gather_pair(hidden_emb, self.indices_dict)
-                if extra_emb is not None:
-                    extra_emb = _gather_pair(extra_emb, self.extra_indices_dict)
-                return join_image_rotary_emb(self.model_type, hidden_emb, encoder_emb, extra_emb)
-
             if global_context.hidden_extra_seq_len is not None:
                 # dual hidden states for edit task
                 h1, h2 = norm_hidden_states.split([global_context.hidden_seq_len, norm_hidden_states.shape[1] - global_context.hidden_seq_len], dim=1)
@@ -202,16 +213,6 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
                 # normal case
                 norm_hidden_states = _merge(norm_hidden_states, self.indices_dict)
 
-            if image_rotary_emb is not None:
-                image_rotary_emb = _select_image_rotary_emb(
-                    image_rotary_emb,
-                    encoder_hidden_seq_len=global_context.encoder_hidden_seq_len if global_context.encoder_flag else global_context.negative_encoder_hidden_seq_len,
-                    hidden_seq_len=global_context.hidden_seq_len,
-                    hidden_extra_seq_len=global_context.hidden_extra_seq_len,
-                )
-
-        if image_rotary_emb is not None:
-            return norm_hidden_states, norm_encoder_hidden_states, image_rotary_emb
         return norm_hidden_states, norm_encoder_hidden_states
 
     def hook_after_module(
