@@ -16,6 +16,9 @@ def delegated_forward(func):
 
 
 class BaseDelegator:
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
     """Default delegator: directly calls the original function."""
     def delegated_call(self, func, module_self, *args, **kwargs):
         return func(module_self, *args, **kwargs)

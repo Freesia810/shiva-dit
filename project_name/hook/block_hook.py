@@ -81,7 +81,7 @@ from typing import Literal, Optional, Tuple
 
 class BaseDiTBlockHook:
     def __init__(self, **kwargs):
-        pass
+        super().__init__(**kwargs)
 
     def register_name(self, model_type:str, layer_name: str):
         self.model_type = model_type

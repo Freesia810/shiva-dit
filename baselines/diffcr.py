@@ -18,12 +18,13 @@ class DiffCRDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             ratio in (ratio_min, ratio_max]
         '''
         super().__init__(**kwargs)
-        nn.Module.__init__(self)
         self.register_buffer("kept_ratio_candidate", torch.arange(ratio_max, ratio_min, ratio_step).float())
         self.diff_ratio = nn.Parameter(torch.tensor(1.0))
 
         self.token_scores = None
         self.index = None
+
+        self.eval()
 
     def _select_topk_and_remaining_tokens(self, x, token_scores, k, C):
         B, N, _ = x.shape

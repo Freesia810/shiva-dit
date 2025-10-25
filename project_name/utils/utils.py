@@ -85,7 +85,7 @@ def process_quick_start(pipeline: DiffusionPipeline, **kwargs):
         kwargs.setdefault('negative_prompt', negative_prompt)
         kwargs.setdefault('width', width)
         kwargs.setdefault('height', height)
-        kwargs.setdefault('num_inference_steps', 10)
+        kwargs.setdefault('num_inference_steps', 50)
         kwargs.setdefault('true_cfg_scale', 4.0)
         kwargs.setdefault('generator', torch.Generator(device="cuda").manual_seed(42))
         return pipeline(**kwargs).images[0]
