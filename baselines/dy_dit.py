@@ -45,12 +45,14 @@ class TokenSelect_baesd_on_x_t_text(nn.Module):
         conditioning_dim,
         is_hard=True,
         threshold=0.5,
+        enable_text=True,
         elementwise_affine: bool = True,
         eps: float = 1e-5,
     ):
         super().__init__()
+        self.enable_text = enable_text
         self.silu = nn.SiLU()
-        self.linear_t = nn.Linear(conditioning_dim, dim_in * 4)
+        self.linear_t = nn.Linear(conditioning_dim, dim_in * 4 if self.enable_text else dim_in * 2)
         self.norm = nn.LayerNorm(dim_in, eps=eps, elementwise_affine=elementwise_affine)
         self.full_dim_in = dim_in
         self.router = nn.Linear(dim_in, 1, bias=True)
@@ -58,22 +60,23 @@ class TokenSelect_baesd_on_x_t_text(nn.Module):
         self.is_hard = is_hard
         self.threshold = threshold
 
-    def forward(self, x, temb, text, tau=5.0):
-        # if self.training or not is_single_block:
-        b, l, c = x.shape
-        l_text = text.shape[1]
-
-        shift, scale, shift_text, scale_text = self.linear_t(self.silu(temb)).chunk(
-            4, dim=1
-        )
-
-        # if self.training or not is_single_block:
-        x = self.norm(x) * (1 + scale)[:, None, :] + shift[:, None, :]
-        text = self.norm(text) * (1 + scale_text)[:, None, :] + shift_text[:, None, :]
-
-        text = text.mean(dim=1).unsqueeze(1)
-
-        logits = self.router(x + text)
+    def forward(self, x, temb, text=None, tau=5.0):
+        if self.enable_text:
+            # for SD3, FLUX, and Qwen pattern, use adanorm of temb
+            shift, scale, shift_text, scale_text = self.linear_t(self.silu(temb)).chunk(
+                4, dim=1
+            )
+            x = self.norm(x) * (1 + scale)[:, None, :] + shift[:, None, :]
+            text = self.norm(text) * (1 + scale_text)[:, None, :] + shift_text[:, None, :]
+            text = text.mean(dim=1).unsqueeze(1)
+            logits = self.router(x + text)
+        else:
+            # for pixart-sigma, we use temb from global context
+            shift, scale = (
+                self.linear_t(self.silu(temb)).chunk(2, dim=1)
+            )
+            x = self.norm(x) * (1 + scale)[:, None, :] + shift[:, None, :]
+            logits = self.router(x)
 
         token_select_mask = _gumbel_sigmoid(
             logits, tau, self.is_hard, threshold=self.threshold, training=self.training
@@ -103,6 +106,7 @@ class DynamicDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         # for Spatial-wise Dynamic Token
         self.token_idx = None  
         self.ff_output = None
+        self.temb = None
 
     def on_register_hook(self, block: nn.Module):
         hidden_dim, encoder_hidden_dim = global_context.hidden_dim, global_context.encoder_hidden_dim
@@ -119,12 +123,13 @@ class DynamicDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 conditioning_dim=encoder_hidden_dim,
                 is_hard=True,
                 threshold=self.config["dynamic_token"]["select_threshold"],
+                enable_text=global_context.encoder_hidden_seq_len is not None,
             )
         else:
             self.dynamic_token_selector = None
 
-        self.to(next(block.parameters()).device)
         self.dtype = torch.float32
+        self.to(device=next(block.parameters()).device, dtype=self.dtype)
 
     def hook_pre_norm(
         self, 
@@ -136,12 +141,26 @@ class DynamicDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
     ):
         if module_name == 'ffn' or module_name == 'parallel':
             if self.config["dynamic_token"]["enable"]:
+                this_temb = self.temb if self.dynamic_token_selector.enable_text else global_context.embedded_timestep
                 token_mask = self.dynamic_token_selector(
-                    hidden_states, temb, encoder_hidden_states, tau=self.config["dynamic_token"]["tau"]
-                ).reshape(-1, *token_mask.shape[2:]) # (batch * seq_len, 1)
+                    hidden_states.to(self.dtype), 
+                    this_temb.to(self.dtype), 
+                    encoder_hidden_states.to(self.dtype) if encoder_hidden_states is not None else None, 
+                    tau=self.config["dynamic_token"]["tau"]
+                ) # (batch, seq_len, 1)
+                token_mask_2d = token_mask.squeeze(-1) # (batch, seq_len)
+
+                ## for original DyFlux's implement, they didn't consider the case that batch > 1
+                ## so we only select tokens that masked as 1 in all batch
+                aligned_mask = (token_mask_2d == 1).all(dim=0) # (seq_len)
+                token_mask = aligned_mask.unsqueeze(0).unsqueeze(-1).repeat(hidden_states.shape[0], 1, 1) # (batch, seq_len, 1)
+                token_mask = token_mask.reshape(-1, *token_mask.shape[2:]) # (batch * seq_len, 1)
                 self.token_idx = token_mask.nonzero()[:, 0]
             else:
                 self.token_idx = None
+        elif module_name == "self-attn":
+            if self.config["dynamic_token"]["enable"]:
+                self.temb = temb
         return super().hook_pre_norm(
             module_name,
             hidden_states,
@@ -183,10 +202,9 @@ class DynamicDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
     ):
         if module_name == 'ffn' and self.token_idx is not None:
             self.ff_output = self.ff_output.reshape(-1, *self.ff_output.shape[2:])
-            self.ff_output[self.token_idx, :] = hidden_output
-            self.ff_output.reshape(hidden_output.shape[0], global_context.hidden_seq_len, global_context.hidden_dim)
-            hidden_output = self.ff_output
-            self.ff_output = self.token_idx = None
+            self.ff_output[self.token_idx, :] = hidden_output.reshape(-1, *hidden_output.shape[2:])
+            hidden_output = self.ff_output.reshape(hidden_output.shape[0], global_context.hidden_seq_len + global_context.hidden_extra_seq_len if global_context.hidden_extra_seq_len else global_context.hidden_seq_len, global_context.hidden_dim)
+            self.ff_output = self.token_idx = self.temb = None
         return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
 
     def delegated_call(self, func, module_self, *args, **kwargs):
@@ -198,16 +216,18 @@ class DynamicDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
             hidden_states = bound.arguments.get("hidden_states", None)
             encoder_hidden_states = bound.arguments.get("encoder_hidden_states", None)
+            image_rotary_emb = bound.arguments.get("image_rotary_emb", None)
             temb = bound.arguments.get("temb", None)
             joint_attention_kwargs = bound.arguments.get("joint_attention_kwargs", None)
 
             # simulate forward of FluxSingleTransformerBlock
             text_seq_len = encoder_hidden_states.shape[1]
+            self.temb = temb
 
             ff_output = torch.zeros_like(
                 hidden_states,
-                device=norm_hidden_states.device,
-                dtype=norm_hidden_states.dtype,
+                device=hidden_states.device,
+                dtype=hidden_states.dtype,
             )
 
             # pre norm
@@ -269,7 +289,7 @@ class DynamicDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             hidden_states = module_self.proj_out(hidden_states)
             ff_output = ff_output.reshape(-1, *ff_output.shape[2:])
             ff_output[self.token_idx, :] = hidden_states
-            ff_output = ff_output.reshape(B, global_context.hidden_seq_len, C)
+            ff_output = ff_output.reshape(B, global_context.hidden_seq_len + global_context.hidden_extra_seq_len if global_context.hidden_extra_seq_len else global_context.hidden_seq_len, C)
 
             # concat and gate
             hidden_states = torch.cat([encoder_hidden_states, ff_output], dim=1)
@@ -282,24 +302,27 @@ class DynamicDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             if encoder_hidden_states.dtype == torch.float16:
                 encoder_hidden_states = encoder_hidden_states.clip(-65504, 65504)
 
+            self.token_idx = self.temb = None
             return encoder_hidden_states, hidden_states
         else:
             return super().delegated_call(func, module_self, *args, **kwargs)
 
 
 if __name__ == "__main__":
-    model_type = "flux-dev"
+    model_type = "pixart-sigma"
     pipe, model_attrs = get_pipeline(model_type)
 
     dydit_config = {
-        "dynamic_width": {
-            "enable": False,
-            "select_threshold": 0.5,
-        },
-        "dynamic_token": {
-            "enable": True,
-            "select_threshold": 0,
-            "tau": 5.0,
+        "config": {
+            "dynamic_width": {
+                "enable": False,
+                "select_threshold": 0.5,
+            },
+            "dynamic_token": {
+                "enable": True,
+                "select_threshold": 0.5,
+                "tau": 5.0,
+            },
         },
     }
 
@@ -313,6 +336,6 @@ if __name__ == "__main__":
             model_type=model_type, pipe=pipe, model_attrs=model_attrs
         )
         res = process_quick_start(pipe)
-        res.save(f"{model_type}_diffcr.png")
+        res.save(f"{model_type}_dydit.png")
 
     print(global_context)

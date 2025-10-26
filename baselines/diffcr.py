@@ -62,8 +62,9 @@ class DiffCRDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         if hidden_dim is None:
             raise ValueError("hidden_dim must be set in global_context")
         self.hidden_router = nn.Linear(hidden_dim, 1, bias=False)
-        self.to(next(block.parameters()).device)
         self.dtype = torch.float32
+        self.to(device=next(block.parameters()).device, dtype=self.dtype)
+        
 
     def delegated_call(self, func, module_self, *args, **kwargs):
         sig = inspect.signature(func)

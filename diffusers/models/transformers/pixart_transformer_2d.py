@@ -369,6 +369,12 @@ class PixArtTransformer2DModel(ModelMixin, ConfigMixin):
             timestep, added_cond_kwargs, batch_size=batch_size, hidden_dtype=hidden_states.dtype
         )
 
+        # register temb
+        from project_name.utils.context import global_context
+        global_context.update(
+            embedded_timestep=embedded_timestep,
+        )
+
         if self.caption_projection is not None:
             encoder_hidden_states = self.caption_projection(encoder_hidden_states)
             encoder_hidden_states = encoder_hidden_states.view(batch_size, -1, hidden_states.shape[-1])

@@ -1,3 +1,5 @@
+import torch
+
 from dataclasses import dataclass
 from typing import Optional
 
@@ -23,6 +25,9 @@ class PipelineContext:
 
     # for video generation
     hidden_seq_frame: Optional[int] = None
+
+    # for pixart-sigma, which we cannot get temb from block
+    embedded_timestep: Optional[torch.Tensor] = None
 
     def update(self, **kwargs):
         for k, v in kwargs.items():
