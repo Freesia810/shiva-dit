@@ -108,7 +108,7 @@ class BaseDiTBlockHook:
 
     def hook_after_norm(
         self, 
-        module_name: Literal["self-attn", "cross-attn", "ffn", "dit"],
+        module_name: Literal["self-attn", "cross-attn", "ffn"],
         norm_hidden_states: torch.Tensor,
         norm_encoder_hidden_states: torch.Tensor = None,
     ):

@@ -485,10 +485,6 @@ class FluxSingleTransformerBlock(nn.Module):
 
         encoder_hidden_states, hidden_states = hidden_states[:, :text_seq_len], hidden_states[:, text_seq_len:]
 
-        # final's after module
-        if self._hook is not None:
-            hidden_states, encoder_hidden_states = self._hook.hook_after_module('dit', hidden_states, encoder_hidden_states)
-
         if hidden_states.dtype == torch.float16:
             hidden_states = hidden_states.clip(-65504, 65504)
         if encoder_hidden_states.dtype == torch.float16:
@@ -614,10 +610,6 @@ class FluxTransformerBlock(nn.Module):
         if len(attention_outputs) == 3:
             hidden_states = hidden_states + ip_attn_output
         encoder_hidden_states = encoder_hidden_states + context_ff_output
-
-        # final's after module
-        if self._hook is not None:
-            hidden_states, encoder_hidden_states = self._hook.hook_after_module('dit', hidden_states, encoder_hidden_states)
 
         if encoder_hidden_states.dtype == torch.float16:
             encoder_hidden_states = encoder_hidden_states.clip(-65504, 65504)

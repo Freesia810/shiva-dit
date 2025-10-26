@@ -1,7 +1,7 @@
 import inspect
 import torch
 import torch.nn as nn
-from typing import Literal, Optional, Tuple
+from typing import Literal
 from project_name.hook import BaseDiTBlockHook, BaseDelegator, HookManager
 from project_name.utils import (
     ceil_ste,
@@ -13,6 +13,13 @@ from project_name.utils import (
 )
 
 class DiffCRDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
+    """
+    Layer- and Timestep-Adaptive Differentiable Token Compression Ratios for Efficient Diffusion Transformers
+    Reference:
+        - Paper: https://arxiv.org/abs/2412.16822
+
+    Implemented from https://github.com/GATECH-EIC/DiffCR
+    """
     def __init__(self, ratio_min=0.2, ratio_max=1.0, ratio_step=-0.1, **kwargs):
         '''
             ratio in (ratio_min, ratio_max]
@@ -154,13 +161,13 @@ class DiffCRDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
     def hook_after_module(
         self, 
-        module_name: Literal["self-attn", "cross-attn", "ffn", "dit"],
+        module_name: Literal["self-attn", "cross-attn", "ffn"],
         hidden_output: torch.Tensor,
         encoder_hidden_output: torch.Tensor = None,
     ):
-        # if module_name == "ffn":
-        #     # gate with topk scores
-        #     hidden_output = hidden_output * (self.token_scores.gather(dim=1, index=self.index).unsqueeze(2).to(hidden_output.dtype))
+        if module_name == "ffn":
+            # gate with topk scores
+            hidden_output = hidden_output * (self.token_scores.gather(dim=1, index=self.index).unsqueeze(2).to(hidden_output.dtype))
 
         return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
 
@@ -186,7 +193,6 @@ if __name__ == "__main__":
         res.save(f"{model_type}_diffcr.png")
     
     print(global_context)
-
 
 
 # def calculate_diffcr_loss(self, ratios, target_ratio):

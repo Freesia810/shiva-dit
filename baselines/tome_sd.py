@@ -17,7 +17,56 @@ from project_name.utils import (
     join_image_rotary_emb,
 )
 
+
 class ToMeSDDitBlockHook(BaseDiTBlockHook):
+    """
+    Implements Token Merging (ToMe) functionality as a block-level Hook
+    for Diffusion Transformers (DiT), accelerating DiT's inference.
+
+    This implementation extends the original ToMe for Stable Diffusion
+    to be compatible with DiT architectures, including those with parallel blocks.
+
+    Args:
+        stride (int or tuple of int):
+            The merging stride for the token splitting strategy (e.g., in BSM).
+            If a single int, it is used for both dimensions. Defaults to (2, 2).
+        merged_ratio (float):
+            The percentage of tokens to be merged in each applicable block,
+            expressed as a fraction (e.g., 0.2 means 20% of tokens are merged).
+            Defaults to 0.2.
+        merge_config (dict or None):
+            Optional dictionary to configure which block types (e.g., 'self-attn', 'ffn')
+            are enabled for token merging. Defaults to None (use internal defaults).
+        generator (torch.Generator or None):
+            A PyTorch random number generator used for token splitting/matching
+            to ensure reproducibility. Defaults to None.
+        **kwargs:
+            Additional keyword arguments passed to the base class or other internal components.
+
+    Attributes:
+        stride (tuple of int): The resolved merging stride for splitting tokens (H, W).
+        merged_ratio (float): The token merging ratio applied in this hook.
+        enabled (bool): Whether the ToMe logic is currently active.
+
+    Features:
+        * **Configurable Merge Points**: Supports configurable merge (and unmerge) operations
+          across four distinct phases within the block: Self-Attention, Cross-Attention, MLP,
+          and the Parallel structure (e.g., Flux's single block).
+        * **Advanced Algorithms**: Implements token similarity screening and Bipartite Soft Matching (BSM)
+          algorithms, adapted from the original ToMe-SD code.
+        * **Architecture Compatibility**: The original implementation was limited to the
+          Cross-Attention-based SD 1.5 U-Net. This version has been modified for broader
+          applicability to various DiT and similar architectures.
+        * **RoPE Handling (Flux)**: For models involving fixed positional encodings like
+          Rotary Position Embedding (RoPE) in Flux, the implementation addresses this by
+          using the selected destination indices (`dst`) to directly `gather` the
+          corresponding positional encodings.
+
+    Reference:
+        - Paper: https://arxiv.org/abs/2303.17604
+
+    Implemented from https://github.com/dbolya/tomesd
+    """
     def __init__(self, stride: Union[int, Tuple[int, int]]=(2, 2), merged_ratio: float = 0.2, merge_config=None, generator: torch.Generator = None, **kwargs):
         super().__init__(**kwargs)
         self.stride = stride
@@ -113,7 +162,7 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
                 indices_dict['merge_dst_idx'], indices_dict['merge_src_idx'], indices_dict['unmerge_src_idx'] = select_dst_src_tokens(
                     scores, indices_dict['dst_idx'], indices_dict['src_idx'], k
                 )
-            
+
             def _select_image_rotary_emb(image_rotary_emb, encoder_hidden_seq_len, hidden_seq_len):
                 hidden_emb, encoder_emb, extra_emb = parse_image_rotary_emb(
                     self.model_type, image_rotary_emb,
@@ -133,7 +182,7 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
                         gather_dst_unmerge_tokens(x, dst, src, m_dst, u_src)
                         for x in rotary_pair
                     )
-                
+
                 hidden_emb = _gather_pair(hidden_emb, self.indices_dict)
                 if extra_emb is not None:
                     extra_emb = _gather_pair(extra_emb, self.extra_indices_dict)
@@ -246,6 +295,7 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
             self._clear()
 
         return hidden_output, encoder_hidden_output
+
 
 if __name__ == "__main__":
     model_type = "flux-dev"
