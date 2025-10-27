@@ -245,6 +245,7 @@ class PixArtSigmaPipeline(DiffusionPipeline):
 
         from project_name.utils.context import global_context
         global_context.update(
+            num_layers=self.transformer.config.num_layers,
             model_name="pixart-sigma",
             hidden_dim=self.transformer.inner_dim,
             encoder_hidden_dim=self.transformer.inner_dim,
@@ -832,6 +833,7 @@ class PixArtSigmaPipeline(DiffusionPipeline):
 
         from project_name.utils.context import global_context
         global_context.update(
+            num_inference_steps=num_inference_steps,
             encoder_hidden_seq_len=prompt_embeds.shape[1], # cfg enable, prompt_embeds batch = 2
             negative_encoder_hidden_seq_len=prompt_embeds.shape[1], # cfg enable, prompt_embeds batch = 2
             hidden_seq_height=(latents.shape[-2] // self.transformer.config.patch_size),
@@ -854,6 +856,8 @@ class PixArtSigmaPipeline(DiffusionPipeline):
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
                 current_timestep = t
+                from project_name.utils.context import global_context
+                global_context.update(current_timestep=current_timestep)
                 if not torch.is_tensor(current_timestep):
                     # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
                     # This would be a good case for the `match` statement (Python 3.10+)

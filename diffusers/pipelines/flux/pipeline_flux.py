@@ -218,6 +218,8 @@ class FluxPipeline(
         from project_name.utils.context import global_context
         global_context.update(
             model_name="flux-dev",
+            num_layers=self.transformer.config.num_layers,
+            num_single_layers=self.transformer.config.num_single_layers,
             hidden_dim=self.transformer.inner_dim,
             encoder_hidden_dim=self.transformer.inner_dim,
         )
@@ -903,6 +905,11 @@ class FluxPipeline(
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self._num_timesteps = len(timesteps)
 
+        from project_name.utils.context import global_context
+        global_context.update(
+            num_inference_steps=num_inference_steps,
+        )
+
         # handle guidance
         if self.transformer.config.guidance_embeds:
             guidance = torch.full([1], guidance_scale, device=device, dtype=torch.float32)
@@ -952,6 +959,8 @@ class FluxPipeline(
                     continue
 
                 self._current_timestep = t
+                from project_name.utils.context import global_context
+                global_context.update(current_timestep=self._current_timestep)
                 if image_embeds is not None:
                     self._joint_attention_kwargs["ip_adapter_image_embeds"] = image_embeds
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML

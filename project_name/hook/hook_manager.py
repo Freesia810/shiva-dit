@@ -19,6 +19,7 @@ class HookManager:
     _hook_config: Dict[str, tuple[Type["BaseDiTBlockHook"], dict]] = {}
     _hook_map: Dict[Union[int, str], "BaseDiTBlockHook"] = {}
     _weak_blocks: "weakref.WeakValueDictionary[str, nn.Module]" = weakref.WeakValueDictionary()
+    _shared_buffer: Dict[str, Any] = {}
 
     _block_name = {
         'sd3': ('transformer_blocks.*',),
@@ -83,6 +84,7 @@ class HookManager:
         cls._hook_map.clear()
         cls._weak_blocks.clear()
         cls._hook_config.clear()
+        cls._shared_buffer.clear()
 
     @classmethod
     @contextmanager
@@ -164,3 +166,19 @@ class HookManager:
         print(f"[HookManager] enabled={cls._enabled}, hooks={len(cls._hook_map)}")
         for name, hook in cls._hook_map.items():
             print(f"  {name}: {hook.__class__.__name__}")
+        print(f"[HookManager] Shared Buffer Keys: {list(cls._shared_buffer.keys())}")
+    
+    @classmethod
+    def set_global(cls, key: str, value: Any):
+        if not cls._enabled:
+            print("[HookManager] Warning: Disabled, skipping set_global.")
+            return
+        cls._shared_buffer[key] = value
+
+    @classmethod
+    def get_global(cls, key: str, default: Any = None) -> Any:
+        return cls._shared_buffer.get(key, default)
+
+    @classmethod
+    def global_buffer(cls) -> Dict[str, Any]:
+        return cls._shared_buffer

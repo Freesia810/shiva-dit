@@ -157,6 +157,7 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         from project_name.utils.context import global_context
         global_context.update(
             model_name="wan",
+            num_layers=self.transformer.config.num_layers,
             hidden_dim=self.transformer.config.dim,
             encoder_hidden_dim=self.transformer.config.dim,
         )
@@ -564,6 +565,7 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
 
         from project_name.utils.context import global_context
         global_context.update(
+            num_inference_steps=num_inference_steps,
             hidden_seq_height=(latents.shape[-2] // self.transformer.config.patch_size[1]),
             hidden_seq_width=(latents.shape[-1] // self.transformer.config.patch_size[2]),
             hidden_seq_frame=(num_frames // self.transformer.config.patch_size[0]),
@@ -587,6 +589,8 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                     continue
 
                 self._current_timestep = t
+                from project_name.utils.context import global_context
+                global_context.update(current_timestep=self._current_timestep)
 
                 if boundary_timestep is None or t >= boundary_timestep:
                     # wan2.1 or high-noise stage in wan2.2

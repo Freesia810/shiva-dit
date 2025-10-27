@@ -235,6 +235,7 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
             model_name="sd3",
             hidden_dim=self.transformer.inner_dim,
             encoder_hidden_dim=self.transformer.inner_dim,
+            num_layers=self.transformer.config.num_layers,
         )
 
     def _get_t5_prompt_embeds(
@@ -1051,6 +1052,11 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self._num_timesteps = len(timesteps)
 
+        from project_name.utils.context import global_context
+        global_context.update(
+            num_inference_steps=num_inference_steps,
+        )
+
         # 6. Prepare image embeddings
         if (ip_adapter_image is not None and self.is_ip_adapter_active) or ip_adapter_image_embeds is not None:
             ip_adapter_image_embeds = self.prepare_ip_adapter_image_embeds(
@@ -1071,6 +1077,9 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
+
+                from project_name.utils.context import global_context
+                global_context.update(current_timestep=t)
 
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents

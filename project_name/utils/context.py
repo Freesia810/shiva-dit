@@ -18,6 +18,13 @@ class PipelineContext:
     encoder_hidden_seq_len: Optional[int] = None
     negative_encoder_hidden_seq_len: Optional[int] = None
 
+    num_inference_steps: Optional[int] = None
+    num_layers: Optional[int] = None
+    num_single_layers: Optional[int] = None # for Flux only
+
+    # real-time timestep
+    current_timestep: Optional[int] = None
+
     # for edit task
     hidden_extra_seq_len: Optional[int] = None
     hidden_extra_seq_height: Optional[int] = None
@@ -28,6 +35,18 @@ class PipelineContext:
 
     # for pixart-sigma, which we cannot get temb from block
     embedded_timestep: Optional[torch.Tensor] = None
+
+    def hidden_seq_len_gen(self) -> int:
+        if hidden_extra_seq_len is not None:
+            return hidden_extra_seq_len + hidden_seq_len
+        else:
+            return hidden_seq_len
+
+    def encoder_hidden_seq_len_gen(self) -> int:
+        if encoder_flag:
+            return encoder_hidden_seq_len
+        else:
+            return negative_encoder_hidden_seq_len
 
     def update(self, **kwargs):
         for k, v in kwargs.items():

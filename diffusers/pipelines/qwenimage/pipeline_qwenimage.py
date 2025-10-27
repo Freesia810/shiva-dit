@@ -180,6 +180,7 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         from project_name.utils.context import global_context
         global_context.update(
             model_name="qwen-image",
+            num_layers=self.transformer.config.num_layers,
             hidden_dim=self.transformer.inner_dim,
             encoder_hidden_dim=self.transformer.inner_dim,
         )
@@ -686,6 +687,7 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
 
         from project_name.utils.context import global_context
         global_context.update(
+            num_inference_steps=num_inference_steps,
             hidden_seq_height=img_shapes[0][0][1],
             hidden_seq_width=img_shapes[0][0][2],
             hidden_seq_len=image_seq_len,
@@ -701,6 +703,8 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                     continue
 
                 self._current_timestep = t
+                from project_name.utils.context import global_context
+                global_context.update(current_timestep=self._current_timestep)
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
                 with self.transformer.cache_context("cond"):

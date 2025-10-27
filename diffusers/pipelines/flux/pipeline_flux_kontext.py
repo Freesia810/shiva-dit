@@ -263,6 +263,8 @@ class FluxKontextPipeline(
         from project_name.utils.context import global_context
         global_context.update(
             model_name="flux-kontext",
+            num_layers=self.transformer.config.num_layers,
+            num_single_layers=self.transformer.config.num_single_layers,
             hidden_dim=self.transformer.inner_dim,
             encoder_hidden_dim=self.transformer.inner_dim,
         )
@@ -1083,6 +1085,7 @@ class FluxKontextPipeline(
         
         from project_name.utils.context import global_context
         global_context.update(
+            num_inference_steps=num_inference_steps,
             hidden_seq_height=(height // (self.vae_scale_factor) // 2),
             hidden_seq_width=(width // (self.vae_scale_factor) // 2),
             hidden_seq_len=image_seq_len,
@@ -1101,6 +1104,8 @@ class FluxKontextPipeline(
                     continue
 
                 self._current_timestep = t
+                from project_name.utils.context import global_context
+                global_context.update(current_timestep=self._current_timestep)
                 if image_embeds is not None:
                     self._joint_attention_kwargs["ip_adapter_image_embeds"] = image_embeds
 

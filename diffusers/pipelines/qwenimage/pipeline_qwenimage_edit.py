@@ -217,6 +217,7 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         from project_name.utils.context import global_context
         global_context.update(
             model_name="qwen-image-edit",
+            num_layers=self.transformer.config.num_layers,
             hidden_dim=self.transformer.inner_dim,
             encoder_hidden_dim=self.transformer.inner_dim,
         )
@@ -807,6 +808,7 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
 
         from project_name.utils.context import global_context
         global_context.update(
+            num_inference_steps=num_inference_steps,
             hidden_seq_height=img_shapes[0][0][1],
             hidden_seq_width=img_shapes[0][0][2],
             hidden_seq_len=image_seq_len,
@@ -825,6 +827,8 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                     continue
 
                 self._current_timestep = t
+                from project_name.utils.context import global_context
+                global_context.update(current_timestep=self._current_timestep)
 
                 latent_model_input = latents
                 if image_latents is not None:
