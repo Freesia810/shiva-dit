@@ -857,7 +857,9 @@ class PixArtSigmaPipeline(DiffusionPipeline):
 
                 current_timestep = t
                 from project_name.utils.context import global_context
-                global_context.update(current_timestep=current_timestep)
+                global_context.update(
+                    current_timestep=current_timestep, current_iteration=i
+                )
                 if not torch.is_tensor(current_timestep):
                     # TODO: this requires sync between CPU and GPU. So try to pass timesteps as tensors if you can
                     # This would be a good case for the `match` statement (Python 3.10+)

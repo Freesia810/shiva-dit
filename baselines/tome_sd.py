@@ -155,13 +155,25 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
         if module_name in ("self-attn", "parallel") and self.enable:
             # only sample and select tokens when self-attention's start
             def _select(size, indices_dict, x, k):
-                indices_dict['dst_idx'], indices_dict['src_idx'] = sample_dst_src_with_2D_stride(size, self.stride, self.generator, rand=True, device=hidden_states.device)
+                indices_dict["dst_idx"], indices_dict["src_idx"] = (
+                    sample_dst_src_with_2D_stride(
+                        size,
+                        self.stride,
+                        self.generator,
+                        rand=True,
+                        device=hidden_states.device,
+                        batch_constraint=True,
+                        batch_size=x.shape[0],
+                    )
+                )
                 scores = self.calculate_scores(
                     x, indices_dict['dst_idx'], indices_dict['src_idx']
                 )  # (B, num_src, num_dst)
-                indices_dict['merge_dst_idx'], indices_dict['merge_src_idx'], indices_dict['unmerge_src_idx'] = select_dst_src_tokens(
-                    scores, indices_dict['dst_idx'], indices_dict['src_idx'], k
-                )
+                (
+                    indices_dict["merge_dst_idx"],
+                    indices_dict["merge_src_idx"],
+                    indices_dict["unmerge_src_idx"],
+                ) = select_dst_src_tokens(scores, k)
 
             def _select_image_rotary_emb(image_rotary_emb, encoder_hidden_seq_len, hidden_seq_len):
                 hidden_emb, encoder_emb, extra_emb = parse_image_rotary_emb(

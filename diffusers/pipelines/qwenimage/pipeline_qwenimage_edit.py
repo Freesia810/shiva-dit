@@ -828,7 +828,9 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
 
                 self._current_timestep = t
                 from project_name.utils.context import global_context
-                global_context.update(current_timestep=self._current_timestep)
+                global_context.update(
+                    current_timestep=self._current_timestep, current_iteration=i
+                )
 
                 latent_model_input = latents
                 if image_latents is not None:

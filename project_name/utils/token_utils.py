@@ -21,7 +21,6 @@ def select_topk_tokens(x: torch.Tensor, token_scores: torch.Tensor, k: int):
 
     return selected_x, topk_indices, topk_scores
 
-
 def reconstruct_tokens_by_topk(
     x: torch.Tensor,
     selected_tokens: torch.Tensor,
@@ -53,6 +52,9 @@ def sample_dst_src_with_2D_stride(
     generator: torch.Generator = None,
     rand: bool = True,
     device: torch.device = None,
+    partition_idx: torch.Tensor = None,
+    batch_constraint: bool = True,
+    batch_size: int = 1,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Sample destination (dst) and source (src) token indices from a 2D token grid,
@@ -62,6 +64,10 @@ def sample_dst_src_with_2D_stride(
     and all remaining tokens in the block are marked as src.
 
     size (h, w) -> h * w == N
+
+    partition_idx: must be (B, h_patch, w_patch, 1)
+
+    batch_constraint: whether to apply the same sampling value across the batch, default True, when partition_idx is given, this will be ignored and always be False.
     """
     with torch.no_grad():
         if isinstance(size, int):
@@ -75,58 +81,84 @@ def sample_dst_src_with_2D_stride(
 
         h_stride_num, w_stride_num = h // stride_h, w // stride_w
 
-        if rand:
-            rand_idx = torch.randint(
-                stride_h * stride_w,
-                size=(h_stride_num, w_stride_num, 1),
-                device=device,
-                generator=generator,
-            )  # (h_stride_num, w_stride_num, 1)
-        else:
-            rand_idx = torch.zeros(
-                h_stride_num, w_stride_num, 1, device=device, dtype=torch.int64
-            )  # (h_stride_num, w_stride_num, 1)
+        if partition_idx is None:
+            if batch_constraint:
+                if rand:
+                    partition_idx = torch.randint(
+                        stride_h * stride_w,
+                        size=(h_stride_num, w_stride_num, 1),
+                        device=device,
+                        generator=generator,
+                    ).expand(
+                        batch_size, -1, -1, -1
+                    )  # (B, h_stride_num, w_stride_num, 1)
+                else:
+                    partition_idx = torch.zeros(
+                        h_stride_num, w_stride_num, 1, device=device, dtype=torch.int64
+                    ).expand(
+                        batch_size, -1, -1, -1
+                    )  # (B, h_stride_num, w_stride_num, 1)
+            else:
+                if rand:
+                    partition_idx = torch.randint(
+                        stride_h * stride_w,
+                        (batch_size, h_stride_num, w_stride_num, 1),
+                        device=device,
+                        generator=generator,
+                    )  # (B, h_stride_num, w_stride_num, 1)
+                else:
+                    partition_idx = torch.zeros(
+                        batch_size,
+                        h_stride_num,
+                        w_stride_num,
+                        1,
+                        device=device,
+                        dtype=torch.int64,
+                    )  # (B, h_stride_num, w_stride_num, 1)
 
         idx_buffer_view = torch.zeros(
+            batch_size,
             h_stride_num,
             w_stride_num,
             stride_h * stride_w,
             device=device,
             dtype=torch.int64,
-        )  # (h_stride_num, w_stride_num, stride_h * stride_w)
+        )  # (B, h_stride_num, w_stride_num, stride_h * stride_w)
         idx_buffer_view.scatter_(
-            dim=2, index=rand_idx, src=-torch.ones_like(rand_idx, dtype=torch.int64)
-        )  # (h_stride_num, w_stride_num, stride_h * stride_w) dst_index = -1
+            dim=3,
+            index=partition_idx,
+            src=-torch.ones_like(partition_idx, dtype=torch.int64),
+        )  # (B, h_stride_num, w_stride_num, stride_h * stride_w) dst_index = -1
 
         idx_buffer_view = (
-            idx_buffer_view.view(h_stride_num, w_stride_num, stride_h, stride_w)
-            .transpose(1, 2)
-            .reshape(h_stride_num * stride_h, w_stride_num * stride_w)
-        )  # (h_stride_num * stride_h, w_stride_num * stride_w)
+            idx_buffer_view.view(batch_size, h_stride_num, w_stride_num, stride_h, stride_w)
+            .transpose(2, 3)
+            .reshape(batch_size, h_stride_num * stride_h, w_stride_num * stride_w)
+        )  # (B, h_stride_num * stride_h, w_stride_num * stride_w)
 
         if (h_stride_num * stride_h) < h or (w_stride_num * stride_w) < w:
-            idx_buffer = torch.zeros(h, w, device=device, dtype=torch.int64)
-            idx_buffer[: (h_stride_num * stride_h), : (w_stride_num * stride_w)] = (
+            idx_buffer = torch.zeros(batch_size, h, w, device=device, dtype=torch.int64)
+            idx_buffer[:, : (h_stride_num * stride_h), : (w_stride_num * stride_w)] = (
                 idx_buffer_view
             )
         else:
             idx_buffer = idx_buffer_view
 
         # [dst_1, dst_2, ..., src_1, src_2, ...] because -1 < 1
-        rand_idx = idx_buffer.reshape(1, -1, 1).argsort(dim=1)
+        partition_idx = idx_buffer.reshape(batch_size, -1, 1).argsort(dim=1)
 
         # Split indices into dst (front) and src (remaining)
         num_dst = h_stride_num * w_stride_num
-        dst_idx = rand_idx[:, :num_dst, :]  # (1, num_dst, 1)
-        src_idx = rand_idx[:, num_dst:, :]  # (1, N - num_dst, 1)
+        dst_idx = partition_idx[:, :num_dst, :]  # (B, num_dst, 1)
+        src_idx = partition_idx[:, num_dst:, :]  # (B, N - num_dst, 1)
 
         return dst_idx, src_idx
 
 
 def get_dst_src_tokens(x: torch.Tensor, dst_idx: torch.Tensor, src_idx: torch.Tensor):
     # x: (B, N, D)
-    # dst_idx: (1, num_dst, 1)
-    # src_idx: (1, N - num_dst, 1)
+    # dst_idx: (B, num_dst, 1)
+    # src_idx: (B, N - num_dst, 1)
     B, N, C = x.shape
     num_dst = dst_idx.shape[1]
     dst_tokens = torch.gather(x, dim=1, index=dst_idx.expand(B, num_dst, C))
@@ -134,12 +166,8 @@ def get_dst_src_tokens(x: torch.Tensor, dst_idx: torch.Tensor, src_idx: torch.Te
     return dst_tokens, src_tokens
 
 
-def select_dst_src_tokens(
-    scores: torch.Tensor, dst_idx: torch.Tensor, src_idx: torch.Tensor, k: int
-):
+def select_dst_src_tokens(scores: torch.Tensor, k: int):
     # scores: (B, num_src, num_dst)
-    # dst_idx: (1, num_dst, 1)
-    # src_idx: (1, N - num_dst, 1)
     k = min(k, scores.shape[1])
     node_max, node_idx = scores.max(dim=-1, keepdim=True)  # (B, N - num_dst, 1)
     edge_idx = node_max.argsort(dim=-2, descending=True)  # (B, N - num_dst, 1)
@@ -159,8 +187,8 @@ def gather_dst_unmerge_tokens(
     unmerge_src_idx: torch.Tensor,
 ):
     # x: (B, N, D)
-    # dst_idx: (1, num_dst, 1)
-    # src_idx: (1, N - num_dst, 1)
+    # dst_idx: (B, num_dst, 1)
+    # src_idx: (B, N - num_dst, 1)
     # merge_dst_idx: (B, k, 1)
     # unmerge_src_idx: (B, N - num_dst - k, 1)
     if x.dim() == 2:
@@ -180,7 +208,7 @@ def gather_dst_unmerge_tokens(
     res = torch.cat([unmerge_src_tokens, dst_tokens], dim=1)  # (B, N - k, D)
     if B == 1:
         return res.squeeze(0)  # (N - num_dst - k, D)
-    return res 
+    return res
 
 
 def merge_dst_src_tokens(
@@ -193,8 +221,8 @@ def merge_dst_src_tokens(
     reduce_mode: str = "mean",
 ):
     # x: (B, N, D)
-    # dst_idx: (1, num_dst, 1)
-    # src_idx: (1, N - num_dst, 1)
+    # dst_idx: (B, num_dst, 1)
+    # src_idx: (B, N - num_dst, 1)
     # merge_dst_idx: (B, k, 1)
     # merge_src_idx: (B, k, 1)
     # unmerge_src_idx: (B, N - num_dst - k, 1)
@@ -231,8 +259,8 @@ def unmerge_dst_src_tokens(
     unmerge_src_idx: torch.Tensor,
 ):
     # merged_x: (B, N - k, D)
-    # dst_idx: (1, num_dst, 1)
-    # src_idx: (1, N - num_dst, 1)
+    # dst_idx: (B, num_dst, 1)
+    # src_idx: (B, N - num_dst, 1)
     # merge_dst_idx: (B, k, 1)
     # merge_src_idx: (B, k, 1)
     # unmerge_src_idx: (B, N - num_dst - k, 1)

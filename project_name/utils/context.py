@@ -24,6 +24,7 @@ class PipelineContext:
 
     # real-time timestep
     current_timestep: Optional[int] = None
+    current_iteration: Optional[int] = None
 
     # for edit task
     hidden_extra_seq_len: Optional[int] = None

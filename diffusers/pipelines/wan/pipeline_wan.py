@@ -590,7 +590,9 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
 
                 self._current_timestep = t
                 from project_name.utils.context import global_context
-                global_context.update(current_timestep=self._current_timestep)
+                global_context.update(
+                    current_timestep=self._current_timestep, current_iteration=i
+                )
 
                 if boundary_timestep is None or t >= boundary_timestep:
                     # wan2.1 or high-noise stage in wan2.2

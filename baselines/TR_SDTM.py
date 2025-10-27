@@ -395,12 +395,12 @@ def FIDM(
             zeros_src = torch.zeros_like(independent_indices, dtype=last_ind.dtype)
             last_ind.scatter_(1, independent_indices, zeros_src)
 
-        if tore_info and tore_info.get("args", {}).get("pseudo_merge", False):
-            independent_idx = torch.cat([unm_in_x_index.squeeze(-1), dst_in_x_index.squeeze(-1)], dim=-1)
-            unindependent_idx = src_in_x_index.squeeze(-1)
-        else:
-            independent_idx = unm_in_x_index.squeeze(-1)
-            unindependent_idx = torch.cat([src_in_x_index.squeeze(-1), dst_in_x_index.squeeze(-1)], dim=-1)
+        # if tore_info and tore_info.get("args", {}).get("pseudo_merge", False):
+        #     independent_idx = torch.cat([unm_in_x_index.squeeze(-1), dst_in_x_index.squeeze(-1)], dim=-1)
+        #     unindependent_idx = src_in_x_index.squeeze(-1)
+        # else:
+        independent_idx = unm_in_x_index.squeeze(-1)
+        unindependent_idx = torch.cat([src_in_x_index.squeeze(-1), dst_in_x_index.squeeze(-1)], dim=-1)
         update_last_independent(independent_idx)
 
         def merge(x: torch.Tensor, mode="mean") -> torch.Tensor:
@@ -413,13 +413,13 @@ def FIDM(
 
             return torch.cat([unm, dst], dim=1)
 
-        def mprune(x: torch.Tensor) -> torch.Tensor:
-            a, dst = split(x)
-            n, t1, c = a.shape
+        # def mprune(x: torch.Tensor) -> torch.Tensor:
+        #     a, dst = split(x)
+        #     n, t1, c = a.shape
             
-            unm = gather(a, dim=-2, index=unm_idx.expand(n, t1 - reduce_num, c))
+        #     unm = gather(a, dim=-2, index=unm_idx.expand(n, t1 - reduce_num, c))
 
-            return torch.cat([unm, dst], dim=1)
+        #     return torch.cat([unm, dst], dim=1)
         
         def unmerge(x: torch.Tensor) -> torch.Tensor:
             unm_len = unm_idx.shape[1]

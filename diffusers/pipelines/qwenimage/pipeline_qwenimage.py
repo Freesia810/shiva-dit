@@ -704,7 +704,9 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
 
                 self._current_timestep = t
                 from project_name.utils.context import global_context
-                global_context.update(current_timestep=self._current_timestep)
+                global_context.update(
+                    current_timestep=self._current_timestep, current_iteration=i
+                )
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
                 with self.transformer.cache_context("cond"):

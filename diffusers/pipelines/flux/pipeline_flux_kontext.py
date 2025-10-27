@@ -1105,7 +1105,7 @@ class FluxKontextPipeline(
 
                 self._current_timestep = t
                 from project_name.utils.context import global_context
-                global_context.update(current_timestep=self._current_timestep)
+                global_context.update(current_timestep=self._current_timestep, current_iteration=i)
                 if image_embeds is not None:
                     self._joint_attention_kwargs["ip_adapter_image_embeds"] = image_embeds
 

@@ -1079,7 +1079,7 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
                     continue
 
                 from project_name.utils.context import global_context
-                global_context.update(current_timestep=t)
+                global_context.update(current_timestep=t, current_iteration=i)
 
                 # expand the latents if we are doing classifier free guidance
                 latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
