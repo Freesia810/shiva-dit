@@ -242,7 +242,7 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
             if image_rotary_emb is not None:
                 image_rotary_emb = _select_image_rotary_emb(
                     image_rotary_emb,
-                    encoder_hidden_seq_len=global_context.encoder_hidden_seq_len if global_context.encoder_flag else global_context.negative_encoder_hidden_seq_len,
+                    encoder_hidden_seq_len=global_context.encoder_hidden_seq_len_gen(),
                     hidden_seq_len=global_context.hidden_seq_len,
                 )
 
@@ -253,6 +253,7 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
         module_name: Literal["self-attn", "cross-attn", "ffn", "parallel"],
         norm_hidden_states: torch.Tensor,
         norm_encoder_hidden_states: torch.Tensor = None,
+        image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):
         if self.merge_config.get(module_name, False):
             def _merge(x, indices_dict):
@@ -273,7 +274,7 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
                 # normal case
                 norm_hidden_states = _merge(norm_hidden_states, self.indices_dict)
 
-        return norm_hidden_states, norm_encoder_hidden_states
+        return super().hook_after_norm(module_name, norm_hidden_states, norm_encoder_hidden_states, image_rotary_emb)
 
     def hook_after_module(
         self, 
@@ -306,7 +307,7 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
             # clear indices after ffn
             self._clear()
 
-        return hidden_output, encoder_hidden_output
+        return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
 
 
 if __name__ == "__main__":
@@ -315,7 +316,7 @@ if __name__ == "__main__":
 
     tomesd_config = {
         "stride": (2, 2),
-        "merged_ratio": 0.1,
+        "merged_ratio": 0.3,
         "merge_config": {
             "self-attn": True,
             "cross-attn": False,

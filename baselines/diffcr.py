@@ -98,7 +98,7 @@ class DiffCRDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                     self.model_type,
                     image_rotary_emb,
                     global_context.hidden_seq_len,
-                    global_context.encoder_hidden_seq_len if global_context.encoder_flag else global_context.negative_encoder_hidden_seq_len,
+                    global_context.encoder_hidden_seq_len_gen(),
                     split_extra=False
                 )
 

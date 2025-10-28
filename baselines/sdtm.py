@@ -1,14 +1,12 @@
 import math
 import torch
 import torch.nn.functional as F
-from typing import Union, Tuple
-from project_name.hook import BaseDiTBlockHook, HookManager
-from project_name.utils import global_context
-from project_name.utils import get_dst_src_tokens, sample_dst_src_with_2D_stride, select_dst_src_tokens
-from project_name.utils.token_utils import merge_dst_src_tokens
+from typing import Union, Tuple, Literal, Optional
+from project_name.hook import BaseDiTBlockHook, HookManager, BaseDelegator
+from project_name.utils import global_context, merge_dst_src_tokens, get_dst_src_tokens, sample_dst_src_with_2D_stride, select_dst_src_tokens, parse_image_rotary_emb, join_image_rotary_emb, get_pipeline, process_quick_start
 
 
-class SDTMDiTBlockHook(BaseDiTBlockHook):
+class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
     """
     Reference:
         - Paper: https://arxiv.org/pdf/2505.11707
@@ -24,6 +22,7 @@ class SDTMDiTBlockHook(BaseDiTBlockHook):
         deviation: float = 0.2,
         alpha_s=0.05,
         mcw: float = 0.2,
+        protected_step_stride = 3,
         generator: torch.Generator = None,
         **kwargs,
     ):
@@ -38,6 +37,8 @@ class SDTMDiTBlockHook(BaseDiTBlockHook):
         # calculrate SSM scores
         self.alpha_s = alpha_s
 
+        self.protected_step_stride = protected_step_stride
+
         self.generator = generator
 
         # dynamic attr
@@ -45,17 +46,31 @@ class SDTMDiTBlockHook(BaseDiTBlockHook):
         self.indices_dict = {}
 
         # only work for edit task with dual hidden states
+        self.extra_start_idx = None
         self.extra_size = None
         self.extra_indices_dict = {}
 
         # cache for unmerge
         self.mcw = mcw
-        self.prev_attn_output = None
-        self.prev_mlp_output = None
+        self.prev_output = {
+            'self-attn': None,
+            'cross-attn': None,
+            'ffn': None,
+            'parallel': None
+        }
+        self.prev_output_extra = {
+            'self-attn': None,
+            'cross-attn': None,
+            'ffn': None,
+            'parallel': None
+        }
+
+        self.mode_flag = None # 'SSM' or 'IDM'
 
     def _clean(self):
         self.indices_dict = {}
         self.extra_indices_dict = {}
+        self.mode_flag = None
 
     def calculate_reduce_num(self, seq_len: int) -> int:
         if global_context.num_inference_steps > 1:
@@ -68,7 +83,7 @@ class SDTMDiTBlockHook(BaseDiTBlockHook):
         alpha = math.cos(progress * math.pi / 2)
         ratio_current = (self.init_ratio - self.deviation) + (2.0 * self.deviation) * alpha
 
-        reduce_num = int(seq_len.shape[1] * float(ratio_current))
+        reduce_num = int(seq_len * float(ratio_current))
         return reduce_num
 
     @torch.no_grad()
@@ -116,7 +131,7 @@ class SDTMDiTBlockHook(BaseDiTBlockHook):
         x_flat_2 = x_flat.unsqueeze(-2)  # (B, h_patch, w_patch, C, 1, K)
         sims = F.cosine_similarity(
             x_flat_1, x_flat_2, dim=3
-        )  # (B, h_patch, w_patch, C, K, K)
+        )  # (B, h_patch, w_patch, K, K)
 
         # for paper's formula, we need to divide by K * (K - 1), but we found that the origin code makes a division by K * K
         similarity_map = sims.sum(dim=(-2, -1)) / (
@@ -134,10 +149,10 @@ class SDTMDiTBlockHook(BaseDiTBlockHook):
         dtype: torch.dtype = torch.float32,
     ):
         last_independent = HookManager.get_global("last_independent", None)  # (B, N)
-        B, _ = last_independent.shape
-
         if last_independent is None:
             return None
+
+        B, _ = last_independent.shape
 
         if isinstance(size, int):
             h = w = size
@@ -177,22 +192,37 @@ class SDTMDiTBlockHook(BaseDiTBlockHook):
 
     @torch.no_grad()
     @staticmethod
-    def update_freq(independent_indices: torch.Tensor):
+    def update_freq(independent_indices: torch.Tensor, is_extra: bool = False):
         """
         freq is shared by all DiT Blocks
         """
-        last_independent = HookManager.get_global("last_independent", None)
-        if last_independent is None:
-            HookManager.set_global(
-                "last_independent",
-                torch.zeros(
-                    independent_indices.shape[0],
-                    global_context.hidden_seq_len,
-                    device=independent_indices.device,
-                    dtype=torch.int32,
-                ),
-            )
-            last_independent = HookManager.get_global("last_independent")
+        if is_extra:
+            last_independent = HookManager.get_global("extra_last_independent", None)
+            if last_independent is None:
+                HookManager.set_global(
+                    "extra_last_independent",
+                    torch.zeros(
+                        independent_indices.shape[0],
+                        global_context.hidden_extra_seq_len,
+                        device=independent_indices.device,
+                        dtype=torch.int32,
+                    ),
+                )
+                last_independent = HookManager.get_global("extra_last_independent")
+        else:
+            last_independent = HookManager.get_global("last_independent", None)
+            if last_independent is None:
+                HookManager.set_global(
+                    "last_independent",
+                    torch.zeros(
+                        independent_indices.shape[0],
+                        global_context.hidden_seq_len,
+                        device=independent_indices.device,
+                        dtype=torch.int32,
+                    ),
+                )
+                last_independent = HookManager.get_global("last_independent")
+        
 
         last_independent.add_(1)
         zeros_src = torch.zeros_like(independent_indices, dtype=last_independent.dtype)
@@ -222,6 +252,9 @@ class SDTMDiTBlockHook(BaseDiTBlockHook):
             stride_h = stride_w = stride
         else:
             stride_h, stride_w = stride
+        
+        # from original code
+        reduce_num = reduce_num // 48 * 16 
 
         _, selected_window_flat_indices = scores.topk(
             reduce_num, dim=-1
@@ -313,10 +346,10 @@ class SDTMDiTBlockHook(BaseDiTBlockHook):
         size: Union[int, Tuple[int, int]],
         reduce_num: int,
     ):
-        similarity_map_flat = self.calculate_sims_patched(
+        similarity_map_flat = SDTMDiTBlockHook.calculate_sims_patched(
             x, size, self.stride
         )  # (B, h_patch * w_patch)
-        indiv_priority_flat = self.calculate_freq_scores_patched(
+        indiv_priority_flat = SDTMDiTBlockHook.calculate_freq_scores_patched(
             size, self.stride, similarity_map_flat.dtype
         )  # (B, h_patch * w_patch)
         if indiv_priority_flat is not None:
@@ -333,7 +366,7 @@ class SDTMDiTBlockHook(BaseDiTBlockHook):
             indices_dict["src_idx"],
             indices_dict["merge_idx"],
             indices_dict["unmerge_idx"],
-        ) = self.select_window_tokens(
+        ) = SDTMDiTBlockHook.select_window_tokens(
             similarity_map_flat,
             reduce_num,
             size,
@@ -342,10 +375,9 @@ class SDTMDiTBlockHook(BaseDiTBlockHook):
             generator=self.generator,
         )
 
-        self.update_freq(indices_dict["unmerge_idx"].squeeze(-1))
-
     @torch.no_grad()
-    def select_image_rotary_emb(self, img_rotary_emb: torch.Tensor, indices_dict: dict) -> torch.Tensor:
+    @staticmethod
+    def select_image_rotary_emb(img_rotary_emb: torch.Tensor, indices_dict: dict) -> torch.Tensor:
         # img_rotary_emb: (N, D)
         # dst_idx       (B, reduce_num, 1)
         # src_idx       (B, reduce_num * (stride_h * stride_w - 1), 1)
@@ -460,8 +492,9 @@ class SDTMDiTBlockHook(BaseDiTBlockHook):
         return out
 
     @torch.no_grad()
+    @staticmethod
     def calculate_scores(
-        self, x: torch.Tensor, dst_idx: torch.Tensor, src_idx: torch.Tensor
+        x: torch.Tensor, dst_idx: torch.Tensor, src_idx: torch.Tensor
     ) -> torch.Tensor:
         # the same as ToMeSD
         # x: (B, N, D)
@@ -496,7 +529,7 @@ class SDTMDiTBlockHook(BaseDiTBlockHook):
         The values of attention map (N * N) is hard to hook, because they are calculated inside the attention kernel in a parrllel way.
         """
         last_independent = HookManager.get_global("last_independent", None)  # (B, N)
-        B, _ = last_independent.shape
+        B, _, C = x.shape
 
         if isinstance(size, int):
             h = w = size
@@ -538,14 +571,15 @@ class SDTMDiTBlockHook(BaseDiTBlockHook):
                 size,
                 self.stride,
                 self.generator,
-                rand=True,
                 device=x.device,
                 partition_idx=dst_pos,
                 batch_size=B,
             )
         )
 
-        scores = self.calculate_scores(
+        reduce_num = reduce_num // 16 * 16
+
+        scores = SDTMDiTBlockHook.calculate_scores(
             x, indices_dict["dst_idx"], indices_dict["src_idx"]
         )  # (B, num_src, num_dst)
 
@@ -555,7 +589,8 @@ class SDTMDiTBlockHook(BaseDiTBlockHook):
             indices_dict["unmerge_src_idx"],
         ) = select_dst_src_tokens(scores, reduce_num)
 
-        self.update_freq(indices_dict["unmerge_src_idx"].squeeze(-1))
+        indices_dict['unmerge_src_final_idx'] = torch.gather(indices_dict['src_idx'].expand(indices_dict['src_idx'].shape[0], indices_dict['src_idx'].shape[1], 1), dim=1, index=indices_dict['unmerge_src_idx'])
+        indices_dict['merge_src_final_idx'] = torch.gather(indices_dict['src_idx'].expand(indices_dict['src_idx'].shape[0], indices_dict['src_idx'].shape[1], 1), dim=1, index=indices_dict['merge_src_idx'])
 
     @torch.no_grad()
     def merge_IDM(self, x: torch.Tensor, indices_dict: dict) -> torch.Tensor:
@@ -598,12 +633,6 @@ class SDTMDiTBlockHook(BaseDiTBlockHook):
             index=indices_dict["merge_dst_idx"].expand(B, k, C),
         )  # use dst tokens to simulate src tokens
 
-        merge_src_final_idx = torch.gather(
-            indices_dict["src_idx"].expand(B, N - num_dst, 1),
-            dim=1,
-            index=indices_dict["merge_src_idx"],
-        ).expand(B, k, C)
-
         if prev_output is not None:
             prev_output = prev_output.to(device=merged_x.device, dtype=merged_x.dtype)
             cached_dst = torch.gather(
@@ -615,7 +644,7 @@ class SDTMDiTBlockHook(BaseDiTBlockHook):
             cached_src = torch.gather(
                 prev_output,
                 dim=-2,
-                index=merge_src_final_idx,
+                index=indices_dict['merge_src_final_idx'].expand(B, k, C),
             )
             merge_dst_tokens = self.mcw * merge_dst_tokens + (1.0 - self.mcw) * cached_dst
             simulated_merged_src_tokens = self.mcw * simulated_merged_src_tokens + (1.0 - self.mcw) * cached_src
@@ -626,15 +655,249 @@ class SDTMDiTBlockHook(BaseDiTBlockHook):
         out.scatter_(dim=-2, index=indices_dict['dst_idx'].expand(B, num_dst, C), src=merge_dst_tokens)
         out.scatter_(
             dim=-2,
-            index=torch.gather(
-                indices_dict['src_idx'].expand(B, N - num_dst, 1), dim=1, index=indices_dict['unmerge_src_idx']
-            ).expand(B, unmerge_len, C),
+            index=indices_dict['unmerge_src_final_idx'].expand(B, unmerge_len, C),
             src=unmerge_src_tokens,
         )
         out.scatter_(
             dim=-2,
-            index=merge_src_final_idx,
+            index=indices_dict['merge_src_final_idx'].expand(B, k, C),
             src=simulated_merged_src_tokens,
         )
 
         return out
+
+
+    def delegated_call(self, func, module_self, *args, **kwargs):
+        curr_iter = global_context.current_iteration
+        switch_step = int(global_context.num_inference_steps * self.switch_step_fraction)
+        if curr_iter <= switch_step:
+            self.mode_flag = "SSM"
+        else:
+            self.mode_flag = "IDM"
+
+        if self.protected_step_stride > 0 and curr_iter % self.protected_step_stride == 0:
+            self.mode_flag = None
+        
+        return func(module_self, *args, **kwargs)
+
+    def hook_after_norm(
+        self,
+        module_name: Literal["self-attn", "cross-attn", "ffn", "parallel"],
+        norm_hidden_states: torch.Tensor,
+        norm_encoder_hidden_states: torch.Tensor = None,
+        image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    ):
+        """
+        Hook function called after normalization. Handles token processing (state update)
+        and token merging (transformation) based on module name and mode flag.
+        """
+        final_hidden_states = norm_hidden_states  # Start with the input state
+
+        # --- Part 1: Token Processing (Updates internal state like indices_dict) ---
+        if self.mode_flag and module_name in ("self-attn", "parallel"):
+            # Determine if we have dual hidden states (main + extra)
+            has_extra = global_context.hidden_extra_seq_len is not None
+
+            # --- Validation ---
+            required_main = ['hidden_seq_height', 'hidden_seq_width', 'hidden_seq_len']
+            required_extra = ['hidden_extra_seq_height', 'hidden_extra_seq_width', 'hidden_extra_seq_len']
+            required_attrs = required_main + (required_extra if has_extra else [])
+            missing_attrs = [attr for attr in required_attrs if getattr(global_context, attr, None) is None]
+            if missing_attrs:
+                raise ValueError(f"{', '.join(missing_attrs)} must be set in global_context")
+
+            # --- Initialization & Calculations ---
+            if self.size is None:
+                self.size = (global_context.hidden_seq_height, global_context.hidden_seq_width)
+            seq_len = global_context.hidden_seq_len
+            reduce_num = self.calculate_reduce_num(seq_len)
+
+            # Prepare parameters for processing parts
+            parts_params = []
+            parts_params.append({
+                "slice": norm_hidden_states[:, :seq_len, :],
+                "indices": self.indices_dict,
+                "size": self.size,
+                "reduce_num": reduce_num,
+            })
+
+            if has_extra:
+                if self.extra_size is None:
+                    self.extra_size = (global_context.hidden_extra_seq_height, global_context.hidden_extra_seq_width)
+                extra_reduce_num = self.calculate_reduce_num(global_context.hidden_extra_seq_len)
+                parts_params.append({
+                    "slice": norm_hidden_states[:, seq_len:, :],
+                    "indices": self.extra_indices_dict,
+                    "size": self.extra_size,
+                    "reduce_num": extra_reduce_num,
+                })
+
+            # --- Execute Processing (Updates self.indices_dict, self.extra_indices_dict) ---
+            if self.mode_flag == 'SSM':
+                for params in parts_params:
+                    self.process_SSM(
+                        params["slice"],
+                        params["indices"], # Assumed to update this dict
+                        params["size"],
+                        params["reduce_num"],
+                    )
+            elif self.mode_flag == 'IDM':
+                common_idm_kwargs = {
+                    "stride": self.stride,
+                    "device": norm_hidden_states.device,
+                    "rand": True,
+                    "generator": self.generator,
+                }
+                for params in parts_params:
+                    self.process_IDM(
+                        params["slice"],
+                        params["size"],
+                        common_idm_kwargs["stride"],
+                        params["reduce_num"],
+                        params["indices"], # Assumed to update this dict
+                        common_idm_kwargs["device"],
+                        rand=common_idm_kwargs["rand"],
+                        generator=common_idm_kwargs["generator"],
+                    )
+            else:
+                raise ValueError(f"Invalid mode_flag for processing: {self.mode_flag}")
+            
+            if has_extra:
+                if self.mode_flag == 'SSM':
+                    SDTMDiTBlockHook.update_freq(self.extra_indices_dict["unmerge_idx"].squeeze(-1), is_extra=True)
+                elif self.mode_flag == 'IDM':
+                    SDTMDiTBlockHook.update_freq(self.extra_indices_dict['unmerge_src_final_idx'].squeeze(-1), is_extra=True)
+            else:
+                if self.mode_flag == 'SSM':
+                    SDTMDiTBlockHook.update_freq(self.indices_dict["unmerge_idx"].squeeze(-1))
+                elif self.mode_flag == 'IDM':
+                    SDTMDiTBlockHook.update_freq(self.indices_dict['unmerge_src_final_idx'].squeeze(-1))
+            
+            # Handle image rotary emb
+            if image_rotary_emb is not None and self.mode_flag == 'SSM':
+                def _select_image_rotary_emb(image_rotary_emb, encoder_hidden_seq_len, hidden_seq_len):
+                    hidden_emb, encoder_emb, extra_emb = parse_image_rotary_emb(
+                        self.model_type, image_rotary_emb,
+                        hidden_seq_len, encoder_hidden_seq_len
+                    )
+
+                    def _gather_pair(rotary_pair, indices_dict):
+                        if rotary_pair is None:
+                            return None
+                        return tuple(
+                            SDTMDiTBlockHook.select_image_rotary_emb(x, indices_dict)
+                            for x in rotary_pair
+                        )
+
+                    hidden_emb = _gather_pair(hidden_emb, self.indices_dict)
+                    if extra_emb is not None:
+                        extra_emb = _gather_pair(extra_emb, self.extra_indices_dict)
+                    return join_image_rotary_emb(self.model_type, hidden_emb, encoder_emb, extra_emb)
+
+                image_rotary_emb = _select_image_rotary_emb(
+                    image_rotary_emb,
+                    encoder_hidden_seq_len=global_context.encoder_hidden_seq_len_gen(),
+                    hidden_seq_len=global_context.hidden_seq_len,
+                )
+
+        # --- Part 2: Token Merging (Transforms the hidden states) ---
+        merge_func = None
+        if self.mode_flag == 'SSM' and module_name in ('ffn', 'self-attn', 'cross-attn', 'parallel'):
+            merge_func = self.merge_SSM
+        elif self.mode_flag == 'IDM' and module_name == 'ffn':
+            merge_func = self.merge_IDM
+
+        if merge_func is not None:
+            has_extra = global_context.hidden_extra_seq_len is not None
+            target_states_for_merge = norm_hidden_states # Merge the current state
+
+            if has_extra:
+                # Re-validate seq_len existence for split
+                if global_context.hidden_seq_len is None:
+                    raise ValueError("hidden_seq_len must be set for merging split")
+
+                seq_len = global_context.hidden_seq_len
+                # Check if splitting is actually possible/needed
+                if 0 < seq_len < target_states_for_merge.shape[1]:
+                    h1, h2 = target_states_for_merge.split([seq_len, target_states_for_merge.shape[1] - seq_len], dim=1)
+                    # Apply merge using potentially updated indices from Part 1
+                    merged_h1 = merge_func(h1, self.indices_dict)
+                    merged_h2 = merge_func(h2, self.extra_indices_dict)
+                    self.extra_start_idx = merged_h1.shape[1]
+                    final_hidden_states = torch.cat([merged_h1, merged_h2], dim=1)
+                else:
+                    # If seq_len covers the whole tensor or is zero, merge as one block
+                    final_hidden_states = merge_func(target_states_for_merge, self.indices_dict)
+            else:
+                # Apply merge to the whole tensor
+                final_hidden_states = merge_func(target_states_for_merge, self.indices_dict)
+
+        # Pass the final state (potentially processed in Part 1 and merged in Part 2)
+        return super().hook_after_norm(module_name, final_hidden_states, norm_encoder_hidden_states, image_rotary_emb)
+
+    def hook_after_module(
+        self, 
+        module_name: Literal["self-attn", "cross-attn", "ffn", "parallel"],
+        hidden_output: torch.Tensor,
+        encoder_hidden_output: torch.Tensor = None,
+    ):
+        unmerge_func = None
+        if self.mode_flag == 'SSM' and module_name in ('ffn', 'self-attn', 'cross-attn', 'parallel'):
+            unmerge_func = self.unmerge_SSM
+        elif self.mode_flag == 'IDM' and module_name == 'ffn':
+            unmerge_func = self.unmerge_IDM
+
+        has_extra = global_context.hidden_extra_seq_len is not None
+        if unmerge_func is not None:
+            if has_extra:
+                h1, h2 = hidden_output.split([self.extra_start_idx, hidden_output.shape[1] - self.extra_start_idx], dim=1)
+                unmerged_h1 = unmerge_func(h1, self.indices_dict, self.prev_output[module_name])
+                unmerged_h2 = unmerge_func(h2, self.extra_indices_dict, self.prev_output_extra[module_name])
+                hidden_output = torch.cat([unmerged_h1, unmerged_h2], dim=1)
+                self.prev_output[module_name] = unmerged_h1
+                self.prev_output_extra[module_name] = unmerged_h2
+            else:
+                hidden_output = unmerge_func(hidden_output, self.indices_dict, self.prev_output[module_name])
+                self.prev_output[module_name] = hidden_output
+        else:
+            if has_extra:
+                h1, h2 = hidden_output.split([global_context.hidden_seq_len, hidden_output.shape[1] - global_context.hidden_seq_len], dim=1)
+                self.prev_output[module_name] = h1
+                self.prev_output_extra[module_name] = h2
+            else:
+                self.prev_output[module_name] = hidden_output
+        
+        if module_name in ("ffn", "parallel"):
+            # clear indices after ffn
+            self._clean()
+
+        return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
+            
+if __name__ == "__main__":
+    model_type = "flux-dev"
+    pipe, model_attrs = get_pipeline(model_type)
+
+    generator = torch.Generator("cuda").manual_seed(0)
+
+    sdtm_config = {
+        "stride": (2, 2),
+        "switch_step_fraction": 0.4,
+        "init_ratio": 0.3,
+        "deviation": 0.2,
+        "alpha_s": 0.05,
+        "mcw": 0.1,
+        "protected_step_stride": 1,
+        "generator":generator,
+    }
+
+    HookManager.configure_hooks(
+        model_type=model_type,
+        default=(SDTMDiTBlockHook, sdtm_config),
+    )
+
+    with HookManager.enabled():
+        HookManager.inject_hooks(model_type=model_type, pipe=pipe, model_attrs=model_attrs)
+        res = process_quick_start(pipe)
+        res.save(f"{model_type}_sdtm.png")
+    
+    print(global_context)

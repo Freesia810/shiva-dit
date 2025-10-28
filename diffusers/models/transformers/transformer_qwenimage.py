@@ -469,7 +469,7 @@ class QwenImageTransformerBlock(nn.Module):
 
         # self-attn's after norm
         if self._hook is not None:
-            img_modulated, txt_modulated = self._hook.hook_after_norm("self-attn", img_modulated, txt_modulated)
+            img_modulated, txt_modulated, image_rotary_emb = self._hook.hook_after_norm("self-attn", img_modulated, txt_modulated, image_rotary_emb)
 
         # Use QwenAttnProcessor2_0 for joint attention computation
         # This directly implements the DoubleStreamLayerMegatron logic:

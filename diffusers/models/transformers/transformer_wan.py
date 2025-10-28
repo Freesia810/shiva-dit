@@ -512,7 +512,7 @@ class WanTransformerBlock(nn.Module):
         norm_hidden_states = (self.norm1(hidden_states.float()) * (1 + scale_msa) + shift_msa).type_as(hidden_states)
         # self-attn's after norm
         if self._hook is not None:
-            hidden_states, _ = self._hook.hook_after_norm("self-attn", hidden_states, None)
+            hidden_states, _, rotary_emb = self._hook.hook_after_norm("self-attn", hidden_states, None, rotary_emb)
 
         attn_output = self.attn1(norm_hidden_states, None, None, rotary_emb)
         hidden_states = (hidden_states.float() + attn_output * gate_msa).type_as(hidden_states)

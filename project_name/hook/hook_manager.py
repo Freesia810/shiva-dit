@@ -1,7 +1,7 @@
 import torch.nn as nn
 import weakref
 import fnmatch
-from typing import Dict, Type, Optional, Union
+from typing import Dict, Type, Optional, Union, Any
 from contextlib import contextmanager
 from copy import deepcopy
 from project_name.hook.block_hook import BaseDiTBlockHook

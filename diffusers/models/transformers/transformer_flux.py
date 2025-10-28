@@ -452,11 +452,12 @@ class FluxSingleTransformerBlock(nn.Module):
                 norm_hidden_states[:, :text_seq_len],
                 norm_hidden_states[:, text_seq_len:],
             )
-            norm_hidden_states, norm_encoder_hidden_states = (
+            norm_hidden_states, norm_encoder_hidden_states, image_rotary_emb = (
                 self._hook.hook_after_norm(
                     "parallel",
                     norm_hidden_states,
                     norm_encoder_hidden_states,
+                    image_rotary_emb
                 )
             )
             norm_hidden_states = torch.cat(
@@ -552,8 +553,8 @@ class FluxTransformerBlock(nn.Module):
 
         # self-attn's after norm
         if self._hook is not None:
-            norm_hidden_states, norm_encoder_hidden_states = self._hook.hook_after_norm(
-               'self-attn', norm_hidden_states, norm_encoder_hidden_states
+            norm_hidden_states, norm_encoder_hidden_states, image_rotary_emb = self._hook.hook_after_norm(
+               'self-attn', norm_hidden_states, norm_encoder_hidden_states, image_rotary_emb
             )
 
         # Attention.

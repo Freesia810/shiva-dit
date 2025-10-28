@@ -38,16 +38,16 @@ class PipelineContext:
     embedded_timestep: Optional[torch.Tensor] = None
 
     def hidden_seq_len_gen(self) -> int:
-        if hidden_extra_seq_len is not None:
-            return hidden_extra_seq_len + hidden_seq_len
+        if self.hidden_extra_seq_len is not None:
+            return self.hidden_extra_seq_len + self.hidden_seq_len
         else:
-            return hidden_seq_len
+            return self.hidden_seq_len
 
     def encoder_hidden_seq_len_gen(self) -> int:
-        if encoder_flag:
-            return encoder_hidden_seq_len
+        if self.encoder_flag:
+            return self.encoder_hidden_seq_len
         else:
-            return negative_encoder_hidden_seq_len
+            return self.negative_encoder_hidden_seq_len
 
     def update(self, **kwargs):
         for k, v in kwargs.items():

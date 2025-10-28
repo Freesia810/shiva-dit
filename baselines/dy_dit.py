@@ -174,6 +174,7 @@ class DynamicDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         module_name: Literal["self-attn", "cross-attn", "ffn"],
         norm_hidden_states: torch.Tensor,
         norm_encoder_hidden_states: torch.Tensor = None,
+        image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):
         if module_name == "ffn" and self.token_idx is not None:
             B, _, C = norm_hidden_states.shape
@@ -192,6 +193,7 @@ class DynamicDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             module_name,
             norm_hidden_states,
             norm_encoder_hidden_states,
+            image_rotary_emb,
         )
 
     def hook_after_module(
