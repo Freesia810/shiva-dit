@@ -3,7 +3,17 @@ import torch
 import torch.nn.functional as F
 from typing import Union, Tuple, Literal, Optional
 from project_name.hook import BaseDiTBlockHook, HookManager, BaseDelegator
-from project_name.utils import global_context, merge_dst_src_tokens, get_dst_src_tokens, sample_dst_src_with_2D_stride, select_dst_src_tokens, parse_image_rotary_emb, join_image_rotary_emb, get_pipeline, process_quick_start
+from project_name.utils import (
+    global_context,
+    merge_dst_src_tokens,
+    get_dst_src_tokens,
+    sample_dst_src_with_2D_stride,
+    select_dst_src_tokens,
+    parse_image_rotary_emb,
+    join_image_rotary_emb,
+    get_pipeline,
+    process_quick_start,
+)
 
 
 class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
@@ -22,7 +32,7 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
         deviation: float = 0.2,
         alpha_s=0.05,
         mcw: float = 0.2,
-        protected_step_stride = 3,
+        protected_step_stride=3,
         generator: torch.Generator = None,
         **kwargs,
     ):
@@ -31,8 +41,8 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
 
         # calculrate reduce num params
         self.switch_step_fraction = switch_step_fraction
-        self.init_ratio = init_ratio # ρ in paper
-        self.deviation = deviation # d in paper
+        self.init_ratio = init_ratio  # ρ in paper
+        self.deviation = deviation  # d in paper
 
         # calculrate SSM scores
         self.alpha_s = alpha_s
@@ -53,19 +63,19 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
         # cache for unmerge
         self.mcw = mcw
         self.prev_output = {
-            'self-attn': None,
-            'cross-attn': None,
-            'ffn': None,
-            'parallel': None
+            "self-attn": None,
+            "cross-attn": None,
+            "ffn": None,
+            "parallel": None,
         }
         self.prev_output_extra = {
-            'self-attn': None,
-            'cross-attn': None,
-            'ffn': None,
-            'parallel': None
+            "self-attn": None,
+            "cross-attn": None,
+            "ffn": None,
+            "parallel": None,
         }
 
-        self.mode_flag = None # 'SSM' or 'IDM'
+        self.mode_flag = None  # 'SSM' or 'IDM'
 
     def _clean(self):
         self.indices_dict = {}
@@ -81,7 +91,9 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
             progress = 0.0
 
         alpha = math.cos(progress * math.pi / 2)
-        ratio_current = (self.init_ratio - self.deviation) + (2.0 * self.deviation) * alpha
+        ratio_current = (self.init_ratio - self.deviation) + (
+            2.0 * self.deviation
+        ) * alpha
 
         reduce_num = int(seq_len * float(ratio_current))
         return reduce_num
@@ -222,7 +234,6 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
                     ),
                 )
                 last_independent = HookManager.get_global("last_independent")
-        
 
         last_independent.add_(1)
         zeros_src = torch.zeros_like(independent_indices, dtype=last_independent.dtype)
@@ -252,9 +263,9 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
             stride_h = stride_w = stride
         else:
             stride_h, stride_w = stride
-        
+
         # from original code
-        reduce_num = reduce_num // 48 * 16 
+        reduce_num = reduce_num // 48 * 16
 
         _, selected_window_flat_indices = scores.topk(
             reduce_num, dim=-1
@@ -377,7 +388,9 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
 
     @torch.no_grad()
     @staticmethod
-    def select_image_rotary_emb(img_rotary_emb: torch.Tensor, indices_dict: dict) -> torch.Tensor:
+    def select_image_rotary_emb(
+        img_rotary_emb: torch.Tensor, indices_dict: dict
+    ) -> torch.Tensor:
         # img_rotary_emb: (N, D)
         # dst_idx       (B, reduce_num, 1)
         # src_idx       (B, reduce_num * (stride_h * stride_w - 1), 1)
@@ -388,8 +401,8 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
             img_rotary_emb = img_rotary_emb.unsqueeze(0)  # (1, N, D)
 
         B, _, C = img_rotary_emb.shape
-        reduce_num = indices_dict['dst_idx'].shape[1]
-        unmerge_dim = indices_dict['unmerge_idx'].shape[1]
+        reduce_num = indices_dict["dst_idx"].shape[1]
+        unmerge_dim = indices_dict["unmerge_idx"].shape[1]
 
         unm = torch.gather(
             img_rotary_emb,
@@ -398,8 +411,10 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
         )  # (B, (h_patch * w_patch - reduce_num) * stride_h * stride_w, C)
 
         dst = torch.gather(
-            img_rotary_emb, dim=-2, index=indices_dict["dst_idx"].expand(B, reduce_num, C)
-        ) # (B, reduce_num, C)
+            img_rotary_emb,
+            dim=-2,
+            index=indices_dict["dst_idx"].expand(B, reduce_num, C),
+        )  # (B, reduce_num, C)
 
         img_rotary_emb = torch.cat([unm, dst], dim=1)
         if B == 1:
@@ -418,9 +433,9 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
         # merge_idx     (B, reduce_num * (stride_h * stride_w - 1), 1)
         # unmerge_idx   (B, (h_patch * w_patch - reduce_num) * stride_h * stride_w, 1)
         B, N, C = x.shape
-        reduce_num = indices_dict['dst_idx'].shape[1]
-        src_dim = indices_dict['src_idx'].shape[1]
-        unmerge_dim = indices_dict['unmerge_idx'].shape[1]
+        reduce_num = indices_dict["dst_idx"].shape[1]
+        src_dim = indices_dict["src_idx"].shape[1]
+        unmerge_dim = indices_dict["unmerge_idx"].shape[1]
 
         src = torch.gather(
             x,
@@ -434,13 +449,13 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
             x,
             dim=-2,
             index=indices_dict["unmerge_idx"].expand(B, unmerge_dim, C),
-        ) # (B, (h_patch * w_patch - reduce_num) * stride_h * stride_w, C)
+        )  # (B, (h_patch * w_patch - reduce_num) * stride_h * stride_w, C)
         dst = dst.scatter_reduce(
             -2,
             indices_dict["merge_idx"].expand(B, src_dim, C),
             src,
             reduce=reduce_mode,
-        ) # (B, reduce_num, C)
+        )  # (B, reduce_num, C)
         x = torch.cat([unm, dst], dim=1)
         return x
 
@@ -459,7 +474,7 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
         unm, dst = x[..., :unm_len, :], x[..., unm_len:, :]
         reduce_num = indices_dict["dst_idx"].shape[1]
         src_dim = indices_dict["src_idx"].shape[1]
-        unmerge_dim = indices_dict['unmerge_idx'].shape[1]
+        unmerge_dim = indices_dict["unmerge_idx"].shape[1]
         total_seq_len = reduce_num + unmerge_dim + src_dim
 
         src = torch.gather(
@@ -486,9 +501,15 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
             src = self.mcw * src + (1.0 - self.mcw) * cached_src
 
         out = torch.zeros(B, total_seq_len, C, device=x.device, dtype=x.dtype)
-        out.scatter_(dim=-2, index=indices_dict["dst_idx"].expand(B, reduce_num, C), src=dst)
-        out.scatter_(dim=-2, index=indices_dict["unmerge_idx"].expand(B, unmerge_dim, C), src=unm)
-        out.scatter_(dim=-2, index=indices_dict["src_idx"].expand(B, src_dim, C), src=src)
+        out.scatter_(
+            dim=-2, index=indices_dict["dst_idx"].expand(B, reduce_num, C), src=dst
+        )
+        out.scatter_(
+            dim=-2, index=indices_dict["unmerge_idx"].expand(B, unmerge_dim, C), src=unm
+        )
+        out.scatter_(
+            dim=-2, index=indices_dict["src_idx"].expand(B, src_dim, C), src=src
+        )
         return out
 
     @torch.no_grad()
@@ -548,11 +569,15 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
             last_independent_grid = last_independent.view(B, h, w)  # (B, H, W)
             last_independent_windows = last_independent_grid.view(
                 B, h_patch, stride_h, w_patch, stride_w
-            ).permute(0, 1, 3, 2, 4)  # (B, h_patch, w_patch, stride_h, stride_w)
+            ).permute(
+                0, 1, 3, 2, 4
+            )  # (B, h_patch, w_patch, stride_h, stride_w)
             last_independent_windows_flat = last_independent_windows.reshape(
                 B, h_patch, w_patch, stride_h * stride_w
             )  # (B, h_patch, w_patch, stride_h * stride_w)
-            dst_pos = last_independent_windows_flat.argmax(dim=-1, keepdim=True) # (B, h_patch, w_patch, 1)
+            dst_pos = last_independent_windows_flat.argmax(
+                dim=-1, keepdim=True
+            )  # (B, h_patch, w_patch, 1)
         else:
             if rand:
                 dst_pos = torch.randint(
@@ -564,7 +589,7 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
             else:
                 dst_pos = torch.zeros(
                     B, h_patch, w_patch, 1, device=device, dtype=torch.int64
-                ) # (B, h_patch, w_patch, 1)
+                )  # (B, h_patch, w_patch, 1)
 
         indices_dict["dst_idx"], indices_dict["src_idx"] = (
             sample_dst_src_with_2D_stride(
@@ -589,8 +614,20 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
             indices_dict["unmerge_src_idx"],
         ) = select_dst_src_tokens(scores, reduce_num)
 
-        indices_dict['unmerge_src_final_idx'] = torch.gather(indices_dict['src_idx'].expand(indices_dict['src_idx'].shape[0], indices_dict['src_idx'].shape[1], 1), dim=1, index=indices_dict['unmerge_src_idx'])
-        indices_dict['merge_src_final_idx'] = torch.gather(indices_dict['src_idx'].expand(indices_dict['src_idx'].shape[0], indices_dict['src_idx'].shape[1], 1), dim=1, index=indices_dict['merge_src_idx'])
+        indices_dict["unmerge_src_final_idx"] = torch.gather(
+            indices_dict["src_idx"].expand(
+                indices_dict["src_idx"].shape[0], indices_dict["src_idx"].shape[1], 1
+            ),
+            dim=1,
+            index=indices_dict["unmerge_src_idx"],
+        )
+        indices_dict["merge_src_final_idx"] = torch.gather(
+            indices_dict["src_idx"].expand(
+                indices_dict["src_idx"].shape[0], indices_dict["src_idx"].shape[1], 1
+            ),
+            dim=1,
+            index=indices_dict["merge_src_idx"],
+        )
 
     @torch.no_grad()
     def merge_IDM(self, x: torch.Tensor, indices_dict: dict) -> torch.Tensor:
@@ -618,8 +655,8 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
         # merge_src_idx: (B, k, 1)
         # unmerge_src_idx: (B, N - num_dst - k, 1)
         B, N_k, C = merged_x.shape
-        num_dst = indices_dict['dst_idx'].shape[1]
-        k = indices_dict['merge_dst_idx'].shape[1]
+        num_dst = indices_dict["dst_idx"].shape[1]
+        k = indices_dict["merge_dst_idx"].shape[1]
         N = N_k + k
         unmerge_len = N - num_dst - k
 
@@ -644,40 +681,52 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
             cached_src = torch.gather(
                 prev_output,
                 dim=-2,
-                index=indices_dict['merge_src_final_idx'].expand(B, k, C),
+                index=indices_dict["merge_src_final_idx"].expand(B, k, C),
             )
-            merge_dst_tokens = self.mcw * merge_dst_tokens + (1.0 - self.mcw) * cached_dst
-            simulated_merged_src_tokens = self.mcw * simulated_merged_src_tokens + (1.0 - self.mcw) * cached_src
+            merge_dst_tokens = (
+                self.mcw * merge_dst_tokens + (1.0 - self.mcw) * cached_dst
+            )
+            simulated_merged_src_tokens = (
+                self.mcw * simulated_merged_src_tokens + (1.0 - self.mcw) * cached_src
+            )
 
         out = torch.zeros(
             B, N, C, device=merged_x.device, dtype=merged_x.dtype
         )  # (B, N, C)
-        out.scatter_(dim=-2, index=indices_dict['dst_idx'].expand(B, num_dst, C), src=merge_dst_tokens)
         out.scatter_(
             dim=-2,
-            index=indices_dict['unmerge_src_final_idx'].expand(B, unmerge_len, C),
+            index=indices_dict["dst_idx"].expand(B, num_dst, C),
+            src=merge_dst_tokens,
+        )
+        out.scatter_(
+            dim=-2,
+            index=indices_dict["unmerge_src_final_idx"].expand(B, unmerge_len, C),
             src=unmerge_src_tokens,
         )
         out.scatter_(
             dim=-2,
-            index=indices_dict['merge_src_final_idx'].expand(B, k, C),
+            index=indices_dict["merge_src_final_idx"].expand(B, k, C),
             src=simulated_merged_src_tokens,
         )
 
         return out
 
-
     def delegated_call(self, func, module_self, *args, **kwargs):
         curr_iter = global_context.current_iteration
-        switch_step = int(global_context.num_inference_steps * self.switch_step_fraction)
+        switch_step = int(
+            global_context.num_inference_steps * self.switch_step_fraction
+        )
         if curr_iter <= switch_step:
             self.mode_flag = "SSM"
         else:
             self.mode_flag = "IDM"
 
-        if self.protected_step_stride > 0 and curr_iter % self.protected_step_stride == 0:
+        if (
+            self.protected_step_stride > 0
+            and curr_iter % self.protected_step_stride == 0
+        ):
             self.mode_flag = None
-        
+
         return func(module_self, *args, **kwargs)
 
     def hook_after_norm(
@@ -699,49 +748,71 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
             has_extra = global_context.hidden_extra_seq_len is not None
 
             # --- Validation ---
-            required_main = ['hidden_seq_height', 'hidden_seq_width', 'hidden_seq_len']
-            required_extra = ['hidden_extra_seq_height', 'hidden_extra_seq_width', 'hidden_extra_seq_len']
+            required_main = ["hidden_seq_height", "hidden_seq_width", "hidden_seq_len"]
+            required_extra = [
+                "hidden_extra_seq_height",
+                "hidden_extra_seq_width",
+                "hidden_extra_seq_len",
+            ]
             required_attrs = required_main + (required_extra if has_extra else [])
-            missing_attrs = [attr for attr in required_attrs if getattr(global_context, attr, None) is None]
+            missing_attrs = [
+                attr
+                for attr in required_attrs
+                if getattr(global_context, attr, None) is None
+            ]
             if missing_attrs:
-                raise ValueError(f"{', '.join(missing_attrs)} must be set in global_context")
+                raise ValueError(
+                    f"{', '.join(missing_attrs)} must be set in global_context"
+                )
 
             # --- Initialization & Calculations ---
             if self.size is None:
-                self.size = (global_context.hidden_seq_height, global_context.hidden_seq_width)
+                self.size = (
+                    global_context.hidden_seq_height,
+                    global_context.hidden_seq_width,
+                )
             seq_len = global_context.hidden_seq_len
             reduce_num = self.calculate_reduce_num(seq_len)
 
             # Prepare parameters for processing parts
             parts_params = []
-            parts_params.append({
-                "slice": norm_hidden_states[:, :seq_len, :],
-                "indices": self.indices_dict,
-                "size": self.size,
-                "reduce_num": reduce_num,
-            })
+            parts_params.append(
+                {
+                    "slice": norm_hidden_states[:, :seq_len, :],
+                    "indices": self.indices_dict,
+                    "size": self.size,
+                    "reduce_num": reduce_num,
+                }
+            )
 
             if has_extra:
                 if self.extra_size is None:
-                    self.extra_size = (global_context.hidden_extra_seq_height, global_context.hidden_extra_seq_width)
-                extra_reduce_num = self.calculate_reduce_num(global_context.hidden_extra_seq_len)
-                parts_params.append({
-                    "slice": norm_hidden_states[:, seq_len:, :],
-                    "indices": self.extra_indices_dict,
-                    "size": self.extra_size,
-                    "reduce_num": extra_reduce_num,
-                })
+                    self.extra_size = (
+                        global_context.hidden_extra_seq_height,
+                        global_context.hidden_extra_seq_width,
+                    )
+                extra_reduce_num = self.calculate_reduce_num(
+                    global_context.hidden_extra_seq_len
+                )
+                parts_params.append(
+                    {
+                        "slice": norm_hidden_states[:, seq_len:, :],
+                        "indices": self.extra_indices_dict,
+                        "size": self.extra_size,
+                        "reduce_num": extra_reduce_num,
+                    }
+                )
 
             # --- Execute Processing (Updates self.indices_dict, self.extra_indices_dict) ---
-            if self.mode_flag == 'SSM':
+            if self.mode_flag == "SSM":
                 for params in parts_params:
                     self.process_SSM(
                         params["slice"],
-                        params["indices"], # Assumed to update this dict
+                        params["indices"],  # Assumed to update this dict
                         params["size"],
                         params["reduce_num"],
                     )
-            elif self.mode_flag == 'IDM':
+            elif self.mode_flag == "IDM":
                 common_idm_kwargs = {
                     "stride": self.stride,
                     "device": norm_hidden_states.device,
@@ -754,31 +825,46 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
                         params["size"],
                         common_idm_kwargs["stride"],
                         params["reduce_num"],
-                        params["indices"], # Assumed to update this dict
+                        params["indices"],  # Assumed to update this dict
                         common_idm_kwargs["device"],
                         rand=common_idm_kwargs["rand"],
                         generator=common_idm_kwargs["generator"],
                     )
             else:
                 raise ValueError(f"Invalid mode_flag for processing: {self.mode_flag}")
-            
+
             if has_extra:
-                if self.mode_flag == 'SSM':
-                    SDTMDiTBlockHook.update_freq(self.extra_indices_dict["unmerge_idx"].squeeze(-1), is_extra=True)
-                elif self.mode_flag == 'IDM':
-                    SDTMDiTBlockHook.update_freq(self.extra_indices_dict['unmerge_src_final_idx'].squeeze(-1), is_extra=True)
+                if self.mode_flag == "SSM":
+                    SDTMDiTBlockHook.update_freq(
+                        self.extra_indices_dict["unmerge_idx"].squeeze(-1),
+                        is_extra=True,
+                    )
+                elif self.mode_flag == "IDM":
+                    SDTMDiTBlockHook.update_freq(
+                        self.extra_indices_dict["unmerge_src_final_idx"].squeeze(-1),
+                        is_extra=True,
+                    )
             else:
-                if self.mode_flag == 'SSM':
-                    SDTMDiTBlockHook.update_freq(self.indices_dict["unmerge_idx"].squeeze(-1))
-                elif self.mode_flag == 'IDM':
-                    SDTMDiTBlockHook.update_freq(self.indices_dict['unmerge_src_final_idx'].squeeze(-1))
-            
+                if self.mode_flag == "SSM":
+                    SDTMDiTBlockHook.update_freq(
+                        self.indices_dict["unmerge_idx"].squeeze(-1)
+                    )
+                elif self.mode_flag == "IDM":
+                    SDTMDiTBlockHook.update_freq(
+                        self.indices_dict["unmerge_src_final_idx"].squeeze(-1)
+                    )
+
             # Handle image rotary emb
-            if image_rotary_emb is not None and self.mode_flag == 'SSM':
-                def _select_image_rotary_emb(image_rotary_emb, encoder_hidden_seq_len, hidden_seq_len):
+            if image_rotary_emb is not None and self.mode_flag == "SSM":
+
+                def _select_image_rotary_emb(
+                    image_rotary_emb, encoder_hidden_seq_len, hidden_seq_len
+                ):
                     hidden_emb, encoder_emb, extra_emb = parse_image_rotary_emb(
-                        self.model_type, image_rotary_emb,
-                        hidden_seq_len, encoder_hidden_seq_len
+                        self.model_type,
+                        image_rotary_emb,
+                        hidden_seq_len,
+                        encoder_hidden_seq_len,
                     )
 
                     def _gather_pair(rotary_pair, indices_dict):
@@ -792,7 +878,9 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
                     hidden_emb = _gather_pair(hidden_emb, self.indices_dict)
                     if extra_emb is not None:
                         extra_emb = _gather_pair(extra_emb, self.extra_indices_dict)
-                    return join_image_rotary_emb(self.model_type, hidden_emb, encoder_emb, extra_emb)
+                    return join_image_rotary_emb(
+                        self.model_type, hidden_emb, encoder_emb, extra_emb
+                    )
 
                 image_rotary_emb = _select_image_rotary_emb(
                     image_rotary_emb,
@@ -802,14 +890,19 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
 
         # --- Part 2: Token Merging (Transforms the hidden states) ---
         merge_func = None
-        if self.mode_flag == 'SSM' and module_name in ('ffn', 'self-attn', 'cross-attn', 'parallel'):
+        if self.mode_flag == "SSM" and module_name in (
+            "ffn",
+            "self-attn",
+            "cross-attn",
+            "parallel",
+        ):
             merge_func = self.merge_SSM
-        elif self.mode_flag == 'IDM' and module_name == 'ffn':
+        elif self.mode_flag == "IDM" and module_name == "ffn":
             merge_func = self.merge_IDM
 
         if merge_func is not None:
             has_extra = global_context.hidden_extra_seq_len is not None
-            target_states_for_merge = norm_hidden_states # Merge the current state
+            target_states_for_merge = norm_hidden_states  # Merge the current state
 
             if has_extra:
                 # Re-validate seq_len existence for split
@@ -819,7 +912,9 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
                 seq_len = global_context.hidden_seq_len
                 # Check if splitting is actually possible/needed
                 if 0 < seq_len < target_states_for_merge.shape[1]:
-                    h1, h2 = target_states_for_merge.split([seq_len, target_states_for_merge.shape[1] - seq_len], dim=1)
+                    h1, h2 = target_states_for_merge.split(
+                        [seq_len, target_states_for_merge.shape[1] - seq_len], dim=1
+                    )
                     # Apply merge using potentially updated indices from Part 1
                     merged_h1 = merge_func(h1, self.indices_dict)
                     merged_h2 = merge_func(h2, self.extra_indices_dict)
@@ -827,52 +922,87 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
                     final_hidden_states = torch.cat([merged_h1, merged_h2], dim=1)
                 else:
                     # If seq_len covers the whole tensor or is zero, merge as one block
-                    final_hidden_states = merge_func(target_states_for_merge, self.indices_dict)
+                    final_hidden_states = merge_func(
+                        target_states_for_merge, self.indices_dict
+                    )
             else:
                 # Apply merge to the whole tensor
-                final_hidden_states = merge_func(target_states_for_merge, self.indices_dict)
+                final_hidden_states = merge_func(
+                    target_states_for_merge, self.indices_dict
+                )
 
         # Pass the final state (potentially processed in Part 1 and merged in Part 2)
-        return super().hook_after_norm(module_name, final_hidden_states, norm_encoder_hidden_states, image_rotary_emb)
+        return super().hook_after_norm(
+            module_name,
+            final_hidden_states,
+            norm_encoder_hidden_states,
+            image_rotary_emb,
+        )
 
     def hook_after_module(
-        self, 
+        self,
         module_name: Literal["self-attn", "cross-attn", "ffn", "parallel"],
         hidden_output: torch.Tensor,
         encoder_hidden_output: torch.Tensor = None,
     ):
         unmerge_func = None
-        if self.mode_flag == 'SSM' and module_name in ('ffn', 'self-attn', 'cross-attn', 'parallel'):
+        if self.mode_flag == "SSM" and module_name in (
+            "ffn",
+            "self-attn",
+            "cross-attn",
+            "parallel",
+        ):
             unmerge_func = self.unmerge_SSM
-        elif self.mode_flag == 'IDM' and module_name == 'ffn':
+        elif self.mode_flag == "IDM" and module_name == "ffn":
             unmerge_func = self.unmerge_IDM
 
         has_extra = global_context.hidden_extra_seq_len is not None
         if unmerge_func is not None:
             if has_extra:
-                h1, h2 = hidden_output.split([self.extra_start_idx, hidden_output.shape[1] - self.extra_start_idx], dim=1)
-                unmerged_h1 = unmerge_func(h1, self.indices_dict, self.prev_output[module_name])
-                unmerged_h2 = unmerge_func(h2, self.extra_indices_dict, self.prev_output_extra[module_name])
+                h1, h2 = hidden_output.split(
+                    [
+                        self.extra_start_idx,
+                        hidden_output.shape[1] - self.extra_start_idx,
+                    ],
+                    dim=1,
+                )
+                unmerged_h1 = unmerge_func(
+                    h1, self.indices_dict, self.prev_output[module_name]
+                )
+                unmerged_h2 = unmerge_func(
+                    h2, self.extra_indices_dict, self.prev_output_extra[module_name]
+                )
                 hidden_output = torch.cat([unmerged_h1, unmerged_h2], dim=1)
                 self.prev_output[module_name] = unmerged_h1
                 self.prev_output_extra[module_name] = unmerged_h2
             else:
-                hidden_output = unmerge_func(hidden_output, self.indices_dict, self.prev_output[module_name])
+                hidden_output = unmerge_func(
+                    hidden_output, self.indices_dict, self.prev_output[module_name]
+                )
                 self.prev_output[module_name] = hidden_output
         else:
             if has_extra:
-                h1, h2 = hidden_output.split([global_context.hidden_seq_len, hidden_output.shape[1] - global_context.hidden_seq_len], dim=1)
+                h1, h2 = hidden_output.split(
+                    [
+                        global_context.hidden_seq_len,
+                        hidden_output.shape[1] - global_context.hidden_seq_len,
+                    ],
+                    dim=1,
+                )
                 self.prev_output[module_name] = h1
                 self.prev_output_extra[module_name] = h2
             else:
                 self.prev_output[module_name] = hidden_output
-        
+
         if module_name in ("ffn", "parallel"):
             # clear indices after ffn
             self._clean()
 
-        return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
-            
+        return super().hook_after_module(
+            module_name, hidden_output, encoder_hidden_output
+        )
+
+
 if __name__ == "__main__":
     model_type = "flux-dev"
     pipe, model_attrs = get_pipeline(model_type)
@@ -887,7 +1017,7 @@ if __name__ == "__main__":
         "alpha_s": 0.05,
         "mcw": 0.1,
         "protected_step_stride": 1,
-        "generator":generator,
+        "generator": generator,
     }
 
     HookManager.configure_hooks(
@@ -896,8 +1026,10 @@ if __name__ == "__main__":
     )
 
     with HookManager.enabled():
-        HookManager.inject_hooks(model_type=model_type, pipe=pipe, model_attrs=model_attrs)
+        HookManager.inject_hooks(
+            model_type=model_type, pipe=pipe, model_attrs=model_attrs
+        )
         res = process_quick_start(pipe)
         res.save(f"{model_type}_sdtm.png")
-    
+
     print(global_context)
