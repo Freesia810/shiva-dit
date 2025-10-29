@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Literal, Optional, Tuple, Union
 from diffusers.models.transformers.transformer_flux import FluxSingleTransformerBlock
 from project_name.hook import BaseDiTBlockHook, HookManager
@@ -18,11 +19,10 @@ from project_name.utils import (
 )
 
 class ToMADitBlockHook(BaseDiTBlockHook):
-    def __init__(self, tile_nums: Union[int, Tuple[int, int]] = 8, merged_ratio: float = 0.2, merge_config=None, generator: torch.Generator = None, **kwargs):
+    def __init__(self, tile_nums: Union[int, Tuple[int, int]], merged_ratio: float = 0.2, merge_config=None, **kwargs):
         super().__init__()
         self.tile_nums = tile_nums
         self.ratio = merged_ratio
-        self.generator = generator
         if merge_config is None:
             self.merge_config = {
                 'self-attn': True,
@@ -57,22 +57,27 @@ class ToMADitBlockHook(BaseDiTBlockHook):
         x: (B, N, C)
         """
         B, N, C = x.shape
+        device = x.device
 
-        scores = x @ x.transpose(-1, -2) # (B, N, N)
+        x_normalized = F.normalize(x, p=2, dim=-1, eps=1e-8)
+        scores = x_normalized @ x_normalized.transpose(-1, -2) # (B, N, N)
+
         row_sums = torch.sum(scores, dim=2) # (B, N)
         init_v = torch.argmax(row_sums, dim=1) # (B,)
-        max_sim = torch.gather(scores, 1, init_v.unsqueeze(-1).unsqueeze(-1).expand(-1, 1, N)).squeeze(1) # (B, N)
 
-        res = torch.zeros(B, k, dtype=torch.long, device=scores.device) # (B, k)
+        max_sim = scores[torch.arange(B, device=device), init_v] # (B, N)
+
+        res = torch.zeros(B, k, dtype=torch.long, device=device) # (B, k)
         res[:, 0] = init_v
 
         for i in range(1, k):
-            expanded_max_sim = max_sim.unsqueeze(1).expand(B, N, N) # (B, N, N)
-            differences = torch.relu(scores - expanded_max_sim) # (B, N, N)
+            differences = torch.relu(scores - max_sim.unsqueeze(1)) 
             row_sums = torch.sum(differences, dim=2) # (B, N)
+            row_sums.scatter_(dim=1, index=res[:, :i], value=-torch.inf)
             next_v = torch.argmax(row_sums, dim=1) # (B,)
             res[:, i] = next_v
-            max_sim = torch.max(max_sim, scores[torch.arange(B, device=scores.device), next_v])
+            new_sims = scores[torch.arange(B, device=device), next_v] # (B, N)
+            max_sim = torch.max(max_sim, new_sims)
 
         return res # (B, k)
 
@@ -109,7 +114,9 @@ class ToMADitBlockHook(BaseDiTBlockHook):
         selected_x_batched_patch_indices = torch.gather(patch_indices.reshape(-1, h_tile_stride * w_tile_stride), -1, selected_x_batched_patch) # (B * h_tile_num * w_tile_num, k_tile)
 
         dst_indices = selected_x_batched_patch_indices.reshape(B, -1) # (B, h_tile_num * w_tile_num * k_tile)
-        dst_indices = dst_indices[:, :k].unsqueeze(-1) # (B, k)
+        dst_indices = dst_indices[:, :k].unsqueeze(-1) # (B, k, 1)
+
+        dst_indices = dst_indices.sort(dim=-2).values
         return dst_indices
     
     @torch.no_grad()
@@ -117,31 +124,38 @@ class ToMADitBlockHook(BaseDiTBlockHook):
     def calculate_attn_tensor(x: torch.Tensor, dst_idx: torch.Tensor):
         """
         x: (B, N, C)
-        dst_idx: (B, k)
+        dst_idx: (B, k, 1)
         """
-        B, N, C = x.shape
 
-        dst = torch.gather(x, 1, dst_idx.unsqueeze(-1).expand(B, -1, C)) # (B, k, C)
+        B, N, C = x.shape
+        eps = 1e-6
+
+        x = x / x.norm(dim=-1, keepdim=True)
+
+        dst = torch.gather(x, 1, dst_idx.expand(B, -1, C)) # (B, k, C)
 
         q = x # (B, N, C)
         k = dst # (B, k, C)
 
         A = k @ q.transpose(-1, -2) # (B, k, N)
-        _, max_indices = torch.max(A, dim=1) # (B, N)
-        A.zero_()
-        A.scatter_(dim=1, index=max_indices.unsqueeze(1), value=1) # (B, k, N) as one-hot matrix
-        count_per_dst = A.sum(dim=-1, keepdim=True) # (B, k, 1)
-        avg_A = A / count_per_dst # (B, k, N)
-        return avg_A, A.transpose(-1, -2) # (B, k, N), (B, N, k)
+
+        res = torch.softmax(A, dim=1)
+        sum = torch.sum(res, dim=2, keepdim=True) # (B, k, 1)
+        res = res / (sum + eps)
+
+        # res = torch.eye(k.shape[1], N, device=x.device, dtype=x.dtype).unsqueeze(0).expand(B, -1, -1)
+        return res, res.transpose(-1, -2) # (B, k, N), (B, N, k)
     
     def _clean(self):
         self.context_dict = {
             "A": None,
             "A_inv": None,
+            "dst_idx": None,
         }
         self.extra_context_dict = {
             "A": None,
             "A_inv": None,
+            "dst_idx": None,
         }
 
     @torch.no_grad()
@@ -158,7 +172,7 @@ class ToMADitBlockHook(BaseDiTBlockHook):
         x: (B, k, C)
         A_inv: (B, N, k)
         """
-        return torch.bmm(context["A_inv"], x)
+        return torch.bmm(context["A_inv"], merged_x)
     
     def on_register_hook(self, block: nn.Module):
         if self.model_type == 'wan':
@@ -240,7 +254,7 @@ class ToMADitBlockHook(BaseDiTBlockHook):
                     self.k = int(global_context.hidden_seq_len * (1 - self.ratio))
                 _select(hidden_states, self.k, self.size, self.context_dict)
             
-            if image_rotary_emb is not None:
+            if image_rotary_emb is not None and self.merge_config.get('self-attn'):
                 image_rotary_emb = _select_image_rotary_emb(image_rotary_emb, global_context.encoder_hidden_seq_len_gen(), global_context.hidden_seq_len)
 
         return super().hook_pre_norm(module_name, hidden_states, encoder_hidden_states, image_rotary_emb, temb)
@@ -284,3 +298,31 @@ class ToMADitBlockHook(BaseDiTBlockHook):
             self._clean()
 
         return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
+
+
+if __name__ == "__main__":
+    model_type = "flux-dev"
+    pipe, model_attrs = get_pipeline(model_type)
+
+    toma_config = {
+        "tile_nums": (8, 8),
+        "merged_ratio": 0.0,
+        "merge_config": {
+            "self-attn": True,
+            "cross-attn": False,
+            "ffn": False,
+            "parallel": False,
+        },
+    }
+
+    HookManager.configure_hooks(
+        model_type=model_type,
+        default=(ToMADitBlockHook, toma_config),
+    )
+
+    with HookManager.enabled():
+        HookManager.inject_hooks(model_type=model_type, pipe=pipe, model_attrs=model_attrs)
+        res = process_quick_start(pipe)
+        res.save(f"{model_type}_toma.png")
+    
+    print(global_context)
