@@ -239,7 +239,9 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
                     self.k = int(self.ratio * self.size[0] * self.size[1])
                 _select(self.size, self.indices_dict, hidden_states, self.k)
 
-            if image_rotary_emb is not None and self.merge_config.get('self-attn'):
+            if image_rotary_emb is not None and (
+                self.merge_config.get("self-attn") or self.merge_config.get("parallel")
+            ):
                 image_rotary_emb = _select_image_rotary_emb(
                     image_rotary_emb,
                     encoder_hidden_seq_len=global_context.encoder_hidden_seq_len_gen(),

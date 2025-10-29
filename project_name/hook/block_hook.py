@@ -86,6 +86,12 @@ class BaseDiTBlockHook:
     def register_name(self, model_type:str, layer_name: str):
         self.model_type = model_type
         self.layer_name = layer_name
+        self.layer_idx = int(layer_name.split(".")[-1])
+        if 'single_transformer_blocks' in layer_name:
+            self.single_layer_idx = self.layer_idx
+            self.layer_idx += 19  # flux series has 19 transformer_blocks before single_transformer_blocks
+        else:
+            self.single_layer_idx = None
 
     def close(self):
         pass
