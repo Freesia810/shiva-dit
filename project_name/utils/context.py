@@ -37,6 +37,9 @@ class PipelineContext:
     # for pixart-sigma, which we cannot get temb from block
     embedded_timestep: Optional[torch.Tensor] = None
 
+    # for IBTM, store the last hidden state
+    last_cfg_hidden_state: Optional[torch.Tensor] = None
+
     def hidden_seq_len_gen(self) -> int:
         if self.hidden_extra_seq_len is not None:
             return self.hidden_extra_seq_len + self.hidden_seq_len

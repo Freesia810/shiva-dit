@@ -1001,6 +1001,11 @@ class FluxPipeline(
                             joint_attention_kwargs=self.joint_attention_kwargs,
                             return_dict=False,
                         )[0]
+
+                    from project_name.utils.context import global_context
+                    global_context.update(
+                        last_cfg_hidden_state=(noise_pred - neg_noise_pred).abs(),
+                    )
                     noise_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
 
                 # compute the previous noisy sample x_t -> x_t-1

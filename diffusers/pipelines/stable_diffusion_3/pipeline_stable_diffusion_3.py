@@ -1098,6 +1098,12 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
                 # perform guidance
                 if self.do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+
+                    from project_name.utils.context import global_context
+                    global_context.update(
+                        last_cfg_hidden_state=(noise_pred_uncond - noise_pred_text).abs(),
+                    )
+
                     noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
                     should_skip_layers = (
                         True

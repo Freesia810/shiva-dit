@@ -1082,7 +1082,7 @@ class FluxKontextPipeline(
                 device,
                 batch_size * num_images_per_prompt,
             )
-        
+
         from project_name.utils.context import global_context
         global_context.update(
             num_inference_steps=num_inference_steps,
@@ -1146,6 +1146,11 @@ class FluxKontextPipeline(
                         return_dict=False,
                     )[0]
                     neg_noise_pred = neg_noise_pred[:, : latents.size(1)]
+
+                    from project_name.utils.context import global_context
+                    global_context.update(
+                        last_cfg_hidden_state=(noise_pred - neg_noise_pred).abs(),
+                    )
                     noise_pred = neg_noise_pred + true_cfg_scale * (noise_pred - neg_noise_pred)
 
                 # compute the previous noisy sample x_t -> x_t-1

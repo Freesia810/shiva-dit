@@ -630,6 +630,11 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                             attention_kwargs=attention_kwargs,
                             return_dict=False,
                         )[0]
+
+                    from project_name.utils.context import global_context
+                    global_context.update(
+                        last_cfg_hidden_state=(noise_pred - noise_uncond).abs(),
+                    )
                     noise_pred = noise_uncond + current_guidance_scale * (noise_pred - noise_uncond)
 
                 # compute the previous noisy sample x_t -> x_t-1
