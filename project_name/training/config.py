@@ -29,7 +29,7 @@ class TrainerConfig:
     # --- 训练模式 ---
     training_mode: TrainingMode = "hook_only"
     lora_config: LoraConfig = field(default_factory=LoraConfig)
-    
+
     # --- 可训练 Hook 配置 ---
     # 格式: (Hook类, Hook的初始化kwargs)
     # 这使得 trainer 可以灵活适配 diffcr, dydit 或未来的 hook
@@ -40,12 +40,13 @@ class TrainerConfig:
     train_batch_size: int = 1  # (关键) 单次 forward 的 batch size (micro-batch)
     gradient_accumulation_steps: int = 4 # (关键) 梯度累计步数
     # (有效的 Batch Size = train_batch_size * gradient_accumulation_steps)
-    
+
     learning_rate: float = 1e-4
     optimizer: str = "AdamW" # "Adam", "AdamW", "SGD"
     weight_decay: float = 1e-2
     lr_scheduler: str = "cosine" # "linear", "cosine", "constant"
-    
+    num_warmup_steps: int = None
+
     # --- 损失权重 ---
     main_loss_weight: float = 1.0
     hook_loss_weight: float = 0.1 # 例如 DiffCR 的 ratio 损失
@@ -54,6 +55,6 @@ class TrainerConfig:
     seed: int = 42
     logging_steps: int = 50 # (基于 optimizer steps)
     save_steps: int = 500   # (基于 optimizer steps)
-    
+
     # (可选) 混合精度训练
     mixed_precision: Optional[Literal["no", "fp16", "bf16"]] = "no"

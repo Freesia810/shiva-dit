@@ -169,6 +169,10 @@ class HookManager:
         print(f"[HookManager] Shared Buffer Keys: {list(cls._shared_buffer.keys())}")
     
     @classmethod
+    def get_all_hooks(cls) -> Dict[Union[int, str], "BaseDiTBlockHook"]:
+        return cls._hook_map
+    
+    @classmethod
     def set_global(cls, key: str, value: Any):
         if not cls._enabled:
             print("[HookManager] Warning: Disabled, skipping set_global.")
