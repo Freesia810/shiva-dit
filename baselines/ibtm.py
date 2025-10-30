@@ -1,276 +1,438 @@
 import torch
 import torch.nn.functional as F
 import math
+from typing import Literal, Optional, Tuple, Union
+from diffusers.models.transformers.transformer_flux import FluxSingleTransformerBlock
+from project_name.hook import BaseDiTBlockHook, HookManager
+from project_name.utils import (
+    global_context,
+    get_dst_src_tokens,
+    sample_dst_src_with_2D_stride,
+    select_dst_src_tokens,
+    gather_dst_unmerge_tokens,
+    merge_dst_src_tokens,
+    unmerge_dst_src_tokens,
+    get_pipeline,
+    process_quick_start,
+    parse_image_rotary_emb,
+    join_image_rotary_emb,
+)
 
-# todo
-class ImportanceTokenMerging:
-    def __init__(self, p=0.4, k=0.25, **kwargs):
-        self.pool_param = p
-        self.dst_ratio_k = k
+class IBTMDiTBlockHook(BaseDiTBlockHook):
+    def __init__(self, merged_ratio: float = 0.2, merge_config=None, pool_param: float = 0.4, dst_ratio_k: float = 0.25, prune_timestep_ratio = 0.1, generator: torch.Generator = None, **kwargs):
+        super().__init__(**kwargs)
+        self.merged_ratio = merged_ratio
+        self.pool_param = pool_param
+        self.dst_ratio_k = dst_ratio_k
+        self.generator = generator
 
-    def reduce(self, x, r, global_context, **kwargs):
-        """
-        根据重要性分数缩减 token。
+        if merge_config is None:
+            self.merge_config = {
+                'self-attn': True,
+                'cross-attn': True,
+                'ffn': True,
+                'parallel': True,
+            }
+        else:
+            self.merge_config = merge_config
 
-        参数:
-        - x (Tensor): 输入 token，形状 (B, N, C)。B 必须为 2 (uncond, cond)。
-        - r (float): 要合并/移除的 token 比例 (merging ratio)。
-        - global_context: 包含 'last_cfg_hidden_state' 的全局上下文。
+        self.k = None
+        self.indices_dict = {
+            'dst_idx': None,
+            'ind_idx': None,
+            'merge_idx': None,
+            'merge_assignments': None,
+        }
 
-        返回:
-        - x_reduced (Tensor): 缩减后的 token，形状 (B, N_final, C)。
-        """
+        self.extra_k = None
+        self.extra_indices_dict = {
+            'dst_idx': None,
+            'ind_idx': None,
+            'merge_idx': None,
+            'merge_assignments': None,
+        }
+    
+    def _clean(self):
+        self.indices_dict = {
+            'dst_idx': None,
+            'ind_idx': None,
+            'merge_idx': None,
+            'merge_assignments': None,
+        }
+        self.extra_indices_dict = {
+            'dst_idx': None,
+            'ind_idx': None,
+            'merge_idx': None,
+            'merge_assignments': None,
+        }
+    
+    def on_register_hook(self, block: nn.Module):
+        if self.model_type == 'wan':
+            raise NotImplementedError("wan model is not supported")
 
-        # 如果合并率为 0，则不执行任何操作
+        if isinstance(block, FluxSingleTransformerBlock):
+            for key in ('self-attn', 'cross-attn', 'ffn'):
+                if self.merge_config.get(key):
+                    self.merge_config[key] = False
+        else:
+            if self.merge_config.get('parallel'):
+                self.merge_config['parallel'] = False
+
+        self.enable = any(self.merge_config.values())
+
+    @torch.no_grad()
+    @staticmethod
+    def select_dst_src_ind_tokens(x, r, generator: torch.Generator = None, **kwargs):
         if r == 0:
             global_context.importance_unmerge = None
             return x
 
         B, N, C = x.shape
 
-        # 1. 获取重要性分数 (来自论文 Eq. 2)
-        cfg_hidden_state = global_context.last_cfg_hidden_state
+        cfg_hidden_state = global_context.last_cfg_hidden_state # (1, N, C)
+        importance = cfg_hidden_state.sum(dim=-1).squeeze(0) # (N)
 
-        # (1, N, C) -> (1, N) -> (N,)
-        importance = cfg_hidden_state.sum(dim=-1)
-        importance_scores_orig = importance[0]
-
-        # 2. 计算各种大小
         N_final = int(N * (1 - r))
         N_dst = int(N * self.dst_ratio_k)
         N_ind = N_final - N_dst
-
-        # 3. 处理大小的边缘情况
-        # 如果 k (dst_ratio_k) 太大，导致 N_ind 为负，则调整
         if N_ind < 0:
             N_ind = 0
             N_dst = N_final
 
         pool_size = min(int(N_final * (1 + self.pool_param)), N)
-
-        # 确保 token 池至少能容纳 N_dst 个 token
         if pool_size < N_dst:
             pool_size = min(N_dst, N)
 
-        # 确保我们不会试图从 src_pool 中选择比它本身还多的 ind token
         N_src_pool_max = pool_size - N_dst
         if N_ind > N_src_pool_max:
             N_ind = max(0, N_src_pool_max)
-            N_dst = N_final - N_ind  # 重新计算 N_dst 以保持 N_final 不变
+            N_dst = N_final - N_ind
 
-        # 4. 根据重要性划分 token
-
-        # 4.1. 获取重要 token 池 (Important Token Pool)
         pool_indices = torch.topk(
-            importance_scores_orig, k=pool_size, dim=-1
-        ).indices  # (pool_size,)
+            importance, k=pool_size, dim=-1
+        ).indices # (pool_size,)
 
-        # 4.2. 从池中随机选择 dst 和 src_pool
-        rand_indices = torch.randperm(pool_size, device=x.device)
-        dst_indices_in_pool = rand_indices[:N_dst]
+        rand_indices = torch.randperm(pool_size, device=x.device, generator=generator)
+        dst_indices_in_pool = rand_indices[:N_dst] # (N_dst,)
         src_indices_in_pool = rand_indices[N_dst:]  # (pool_size - N_dst)
 
-        # 4.3. 获取这些 token 的 *原始* 索引
         dst_indices_orig = pool_indices[dst_indices_in_pool]  # (N_dst,)
         src_pool_indices_orig = pool_indices[
             src_indices_in_pool
         ]  # (pool_size - N_dst,)
 
-        # 4.4. 获取 "不重要" token (不在池中的)
         pool_mask = torch.zeros(N, device=x.device, dtype=torch.bool)
         pool_mask.scatter_(dim=0, index=pool_indices, value=True)
-        unimportant_indices_orig = (~pool_mask).nonzero(as_tuple=True)[
-            0
-        ]  # (N - pool_size,)
+        unimportant_indices_orig = (~pool_mask).nonzero(as_tuple=True)[0]  # (N - pool_size,)
 
-        # 4.5. 组合完整的 src 列表 (src_pool + unimportant)
         src_indices_orig = torch.cat(
             [src_pool_indices_orig, unimportant_indices_orig]
         )  # (N - N_dst,)
 
-        # 4.6. 根据原始索引 gathering 张量
         x_dst = x.gather(
             dim=1, index=dst_indices_orig.unsqueeze(0).unsqueeze(-1).expand(B, -1, C)
-        )
+        ) # (B, N_dst, C)
         x_src = x.gather(
             dim=1, index=src_indices_orig.unsqueeze(0).unsqueeze(-1).expand(B, -1, C)
-        )
+        ) # (B, N - N_dst, C)
 
-        # 5. 计算相似度并找到最佳分配 (论文 3. Method)
-        with torch.no_grad():  # 相似度计算不需要梯度
-            x_src_norm = F.normalize(x_src, dim=-1)
-            x_dst_norm = F.normalize(x_dst, dim=-1)
-            # (B, N_src, N_dst)
-            sim = x_src_norm @ x_dst_norm.transpose(-2, -1)
+        x_src_norm = F.normalize(x_src, dim=-1)
+        x_dst_norm = F.normalize(x_dst, dim=-1)
+        sim = x_src_norm @ x_dst_norm.transpose(-2, -1) # (B, N - N_dst, N_dst)
+        sim_max, sim_idx = sim.max(dim=-1)  # (B, N - N_dst)
 
-        # sim_idx 是每个 src token 应该分配到的 dst token 的*索引* (在 dst 集合内)
-        sim_max, sim_idx = sim.max(dim=-1)  # (B, N_src)
-
-        # 6. 找到独立 (ind) Token
         N_src_pool = src_pool_indices_orig.shape[0]
-        if N_ind > 0 and N_src_pool > 0:
-            # 只在 src_pool 中寻找 ind token
-            sim_max_pool = sim_max[:, :N_src_pool]  # (B, N_src_pool)
+        sim_max_pool = sim_max[:, :N_src_pool]  # (B, pool_size - N_dst)
 
-            # 使用 batch 0 的相似度作为索引 (B=2 时两者相同)
-            # 找到相似度 *最小* 的 N_ind 个 token
-            ind_indices_in_src_pool = torch.topk(
-                sim_max_pool[0], k=N_ind, dim=-1, largest=False
-            ).indices  # (N_ind,)
+        ind_indices_in_src_pool = torch.topk(
+            sim_max_pool[0], k=N_ind, dim=-1, largest=False
+        ).indices  # (N_ind)
 
-            # 获取 ind token 的原始索引
-            ind_indices_orig = src_pool_indices_orig[
-                ind_indices_in_src_pool
-            ]  # (N_ind,)
+        ind_indices_orig = src_pool_indices_orig.[
+            ind_indices_in_src_pool
+        ]  # (N_ind)
 
-            # 获取 ind token 的张量
-            x_ind = x.gather(
-                dim=1,
-                index=ind_indices_orig.unsqueeze(0).unsqueeze(-1).expand(B, -1, C),
-            )
-        else:
-            # 没有 ind token
-            ind_indices_in_src_pool = torch.tensor(
-                [], device=x.device, dtype=torch.long
-            )
-            ind_indices_orig = torch.tensor([], device=x.device, dtype=torch.long)
-            x_ind = torch.empty(B, 0, C, device=x.device, dtype=x.dtype)
-
-        # 7. 找到需要合并 (merge) 的 Token
-
-        # 7.1. 在 src_pool 中, 找到 *不是* ind 的 token
         ind_mask_in_src_pool = torch.zeros(
             N_src_pool, device=x.device, dtype=torch.bool
-        )
+        ) # (pool_size - N_dst,)
         if N_ind > 0:
             ind_mask_in_src_pool.scatter_(
                 dim=0, index=ind_indices_in_src_pool, value=True
             )
 
-        merge_indices_in_src_pool = (~ind_mask_in_src_pool).nonzero(as_tuple=True)[0]
-        src_pool_merge_indices_orig = src_pool_indices_orig[merge_indices_in_src_pool]
+        merge_indices_in_src_pool = (~ind_mask_in_src_pool).nonzero(as_tuple=True)
+        src_pool_merge_indices_orig = src_pool_indices_orig[merge_indices_in_src_pool] # (pool_size - N_dst - N_ind,)
 
-        # 7.2. 所有要合并的 token = (src_pool - ind) + unimportant
         all_merge_indices_orig = torch.cat(
             [src_pool_merge_indices_orig, unimportant_indices_orig]
-        )  # (N - N_final,)
+        ) # (N - N_dst - N_ind)
 
-        # 7.3. 找到这些要合并的 token 各自的分配 (assignments)
-        sim_idx_pool = sim_idx[:, :N_src_pool]
-        sim_idx_unimportant = sim_idx[:, N_src_pool:]
-
-        if merge_indices_in_src_pool.shape[0] > 0:
-            assignments_pool_merge = sim_idx_pool.gather(
-                dim=1, index=merge_indices_in_src_pool.unsqueeze(0).expand(B, -1)
-            )
-        else:
-            assignments_pool_merge = torch.empty(
-                B, 0, device=x.device, dtype=torch.long
-            )
+        sim_idx_pool = sim_idx[0, :N_src_pool] # (pool_size - N_dst,)
+        sim_idx_unimportant = sim_idx[0, N_src_pool:] # (N - pool_size)
+        assignments_pool_merge = sim_idx_pool.gather(
+            dim=0, index=merge_indices_in_src_pool.unsqueeze(0).expand(B, -1)
+        ) # (pool_size - N_dst - N_ind)
 
         all_merge_assignments = torch.cat(
-            [assignments_pool_merge, sim_idx_unimportant], dim=1
-        )  # (B, N - N_final)
+            [assignments_pool_merge, sim_idx_unimportant]
+        )  # (N - N_dst - N_ind)
 
-        # 8. 执行平均合并 (Merging via averaging)
-        x_dst_merged = x_dst.clone()
+        return dst_indices_orig, ind_indices_orig, all_merge_indices_orig, all_merge_assignments
 
-        if all_merge_indices_orig.shape[0] > 0:
-            # (B, N_merge, C)
-            x_merge = x.gather(
+    @torch.no_grad()
+    @staticmethod
+    def merge(x: torch.Tensor, indices_dict: dict, reduce_mode="mean"):
+        """
+        x: (B, N, C)
+        dst_indices_orig: (N_dst,)
+        ind_indices_orig: (N_ind,)
+        all_merge_indices_orig: (N - N_dst - N_ind,)
+        all_merge_assignments: (N - N_dst - N_ind,)
+        """
+        dst_indices_orig, ind_indices_orig, all_merge_indices_orig, all_merge_assignments = indices_dict["dst_idx"], indices_dict["ind_idx"], indices_dict["merge_idx"], indices_dict["merge_assignments"]
+
+        x_ind = x.gather(
+            dim=1,
+            index=ind_indices_orig.unsqueeze(0).unsqueeze(-1).expand(B, -1, C),
+        ) # (B, N_ind, C)
+
+        x_src = x.gather(
+            dim=1,
+            index=all_merge_indices_orig.unsqueeze(0).unsqueeze(-1).expand(B, -1, C),
+        ) # (B, N - N_dst - N_ind, C)
+
+        x_dst = x.gather(
+            dim=1,
+            index=dst_indices_orig.unsqueeze(0).unsqueeze(-1).expand(B, -1, C),
+        ) # (B, N_dst, C)
+
+        if reduce_mode == 'prune':
+            merge_dst_tokens = x_dst
+        else:
+            merge_dst_tokens = x_dst.scatter_reduce(
                 dim=1,
-                index=all_merge_indices_orig.unsqueeze(0)
-                .unsqueeze(-1)
-                .expand(B, -1, C),
-            )
+                index=all_merge_assignments.unsqueeze(0).unsqueeze(-1).expand(B, -1, C),
+                src=x_src,
+                reduce=reduce_mode,
+            ) # (B, N_dst, C)
 
-            # (B, N_dst, 1)
-            counts = torch.ones(B, N_dst, 1, device=x.device, dtype=x.dtype)
+        return torch.cat([x_ind, merge_dst_tokens], dim=1) # (B, N_ind + N_dst, C)
 
-            # 必须按 batch 循环执行 index_add_
-            for i in range(B):
-                counts[i].index_add_(
-                    dim=0,
-                    index=all_merge_assignments[i],
-                    source=torch.ones(
-                        all_merge_assignments.shape[1],
-                        1,
-                        device=x.device,
-                        dtype=x.dtype,
-                    ),
-                )
-                x_dst_merged[i].index_add_(
-                    dim=0, index=all_merge_assignments[i], source=x_merge[i]
-                )
-
-            x_dst_merged = x_dst_merged / counts
-
-        # 9. 组合最终的缩减张量并保存 unmerge 信息
-        x_reduced = torch.cat([x_dst_merged, x_ind], dim=1)
-
-        # 使用 batch 0 的分配，因为它们是相同的
-        unmerge_info = (
-            dst_indices_orig,  # (N_dst,)
-            ind_indices_orig,  # (N_ind,)
-            all_merge_indices_orig,  # (N - N_final,)
-            all_merge_assignments[0],  # (N - N_final,) - 映射到 dst_indices 的索引
-            N,  # 原始 N
-            N_dst,  # Dst 数量
-        )
-        global_context.importance_unmerge = unmerge_info
-
-        return x_reduced
-
-    def unmerge(self, x_reduced, global_context, **kwargs):
+    @torch.no_grad()
+    @staticmethod
+    def unmerge(merged_x: torch.Tensor, indices_dict: dict):
         """
-        将缩减后的 token 广播回原始大小。
+        merged_x: (B, N_ind + N_dst, C)
+        dst_indices_orig: (N_dst,)
+        ind_indices_orig: (N_ind,)
+        all_merge_indices_orig: (N - N_dst - N_ind,)
+        all_merge_assignments: (N - N_dst - N_ind,)
         """
-        unmerge_info = global_context.importance_unmerge
+        dst_indices_orig, ind_indices_orig, all_merge_indices_orig, all_merge_assignments = indices_dict["dst_idx"], indices_dict["ind_idx"], indices_dict["merge_idx"], indices_dict["merge_assignments"]
 
-        # 如果没有 unmerge 信息 (例如 r=0)，直接返回
-        if unmerge_info is None:
-            return x_reduced
+        N_dst = dst_indices_orig.shape[0]
+        N_ind = ind_indices_orig.shape[0]
+        N = N_dst + N_ind + all_merge_indices_orig.shape[0]
 
-        dst_indices, ind_indices, merged_indices, merged_assignments, N, N_dst = (
-            unmerge_info
-        )
+        x_ind = x_reduced[:, :N_ind, :] # (B, N_ind, C)
+        x_dst = x_reduced[:, N_ind:, :] # (B, N_dst, C)
 
-        B, N_final, C = x_reduced.shape
+        x_merged_out = x_dst_out.gather(
+            dim=1,
+            index=all_merge_assignments.unsqueeze(0).unsqueeze(-1).expand(B, -1, C),
+        ) # (B, N - N_dst - N_ind, C)
 
-        # 分离 dst 和 ind 的输出
-        x_dst_out = x_reduced[:, :N_dst, :]
-        x_ind_out = x_reduced[:, N_dst:, :]
-
-        # 创建一个空的完整张量
         x_full = torch.empty(B, N, C, device=x_reduced.device, dtype=x_reduced.dtype)
-
-        # 1. 将 dst token 的输出 scatter 回原始位置
         x_full.scatter_(
             dim=1,
-            index=dst_indices.unsqueeze(0).unsqueeze(-1).expand(B, -1, C),
+            index=dst_indices_orig.unsqueeze(0).unsqueeze(-1).expand(B, -1, C),
             src=x_dst_out,
         )
-
-        # 2. 将 ind token 的输出 scatter 回原始位置
-        if ind_indices.shape[0] > 0:
-            x_full.scatter_(
-                dim=1,
-                index=ind_indices.unsqueeze(0).unsqueeze(-1).expand(B, -1, C),
-                src=x_ind_out,
-            )
-
-        # 3. 将 merged token 的输出 scatter 回原始位置
-        if merged_indices.shape[0] > 0:
-            # 从 dst 的输出中 gather 那些被合并的 token 的输出
-            x_merged_out = x_dst_out.gather(
-                dim=1,
-                index=merged_assignments.unsqueeze(0).unsqueeze(-1).expand(B, -1, C),
-            )
-            # 将它们 scatter 回去
-            x_full.scatter_(
-                dim=1,
-                index=merged_indices.unsqueeze(0).unsqueeze(-1).expand(B, -1, C),
-                src=x_merged_out,
-            )
+        x_full.scatter_(
+            dim=1,
+            index=ind_indices_orig.unsqueeze(0).unsqueeze(-1).expand(B, -1, C),
+            src=x_ind_out,
+        )
+        x_full.scatter_(
+            dim=1,
+            index=all_merge_indices_orig.unsqueeze(0).unsqueeze(-1).expand(B, -1, C),
+            src=x_merged_out,
+        )
 
         return x_full
+
+    @torch.no_grad()
+    @staticmethod
+    def select_image_rotary_emb(
+        img_rotary_emb: torch.Tensor, indices_dict: dict
+    ) -> torch.Tensor:
+        """
+        img_rotary_emb: (N, D)
+        dst_indices_orig: (N_dst,)
+        ind_indices_orig: (N_ind,)
+        """
+        N_dst = indices_dict["dst_idx"].shape[0]
+        N_ind = indices_dict["ind_idx"].shape[0]
+        C = img_rotary_emb.shape[-1]
+
+        ind = torch.gather(
+            img_rotary_emb,
+            dim=0,
+            index=indices_dict["ind_idx"].expand(N_ind, C),
+        ) # (N_ind, C)
+
+        dst = torch.gather(
+            img_rotary_emb,
+            dim=0,
+            index=indices_dict["dst_idx"].expand(N_ind, C),
+        ) # (N_dst, C)
+
+        img_rotary_emb = torch.cat([ind, dst], dim=0)
+        return img_rotary_emb
+
+    def hook_pre_norm(
+        self, 
+        module_name: Literal["self-attn", "cross-attn", "ffn", "parallel"],
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor = None,
+        image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        temb: torch.Tensor = None,
+    ):
+        if module_name in ("self-attn", "parallel") and self.enable:
+            # only sample and select tokens when self-attention's start
+            def _select(indices_dict, x, k):
+                indices_dict['dst_idx'], indices_dict['ind_idx'], indices_dict['merge_idx'], indices_dict['merge_assignments'] = IBTMDiTBlockHook.select_dst_src_ind_tokens(x, k, generator=self.generator)
+
+            def _select_image_rotary_emb(image_rotary_emb, encoder_hidden_seq_len, hidden_seq_len):
+                hidden_emb, encoder_emb, extra_emb = parse_image_rotary_emb(
+                    self.model_type, image_rotary_emb,
+                    hidden_seq_len, encoder_hidden_seq_len
+                )
+
+                def _gather_pair(rotary_pair, indices_dict):
+                    if rotary_pair is None:
+                        return None
+
+                    return tuple(
+                        IBTMDiTBlockHook.select_image_rotary_emb(x, indices_dict)
+                        for x in rotary_pair
+                    )
+
+                hidden_emb = _gather_pair(hidden_emb, self.indices_dict)
+                if extra_emb is not None:
+                    extra_emb = _gather_pair(extra_emb, self.extra_indices_dict)
+                return join_image_rotary_emb(self.model_type, hidden_emb, encoder_emb, extra_emb)
+
+            if global_context.hidden_extra_seq_len is not None:
+                # dual hidden states for edit task
+                if (
+                    global_context.hidden_seq_height is None
+                    or global_context.hidden_seq_width is None
+                ):
+                    raise ValueError(
+                        "hidden_seq_height and hidden_seq_width must be set in global_context"
+                    )
+                if (
+                    global_context.hidden_extra_seq_height is None
+                    or global_context.hidden_extra_seq_width is None
+                ):
+                    raise ValueError(
+                        "hidden_extra_seq_height and hidden_extra_seq_width must be set in global_context"
+                    )
+                if self.k is None:
+                    self.k = int(self.merged_ratio * global_context.hidden_seq_len)
+                if self.extra_k is None:
+                    self.extra_k = int(self.merged_ratio * global_context.hidden_extra_seq_len)
+                _select(self.indices_dict, hidden_states[:,:global_context.hidden_seq_len,:], self.k)
+                _select(self.extra_indices_dict, hidden_states[:,global_context.hidden_seq_len:,:], self.extra_k)
+            else:
+                # normal case
+                if global_context.hidden_seq_height is None or global_context.hidden_seq_width is None:
+                    raise ValueError("hidden_seq_height and hidden_seq_width must be set in global_context")
+                if self.k is None:
+                    self.k = int(self.merged_ratio * global_context.hidden_seq_len)
+                _select(self.indices_dict, hidden_states, self.k)
+
+            if image_rotary_emb is not None and (
+                self.merge_config.get("self-attn") or self.merge_config.get("parallel")
+            ):
+                image_rotary_emb = _select_image_rotary_emb(
+                    image_rotary_emb,
+                    encoder_hidden_seq_len=global_context.encoder_hidden_seq_len_gen(),
+                    hidden_seq_len=global_context.hidden_seq_len,
+                )
+
+        return super().hook_pre_norm(module_name, hidden_states, encoder_hidden_states, image_rotary_emb, temb)
+
+    def hook_after_norm(
+        self, 
+        module_name: Literal["self-attn", "cross-attn", "ffn", "parallel"],
+        norm_hidden_states: torch.Tensor,
+        norm_encoder_hidden_states: torch.Tensor = None,
+        image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+    ):
+        if self.merge_config.get(module_name, False):
+            reduce_mode = 'prune' if global_context.current_iteration <= self.prune_timestep_ratio * global_context.num_inference_steps else 'mean'
+            
+            if global_context.hidden_extra_seq_len is not None:
+                # dual hidden states for edit task
+                h1, h2 = norm_hidden_states.split([global_context.hidden_seq_len, norm_hidden_states.shape[1] - global_context.hidden_seq_len], dim=1)
+                norm_hidden_states = torch.cat([IBTMDiTBlockHook.merge(h1, self.indices_dict, reduce_mode), IBTMDiTBlockHook.merge(h2, self.extra_indices_dict, reduce_mode)], dim=1)
+            else:
+                # normal case
+                norm_hidden_states = IBTMDiTBlockHook.merge(norm_hidden_states, self.indices_dict, reduce_mode)
+
+        return super().hook_after_norm(module_name, norm_hidden_states, norm_encoder_hidden_states, image_rotary_emb)
+    
+    def hook_after_module(
+        self, 
+        module_name: Literal["self-attn", "cross-attn", "ffn", "parallel"],
+        hidden_output: torch.Tensor,
+        encoder_hidden_output: torch.Tensor = None,
+    ):
+        if self.merge_config.get(module_name, False):
+            if global_context.hidden_extra_seq_len is not None:
+                # dual hidden states for edit task
+                k = self.indices_dict['merge_idx'].shape[0]
+                hidden_seq_len = global_context.hidden_seq_len - k
+                h1, h2 = hidden_output.split([hidden_seq_len, hidden_output.shape[1] - hidden_seq_len], dim=1)
+                hidden_output = torch.cat([IBTMDiTBlockHook.unmerge(h1, self.indices_dict), IBTMDiTBlockHook.unmerge(h2, self.extra_indices_dict)], dim=1)
+            else:
+                # normal case
+                hidden_output = IBTMDiTBlockHook.unmerge(hidden_output, self.indices_dict)
+
+        if module_name in ("ffn", "parallel"):
+            # clear indices after ffn
+            self._clear()
+
+        return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
+
+if __name__ == "__main__":
+    model_type = "sd3"
+    pipe, model_attrs = get_pipeline(model_type)
+
+    ibtm_config = {
+        "merged_ratio": 0.3,
+        "merge_config": {
+            "self-attn": True,
+            "cross-attn": False,
+            "ffn": False,
+            "parallel": True,
+        },
+        "pool_param": 0.4,
+        "dst_ratio_k": 0.25,
+        "prune_timestep_ratio": 0.1,
+        "generator": torch.Generator("cuda").manual_seed(0),
+    }
+
+    HookManager.configure_hooks(
+        model_type=model_type,
+        default=(IBTMDiTBlockHook, ibtm_config),
+    )
+
+    with HookManager.enabled():
+        HookManager.inject_hooks(model_type=model_type, pipe=pipe, model_attrs=model_attrs)
+        res = process_quick_start(pipe)
+        res.save(f"{model_type}_ibtm.png")
+    
+    print(global_context)

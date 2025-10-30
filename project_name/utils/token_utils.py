@@ -240,12 +240,16 @@ def merge_dst_src_tokens(
     unmerge_src_tokens = torch.gather(
         src_tokens, dim=-2, index=unmerge_src_idx.expand(B, num_src - k, C)
     )  # (B, N - num_dst - k, D)
-    merge_dst_tokens = dst_tokens.scatter_reduce(
-        dim=-2,
-        index=merge_dst_idx.expand(B, k, C),
-        src=merge_src_tokens,
-        reduce=reduce_mode,
-    )  # (B, num_dst, D)
+
+    if reduce_mode == 'prune':
+        merge_dst_tokens = dst_tokens
+    else:
+        merge_dst_tokens = dst_tokens.scatter_reduce(
+            dim=-2,
+            index=merge_dst_idx.expand(B, k, C),
+            src=merge_src_tokens,
+            reduce=reduce_mode,
+        )  # (B, num_dst, D)
 
     return torch.cat([unmerge_src_tokens, merge_dst_tokens], dim=1)  # (B, N - k, D)
 
