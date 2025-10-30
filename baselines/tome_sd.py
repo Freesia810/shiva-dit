@@ -103,7 +103,7 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
             'unmerge_src_idx': None,
         }
 
-    def _clear(self):
+    def _clean(self):
         self.indices_dict = {
             'dst_idx': None,
             'src_idx': None,
@@ -250,6 +250,16 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
 
         return super().hook_pre_norm(module_name, hidden_states, encoder_hidden_states, image_rotary_emb, temb)
 
+    def merge(self, x: torch.Tensor, indices_dict: dict):
+        return merge_dst_src_tokens(
+            x,
+            indices_dict['dst_idx'],
+            indices_dict['src_idx'],
+            indices_dict['merge_dst_idx'],
+            indices_dict['merge_src_idx'],
+            indices_dict['unmerge_src_idx'],
+        )
+
     def hook_after_norm(
         self, 
         module_name: Literal["self-attn", "cross-attn", "ffn", "parallel"],
@@ -271,10 +281,10 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
             if global_context.hidden_extra_seq_len is not None:
                 # dual hidden states for edit task
                 h1, h2 = norm_hidden_states.split([global_context.hidden_seq_len, norm_hidden_states.shape[1] - global_context.hidden_seq_len], dim=1)
-                norm_hidden_states = torch.cat([_merge(h1, self.indices_dict), _merge(h2, self.extra_indices_dict)], dim=1)
+                norm_hidden_states = torch.cat([self.merge(h1, self.indices_dict), self.merge(h2, self.extra_indices_dict)], dim=1)
             else:
                 # normal case
-                norm_hidden_states = _merge(norm_hidden_states, self.indices_dict)
+                norm_hidden_states = self.merge(norm_hidden_states, self.indices_dict)
 
         return super().hook_after_norm(module_name, norm_hidden_states, norm_encoder_hidden_states, image_rotary_emb)
 
@@ -307,7 +317,7 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
 
         if module_name in ("ffn", "parallel"):
             # clear indices after ffn
-            self._clear()
+            self._clean()
 
         return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
 

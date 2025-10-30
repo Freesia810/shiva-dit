@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import math
 from typing import Literal, Optional, Tuple, Union
@@ -25,6 +26,7 @@ class IBTMDiTBlockHook(BaseDiTBlockHook):
         self.pool_param = pool_param
         self.dst_ratio_k = dst_ratio_k
         self.generator = generator
+        self.prune_timestep_ratio = prune_timestep_ratio
 
         if merge_config is None:
             self.merge_config = {
@@ -81,18 +83,23 @@ class IBTMDiTBlockHook(BaseDiTBlockHook):
         self.enable = any(self.merge_config.values())
 
     @torch.no_grad()
-    @staticmethod
-    def select_dst_src_ind_tokens(x, r, generator: torch.Generator = None, **kwargs):
+    def select_dst_src_ind_tokens(self, x, r, generator: torch.Generator = None, **kwargs):
         if r == 0:
             global_context.importance_unmerge = None
             return x
 
         B, N, C = x.shape
 
-        cfg_hidden_state = global_context.last_cfg_hidden_state # (1, N, C)
-        importance = cfg_hidden_state.sum(dim=-1).squeeze(0) # (N)
+        cfg_hidden_state = global_context.last_cfg_hidden_state # (1, C, H, W)
+        H, W = cfg_hidden_state.shape[-2:]
+        c = cfg_hidden_state.shape[1]
+        patch_H = H // global_context.hidden_seq_height
+        patch_W = W // global_context.hidden_seq_width
+        cfg_hidden_state = cfg_hidden_state.view(1, -1, patch_H, global_context.hidden_seq_height, patch_W, global_context.hidden_seq_width).permute(0, 3, 5, 2, 4, 1)
+        importance = cfg_hidden_state.reshape(1, N, c * patch_H * patch_W) # (1, N, C * patch_H * patch_W)
+        importance = importance.sum(dim=-1).squeeze(0) # (N)
 
-        N_final = int(N * (1 - r))
+        N_final = N - r
         N_dst = int(N * self.dst_ratio_k)
         N_ind = N_final - N_dst
         if N_ind < 0:
@@ -117,9 +124,7 @@ class IBTMDiTBlockHook(BaseDiTBlockHook):
         src_indices_in_pool = rand_indices[N_dst:]  # (pool_size - N_dst)
 
         dst_indices_orig = pool_indices[dst_indices_in_pool]  # (N_dst,)
-        src_pool_indices_orig = pool_indices[
-            src_indices_in_pool
-        ]  # (pool_size - N_dst,)
+        src_pool_indices_orig = pool_indices[src_indices_in_pool]  # (pool_size - N_dst,)
 
         pool_mask = torch.zeros(N, device=x.device, dtype=torch.bool)
         pool_mask.scatter_(dim=0, index=pool_indices, value=True)
@@ -148,9 +153,7 @@ class IBTMDiTBlockHook(BaseDiTBlockHook):
             sim_max_pool[0], k=N_ind, dim=-1, largest=False
         ).indices  # (N_ind)
 
-        ind_indices_orig = src_pool_indices_orig.[
-            ind_indices_in_src_pool
-        ]  # (N_ind)
+        ind_indices_orig = src_pool_indices_orig[ind_indices_in_src_pool]  # (N_ind)
 
         ind_mask_in_src_pool = torch.zeros(
             N_src_pool, device=x.device, dtype=torch.bool
@@ -160,7 +163,7 @@ class IBTMDiTBlockHook(BaseDiTBlockHook):
                 dim=0, index=ind_indices_in_src_pool, value=True
             )
 
-        merge_indices_in_src_pool = (~ind_mask_in_src_pool).nonzero(as_tuple=True)
+        merge_indices_in_src_pool = (~ind_mask_in_src_pool).nonzero(as_tuple=True)[0]
         src_pool_merge_indices_orig = src_pool_indices_orig[merge_indices_in_src_pool] # (pool_size - N_dst - N_ind,)
 
         all_merge_indices_orig = torch.cat(
@@ -170,7 +173,7 @@ class IBTMDiTBlockHook(BaseDiTBlockHook):
         sim_idx_pool = sim_idx[0, :N_src_pool] # (pool_size - N_dst,)
         sim_idx_unimportant = sim_idx[0, N_src_pool:] # (N - pool_size)
         assignments_pool_merge = sim_idx_pool.gather(
-            dim=0, index=merge_indices_in_src_pool.unsqueeze(0).expand(B, -1)
+            dim=0, index=merge_indices_in_src_pool
         ) # (pool_size - N_dst - N_ind)
 
         all_merge_assignments = torch.cat(
@@ -190,6 +193,8 @@ class IBTMDiTBlockHook(BaseDiTBlockHook):
         all_merge_assignments: (N - N_dst - N_ind,)
         """
         dst_indices_orig, ind_indices_orig, all_merge_indices_orig, all_merge_assignments = indices_dict["dst_idx"], indices_dict["ind_idx"], indices_dict["merge_idx"], indices_dict["merge_assignments"]
+
+        B, _, C = x.shape
 
         x_ind = x.gather(
             dim=1,
@@ -230,28 +235,30 @@ class IBTMDiTBlockHook(BaseDiTBlockHook):
         """
         dst_indices_orig, ind_indices_orig, all_merge_indices_orig, all_merge_assignments = indices_dict["dst_idx"], indices_dict["ind_idx"], indices_dict["merge_idx"], indices_dict["merge_assignments"]
 
+        B, _, C = merged_x.shape
+
         N_dst = dst_indices_orig.shape[0]
         N_ind = ind_indices_orig.shape[0]
         N = N_dst + N_ind + all_merge_indices_orig.shape[0]
 
-        x_ind = x_reduced[:, :N_ind, :] # (B, N_ind, C)
-        x_dst = x_reduced[:, N_ind:, :] # (B, N_dst, C)
+        x_ind = merged_x[:, :N_ind, :] # (B, N_ind, C)
+        x_dst = merged_x[:, N_ind:, :] # (B, N_dst, C)
 
-        x_merged_out = x_dst_out.gather(
+        x_merged_out = x_dst.gather(
             dim=1,
             index=all_merge_assignments.unsqueeze(0).unsqueeze(-1).expand(B, -1, C),
         ) # (B, N - N_dst - N_ind, C)
 
-        x_full = torch.empty(B, N, C, device=x_reduced.device, dtype=x_reduced.dtype)
+        x_full = torch.empty(B, N, C, device=merged_x.device, dtype=merged_x.dtype)
         x_full.scatter_(
             dim=1,
             index=dst_indices_orig.unsqueeze(0).unsqueeze(-1).expand(B, -1, C),
-            src=x_dst_out,
+            src=x_dst,
         )
         x_full.scatter_(
             dim=1,
             index=ind_indices_orig.unsqueeze(0).unsqueeze(-1).expand(B, -1, C),
-            src=x_ind_out,
+            src=x_ind,
         )
         x_full.scatter_(
             dim=1,
@@ -298,10 +305,10 @@ class IBTMDiTBlockHook(BaseDiTBlockHook):
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
         temb: torch.Tensor = None,
     ):
-        if module_name in ("self-attn", "parallel") and self.enable:
+        if module_name in ("self-attn", "parallel") and self.enable and global_context.current_iteration > 0:
             # only sample and select tokens when self-attention's start
             def _select(indices_dict, x, k):
-                indices_dict['dst_idx'], indices_dict['ind_idx'], indices_dict['merge_idx'], indices_dict['merge_assignments'] = IBTMDiTBlockHook.select_dst_src_ind_tokens(x, k, generator=self.generator)
+                indices_dict['dst_idx'], indices_dict['ind_idx'], indices_dict['merge_idx'], indices_dict['merge_assignments'] = self.select_dst_src_ind_tokens(x, k, generator=self.generator)
 
             def _select_image_rotary_emb(image_rotary_emb, encoder_hidden_seq_len, hidden_seq_len):
                 hidden_emb, encoder_emb, extra_emb = parse_image_rotary_emb(
@@ -371,7 +378,7 @@ class IBTMDiTBlockHook(BaseDiTBlockHook):
         norm_encoder_hidden_states: torch.Tensor = None,
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):
-        if self.merge_config.get(module_name, False):
+        if self.merge_config.get(module_name, False) and global_context.current_iteration > 0:
             reduce_mode = 'prune' if global_context.current_iteration <= self.prune_timestep_ratio * global_context.num_inference_steps else 'mean'
             
             if global_context.hidden_extra_seq_len is not None:
@@ -390,7 +397,7 @@ class IBTMDiTBlockHook(BaseDiTBlockHook):
         hidden_output: torch.Tensor,
         encoder_hidden_output: torch.Tensor = None,
     ):
-        if self.merge_config.get(module_name, False):
+        if self.merge_config.get(module_name, False) and global_context.current_iteration > 0:
             if global_context.hidden_extra_seq_len is not None:
                 # dual hidden states for edit task
                 k = self.indices_dict['merge_idx'].shape[0]
@@ -403,12 +410,12 @@ class IBTMDiTBlockHook(BaseDiTBlockHook):
 
         if module_name in ("ffn", "parallel"):
             # clear indices after ffn
-            self._clear()
+            self._clean()
 
         return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
 
 if __name__ == "__main__":
-    model_type = "sd3"
+    model_type = "flux-dev"
     pipe, model_attrs = get_pipeline(model_type)
 
     ibtm_config = {
@@ -416,12 +423,12 @@ if __name__ == "__main__":
         "merge_config": {
             "self-attn": True,
             "cross-attn": False,
-            "ffn": False,
-            "parallel": True,
+            "ffn": True,
+            "parallel": False,
         },
         "pool_param": 0.4,
         "dst_ratio_k": 0.25,
-        "prune_timestep_ratio": 0.1,
+        "prune_timestep_ratio": 0.12,
         "generator": torch.Generator("cuda").manual_seed(0),
     }
 
@@ -433,6 +440,6 @@ if __name__ == "__main__":
     with HookManager.enabled():
         HookManager.inject_hooks(model_type=model_type, pipe=pipe, model_attrs=model_attrs)
         res = process_quick_start(pipe)
-        res.save(f"{model_type}_ibtm.png")
+        res.save(f"{model_type}_ibtm.png", num_inference_steps=50, negative_prompt=" ")
     
     print(global_context)

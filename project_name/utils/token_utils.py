@@ -243,6 +243,18 @@ def merge_dst_src_tokens(
 
     if reduce_mode == 'prune':
         merge_dst_tokens = dst_tokens
+    elif reduce_mode == 'mlerp':
+        merge_dst_tokens = dst_tokens.scatter_reduce(
+            dim=-2,
+            index=merge_dst_idx.expand(B, k, C),
+            src=merge_src_tokens,
+            reduce='mean',
+        )
+
+        dst_tokens_norm = dst_tokens.norm(dim=-1, keepdim=True) # (B, num_dst, 1)
+        merge_src_tokens_norm = merge_src_tokens.norm(dim=-1, keepdim=True) # (B, k, 1)
+        n = dst_tokens_norm.scatter_reduce(dim=-2, index=merge_dst_idx.expand(B, k, 1), src=merge_src_tokens_norm, reduce='max') # (B, num_dst, 1)
+        merge_dst_tokens = merge_dst_tokens / merge_dst_tokens.norm(dim=-1, keepdim=True) * n
     else:
         merge_dst_tokens = dst_tokens.scatter_reduce(
             dim=-2,
