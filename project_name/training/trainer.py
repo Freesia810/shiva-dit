@@ -218,6 +218,39 @@ class DiffusionModelTrainer:
             img_latents = (
                 img_latents - self.vae.config.shift_factor
             ) * self.vae.config.scaling_factor
+        elif self.model_type == "sd3":
+            pass
+        elif self.model_type == "qwen-image":
+            img_latents = retrieve_latents(
+                self.vae.encode(pixel_values),
+                generator=self.generator,
+                sample_mode="argmax",
+            )
+            latents_mean = (
+                torch.tensor(self.vae.config.latents_mean)
+                .view(1, self.pipe.latent_channels, 1, 1, 1)
+                .to(img_latents.device, img_latents.dtype)
+            )
+            latents_std = (
+                torch.tensor(self.vae.config.latents_std)
+                .view(1, self.pipe.latent_channels, 1, 1, 1)
+                .to(img_latents.device, img_latents.dtype)
+            )
+            img_latents = (img_latents - latents_mean) / latents_std
+            height = self.pipe.default_sample_size * self.pipe.vae_scale_factor
+            width = self.pipe.default_sample_size * self.pipe.vae_scale_factor
+
+            img_shapes = [
+                [
+                    (
+                        1,
+                        height // self.pipe.vae_scale_factor // 2,
+                        width // self.pipe.vae_scale_factor // 2,
+                    )
+                ]
+            ] * batch_size
+
+            model_kwargs['img_shapes'] = img_shapes
         else:
             raise NotImplementedError(
                 f"_prepare_model_inputs not implemented for model_type: {self.model_type}"
@@ -231,7 +264,6 @@ class DiffusionModelTrainer:
             model_kwargs["return_dict"] = False
             model_kwargs["joint_attention_kwargs"] = self.pipe.joint_attention_kwargs
 
-            # TODO: negative prompt support
             num_images_per_prompt = 1
             # clip -> pooled_prompt_embeds
             input_ids_clip = input_ids_tuple[0].to(self.device)
@@ -283,6 +315,47 @@ class DiffusionModelTrainer:
                 timestep=timesteps,
                 noise=noise,
             )
+        elif self.model_type == "sd3":
+            pass
+        elif self.model_type == "qwen-image":
+            model_kwargs["return_dict"] = False
+            model_kwargs["attention_kwargs"] = self.pipe.attention_kwargs
+
+            def _extract_masked_hidden(hidden_states: torch.Tensor, mask: torch.Tensor):
+                bool_mask = mask.bool()
+                valid_lengths = bool_mask.sum(dim=1)
+                selected = hidden_states[bool_mask]
+                split_result = torch.split(selected, valid_lengths.tolist(), dim=0)
+
+                return split_result
+
+            attention_masks_tuple = batch["attention_mask"]
+            drop_idx = self.pipe.prompt_template_encode_start_idx
+
+            encoder_hidden_states = self.text_encoders[0](
+                input_ids=input_ids_tuple[0],
+                attention_mask=attention_masks_tuple[0],
+                output_hidden_states=True,
+            )
+            hidden_states = encoder_hidden_states.hidden_states[-1]
+            split_hidden_states = _extract_masked_hidden(hidden_states, attention_masks_tuple[0])
+            split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
+            attn_mask_list = [torch.ones(e.size(0), dtype=torch.long, device=e.device) for e in split_hidden_states]
+            max_seq_len = max([e.size(0) for e in split_hidden_states])
+            prompt_embeds = torch.stack(
+                [torch.cat([u, u.new_zeros(max_seq_len - u.size(0), u.size(1))]) for u in split_hidden_states]
+            )
+            prompt_embeds_mask = torch.stack(
+                [
+                    torch.cat([u, u.new_zeros(max_seq_len - u.size(0))])
+                    for u in attn_mask_list
+                ]
+            )
+
+            prompt_embeds = prompt_embeds.to(dtype=self.dtype, device=self.device)
+
+            model_kwargs["encoder_hidden_states"] = prompt_embeds
+            model_kwargs["encoder_hidden_states_mask"] = prompt_embeds_mask
         else:
             raise NotImplementedError(
                 f"_prepare_model_inputs not implemented for model_type: {self.model_type}"

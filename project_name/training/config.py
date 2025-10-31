@@ -22,8 +22,7 @@ class TrainerConfig:
     # --- 数据和模型路径 ---
     metadata_file: str = "./data/metadata.jsonl" # 数据集元数据
     image_dir: str = "./data/images/"           # 数据集图像
-    model_id: str = "flux-dev"                  # 要加载的 DiT/U-Net 模型
-    model_type: str = "flux-dev"                # 用于 HookManager 的模型类型
+    model_type: str = "flux-dev"                  # 要加载的 DiT/U-Net 模型
     output_dir: str = "./checkpoints/"          # 模型保存路径
 
     # --- 训练模式 ---

@@ -15,6 +15,7 @@ class ImageTextDataset(Dataset):
         metadata_file: str,
         tokenizers: Tuple[Callable],
         image_processor: VaeImageProcessor,
+        **kwargs,
     ):
 
         self.model_type = model_type
@@ -28,6 +29,14 @@ class ImageTextDataset(Dataset):
                 item = json.loads(line)
                 if 'file_name' in item and 'text' in item:
                     self.metadata.append(item)
+
+        if self.model_type == "qwen-image":
+            self.tokenizer_max_length = kwargs.get("tokenizer_max_length", 1024)
+            self.prompt_template_encode = kwargs.get(
+                "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",
+                "{}",
+            )
+            self.prompt_template_encode_start_idx = kwargs.get("prompt_template_encode_start_idx", 34)
 
     def __len__(self):
         return len(self.metadata)
@@ -47,7 +56,6 @@ class ImageTextDataset(Dataset):
             return self.__getitem__((idx + 1) % len(self))
 
         prompt = item["text"]
-        # TODO: negative prompt support
         if self.model_type == "flux-dev":
             # (clip, t5)
             input_ids = tuple(
@@ -89,6 +97,16 @@ class ImageTextDataset(Dataset):
                 ).input_ids
             )
             input_ids = tuple(input_ids)
+        elif self.model_type == "qwen-image":
+            template = self.prompt_template_encode
+            drop_idx = self.prompt_template_encode_start_idx
+            txt = [template.format(prompt)]
+            txt_tokens = self.tokenizer(
+                txt, max_length=self.tokenizer_max_length + drop_idx, padding=True, truncation=True, return_tensors="pt"
+            ).to(self.device)
+            input_ids = (txt_tokens.input_ids,)
+            attention_mask = (txt_tokens.attention_mask,)
+            return_dict["attention_mask"] = attention_mask
         else:
             raise ValueError(f"Unsupported model_type: {self.model_type}")
 
@@ -106,6 +124,16 @@ def collate_fn(batch):
     
     input_ids_tuple_len = len(elem['input_ids'])
     input_ids_lists = [[] for _ in range(input_ids_tuple_len)]
+
+    if 'attention_mask' in elem:
+        attention_mask_lists = [[] for _ in range(input_ids_tuple_len)]
+        for item in batch:
+            for i in range(input_ids_tuple_len):
+                attention_mask_lists[i].append(item['attention_mask'][i].squeeze(0))
+        stacked_attention_mask_tuple = tuple(
+            torch.stack(mask_list) for mask_list in attention_mask_lists
+        )
+
     for item in batch:
         pixel_values_list.append(item['pixel_values'])
         original_size_list.append(item['original_size'])
@@ -123,7 +151,8 @@ def collate_fn(batch):
     collated_batch = {
         "pixel_values": stacked_pixel_values,
         "input_ids": stacked_input_ids_tuple, # 格式为 (tensor_1, tensor_2, ...)
-        "original_size": stacked_original_size
+        "original_size": stacked_original_size,
+        "attention_mask": stacked_attention_mask_tuple if 'attention_mask' in elem else None,
     }
 
     return collated_batch
