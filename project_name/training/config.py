@@ -40,6 +40,19 @@ class TrainerConfig:
     logging_steps: int = 50
     save_steps: int = 500
 
+    run_validation: bool = True
+    validation_steps: int = 500
+    val_batch_size: int = None # if not specified, use train_batch_size
+    val_metadata_file: str = None
+    val_image_dir: str = None
+
+    run_inference_validation: bool = True
+    inference_steps: int = 500
+    inference_metadata_file: str = None
+    inference_seed: int = 42
+    inference_num_inference_steps: int = 50
+    inference_output_dir: str = "inference_samples"
+
     mixed_precision: Optional[Literal["no", "fp16", "bf16"]] = "no"
 
     extra_config: Dict[str, Any] = field(default_factory=dict)

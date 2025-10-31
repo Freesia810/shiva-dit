@@ -1,3 +1,5 @@
+import os
+import json
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -5,7 +7,6 @@ from torch.utils.data import DataLoader
 from transformers import get_scheduler
 from peft import LoraConfig as PeftLoraConfig, get_peft_model, PeftModel
 from tqdm import tqdm
-import os
 
 from baselines.diffcr import DiffCRDitBlockHook
 from diffusers.pipelines.flux.pipeline_flux_kontext import retrieve_latents
@@ -113,6 +114,31 @@ class DiffusionModelTrainer:
             shuffle=True,
             collate_fn=collate_fn,
         )
+
+        self.val_dataloader = None
+        if config.val_metadata_file and config.val_image_dir:
+            print("Setting up validation dataloader...")
+            try:
+                val_dataset = ImageTextDataset(
+                    model_type=self.model_type,
+                    metadata_file=config.val_metadata_file,
+                    image_dir=config.val_image_dir,
+                    image_processor=self.pipe.image_processor,
+                    tokenizers=self.tokenizers,
+                )
+                val_batch_size = config.val_batch_size if config.val_batch_size else config.train_batch_size
+                self.val_dataloader = DataLoader(
+                    val_dataset,
+                    batch_size=val_batch_size,
+                    shuffle=False,
+                    collate_fn=collate_fn,
+                )
+                print(f"  Validation dataset size: {len(val_dataset)}")
+            except Exception as e:
+                print(f"Warning: Failed to load validation dataset. Validation will be skipped. Error: {e}")
+                self.val_dataloader = None
+        else:
+            print("Validation data not provided (val_metadata_file or val_image_dir is None), skipping validation setup.")
 
         num_update_steps_per_epoch = max(
             1, len(self.train_dataloader) // config.gradient_accumulation_steps
@@ -436,6 +462,127 @@ class DiffusionModelTrainer:
         )
 
         return total_loss, main_loss, hook_loss
+    
+    @torch.no_grad()
+    def validate(self, global_step):
+        if self.val_dataloader is None or not self.config.run_validation:
+            return
+
+        print(f"\nRunning validation at step {global_step}...")
+        
+        self.model.eval()
+        for hook in HookManager.get_all_hooks().values():
+            if isinstance(hook, nn.Module):
+                hook.eval()
+
+        total_val_loss = 0.0
+        total_main_loss = 0.0
+        total_hook_loss = 0.0
+        
+        val_progress_bar = tqdm(
+            self.val_dataloader, 
+            desc=f"Validation Step {global_step}", 
+            leave=False,
+            total=len(self.val_dataloader)
+        )
+
+        for batch in val_progress_bar:
+            try:
+                total_loss, main_loss, hook_loss = self._compute_loss(batch)
+                
+                total_val_loss += total_loss.item()
+                total_main_loss += main_loss.item()
+                total_hook_loss += hook_loss.item()
+            except Exception as e:
+                print(f"Error during validation batch: {e}")
+                continue
+
+        if len(self.val_dataloader) > 0:
+            avg_val_loss = total_val_loss / len(self.val_dataloader)
+            avg_main_loss = total_main_loss / len(self.val_dataloader)
+            avg_hook_loss = total_hook_loss / len(self.val_dataloader)
+
+            print(f"--- Validation Results (Step {global_step}) ---")
+            print(f"  Avg Total Loss: {avg_val_loss:.4f}")
+            print(f"  Avg Main Loss:  {avg_main_loss:.4f}")
+            print(f"  Avg Hook Loss:  {avg_hook_loss:.4f}")
+            print(f"--------------------------------------")
+        else:
+            print(f"Validation dataloader is empty, skipping logging.")
+
+        self.model.train()
+        for hook in HookManager.get_all_hooks().values():
+            if isinstance(hook, nn.Module):
+                hook.train()
+
+    @torch.no_grad()
+    def run_inference_validation(self, global_step):
+        if (
+            not self.config.run_inference_validation
+            or not self.config.inference_metadata_file
+        ):
+            return
+
+        print(f"\nRunning inference validation from file: {self.config.inference_metadata_file}...")
+
+        prompts = []
+        try:
+            with open(self.config.inference_metadata_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    item = json.loads(line)
+                    if 'text' in item:
+                        prompts.append(item['text'])
+            if not prompts:
+                print("  Warning: Inference metadata file is empty or contains no captions. Skipping.")
+                return
+        except Exception as e:
+            print(f"  Failed to read or parse inference metadata file: {e}. Skipping inference validation.")
+            return
+
+        self.model.eval()
+        for hook in HookManager.get_all_hooks().values():
+            if isinstance(hook, nn.Module):
+                hook.eval()
+
+        inference_generator = torch.Generator(device=self.device).manual_seed(self.config.inference_seed)
+
+        # TODO: dual model attr
+        model_attr_name = self.model_attrs[0]
+        original_model_in_pipe = getattr(self.pipe, model_attr_name)
+        setattr(self.pipe, model_attr_name, self.model)
+        
+        print(f"  Temporarily patching pipe.{model_attr_name} with trained model ({self.model.__class__.__name__})")
+
+        original_timesteps = self.scheduler.timesteps.clone()
+        print(f"  Saved original training scheduler timesteps (length {len(original_timesteps)})")
+
+        sample_dir = os.path.join(self.config.output_dir, self.config.inference_output_dir, f"step_{global_step}")
+        os.makedirs(sample_dir, exist_ok=True)
+        for i, prompt in enumerate(prompts):
+            try:
+                image = self.pipe(
+                    prompt=prompt,
+                    generator=inference_generator,
+                    num_inference_steps=self.config.inference_num_inference_steps,
+                ).images[0]
+                
+                safe_prompt = "".join(c if c.isalnum() else '_' for c in prompt)[:50]
+                image.save(os.path.join(sample_dir, f"sample_{i+1:03d}_{safe_prompt}.png"))
+            except Exception as e:
+                print(f"  Failed to generate image for prompt: '{prompt}'. Error: {e}")
+        
+        print(f"  Saved {len(prompts)} inference samples to {sample_dir}")
+
+        setattr(self.pipe, model_attr_name, original_model_in_pipe)
+        print(f"  Restored original model to pipe.{model_attr_name}")
+
+        self.scheduler.timesteps = original_timesteps
+        print(f"  Restored original training scheduler timesteps (length {len(self.scheduler.timesteps)})")
+
+        self.model.train()
+        for hook in HookManager.get_all_hooks().values():
+            if isinstance(hook, nn.Module):
+                hook.train()
 
     def train(self):
         print("Starting training...")
@@ -484,31 +631,54 @@ class DiffusionModelTrainer:
                             lr=self.lr_scheduler.get_last_lr()[0],
                             step=global_step,
                         )
+                    
+                    if global_step % self.config.validation_steps == 0:
+                        self.validate(global_step)
+                    
+                    if global_step % self.config.inference_steps == 0:
+                        self.run_inference_validation(global_step)
+
                     if global_step % self.config.save_steps == 0:
                         self.save_model(global_step)
 
         print("Training completed.")
         self.save_model("final")
-
+    
     def save_model(self, step_name):
         output_dir = os.path.join(self.config.output_dir, f"checkpoint-{step_name}")
         os.makedirs(output_dir, exist_ok=True)
 
         save_model = self.model
-        if isinstance(save_model, PeftModel):
-            save_model.save_pretrained(os.path.join(output_dir, "model_lora"))
-            print(f"LoRA adapter {output_dir}/model_lora")
+        
+        if self.config.training_mode == "lora":
+            if not isinstance(save_model, PeftModel):
+                 print(f"Warning: training_mode is 'lora' but model is not a PeftModel. Skipping model save.")
+            else:
+                save_model.save_pretrained(os.path.join(output_dir, "model_lora"))
+                print(f"Saved LoRA adapter to {output_dir}/model_lora")
+            
+            hook_params = {}
+            for name, hook in HookManager.get_all_hooks().items():
+                if isinstance(hook, nn.Module):
+                    hook_params[name] = hook.state_dict()
+            if hook_params:
+                torch.save(hook_params, os.path.join(output_dir, "hook_params.pt"))
+                print(f"Saved Hook parameters to {output_dir}/hook_params.pt")
+
         elif self.config.training_mode == "finetune":
             torch.save(
                 save_model.state_dict(), os.path.join(output_dir, "model_dit.pt")
             )
-            print(f"Finetune {output_dir}/model_dit.pt")
+            print(f"Saved Finetuned model (DiT + Hooks) to {output_dir}/model_dit.pt")
 
-        hook_params = {}
-        for name, hook in HookManager.get_all_hooks().items():
-            if isinstance(hook, nn.Module):
-                hook_params[name] = hook.state_dict()
-
-        if hook_params:
-            torch.save(hook_params, os.path.join(output_dir, "hook_params.pt"))
-            print(f"Hook {output_dir}/hook_params.pt")
+        elif self.config.training_mode == "hook_only":
+            hook_params = {}
+            for name, hook in HookManager.get_all_hooks().items():
+                if isinstance(hook, nn.Module):
+                    hook_params[name] = hook.state_dict()
+            
+            if hook_params:
+                torch.save(hook_params, os.path.join(output_dir, "hook_params.pt"))
+                print(f"Saved Hook parameters to {output_dir}/hook_params.pt")
+            else:
+                print(f"Warning: 'hook_only' mode but no hook parameters found to save.")
