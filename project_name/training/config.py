@@ -16,6 +16,7 @@ class TrainerConfig:
     metadata_file: str = "./test/training/dataset/meta.json"
     image_dir: str = "./test/training/dataset" 
     model_type: str = "flux-dev"
+    model_path: str = None
     output_dir: str = "./checkpoints/"
 
     training_mode: TrainingMode = "hook_only"
@@ -24,8 +25,7 @@ class TrainerConfig:
 
     num_epochs: int = 10
     train_batch_size: int = 1  # (micro-batch)
-    gradient_accumulation_steps: int = 4
-    # batch_size = train_batch_size * gradient_accumulation_steps
+    gradient_accumulation_steps: int = 4 # batch_size = train_batch_size * gradient_accumulation_steps
 
     learning_rate: float = 1e-4
     optimizer: str = "AdamW" # "Adam", "AdamW", "SGD"
@@ -41,3 +41,5 @@ class TrainerConfig:
     save_steps: int = 500
 
     mixed_precision: Optional[Literal["no", "fp16", "bf16"]] = "no"
+
+    extra_config: Dict[str, Any] = field(default_factory=dict)

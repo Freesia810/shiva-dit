@@ -1,0 +1,47 @@
+from project_name.training import DiffusionModelTrainer, LoraConfig, TrainerConfig
+from baselines.diffcr import DiffCRDitBlockHook
+
+if __name__ == "__main__":
+    HookType = DiffCRDitBlockHook
+    hook_config = {
+        "ratio_min": 0.1,
+        "ratio_max": 1.0,
+        "ratio_step": -0.1,
+    }
+    lora_config = {
+        "enable": True,
+        "rank": 8,
+        "target_modules": ("to_q", "to_k", "to_v", "to_out.0"),
+    }
+    
+    trainer_config = {
+        "metadata_file": "./test/training/dataset/meta.json",
+        "image_dir": "./test/training/dataset",
+        "model_type": "flux-dev",
+        "model_path": None,
+        "output_dir": "./checkpoints/",
+        "training_mode": "hook_only", # "hook_only" "finetune" "lora"
+        "lora_config": LoraConfig(**lora_config),
+        "trainable_hook_config": (HookType, hook_config),
+        "num_epochs": 100,
+        "train_batch_size": 1,
+        "gradient_accumulation_steps": 4,
+        "learning_rate": 1e-4,
+        "optimizer": "AdamW",
+        "weight_decay": 1e-2,
+        "lr_scheduler": "cosine",
+        "num_warmup_steps": 0,
+        "main_loss_weight": 1.0,
+        "hook_loss_weight": 0.1,
+        "seed": 42,
+        "logging_steps": 1,
+        "save_steps": 500,
+        "mixed_precision": "bf16",
+        "extra_config": {
+            "target_ratio": 0.5,
+        }
+    }
+
+    config = TrainerConfig(**trainer_config)
+    trainer = DiffusionModelTrainer(config=config)
+    trainer.train()

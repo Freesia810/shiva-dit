@@ -13,6 +13,7 @@ from project_name.hook import HookManager
 from project_name.utils import get_pipeline
 from project_name.training.config import TrainerConfig
 from project_name.training.dataset import ImageTextDataset, collate_fn
+from project_name.utils import global_context
 
 
 class DiffusionModelTrainer:
@@ -40,11 +41,14 @@ class DiffusionModelTrainer:
         )
 
         # we only to get the ref of this modules, no need to move them to device again
+        self.image_processor = self.pipe.image_processor
         self.vae = self.pipe.vae
         self.scheduler = self.pipe.scheduler
         self.model = tuple(
             getattr(self.pipe, model) for model in self.model_attrs
         )  # DiT
+        # TODO: support dual DiT like Wan
+        self.model = self.model[0]
 
         if self.model_type == "flux-dev" or self.model_type == "flux-kontext":
             self.tokenizers = (self.pipe.tokenizer, self.pipe.tokenizer_2)
@@ -119,7 +123,7 @@ class DiffusionModelTrainer:
         print(f"--- Training Config ---")
         print(f"  Mode: {config.training_mode}")
         print(f"  Micro Batch Size: {config.train_batch_size}")
-        print(f"  Grad Acc: {config.gradient_accumulation_steps}")
+        print(f"  Grad Acc Step: {config.gradient_accumulation_steps}")
         print(
             f"  Actual Batch Size: {config.train_batch_size * config.gradient_accumulation_steps}"
         )
@@ -162,6 +166,10 @@ class DiffusionModelTrainer:
                 )
 
             self.model.requires_grad_(False)
+            for hook in HookManager.get_all_hooks().values():
+                if isinstance(hook, nn.Module):
+                    hook.requires_grad_(False)
+
             lora_conf = self.config.lora_config
             peft_config = PeftLoraConfig(
                 r=lora_conf.rank,
@@ -172,12 +180,10 @@ class DiffusionModelTrainer:
             )
             self.model = get_peft_model(self.model, peft_config)
             self.model.print_trainable_parameters()
-            params_to_train.extend(self.model.parameters())
-
             for hook in HookManager.get_all_hooks().values():
                 if isinstance(hook, nn.Module):
                     hook.requires_grad_(True)
-                    params_to_train.extend(hook.parameters())
+            params_to_train = [p for p in self.model.parameters() if p.requires_grad]
         else:
             raise ValueError(f"Unknown training mode: {self.config.training_mode}")
 
@@ -207,6 +213,7 @@ class DiffusionModelTrainer:
     @torch.no_grad()
     def _prepare_model_inputs(self, batch):
         batch_size = batch["pixel_values"].shape[0]
+        model_kwargs = {}
 
         # vae encode
         pixel_values = batch["pixel_values"].to(self.device, dtype=self.vae.dtype)
@@ -219,6 +226,11 @@ class DiffusionModelTrainer:
             img_latents = (
                 img_latents - self.vae.config.shift_factor
             ) * self.vae.config.scaling_factor
+
+            height, width = img_latents.shape[2], img_latents.shape[3]
+
+            img_ids = self.pipe._prepare_latent_image_ids(batch_size, height // 2, width // 2, self.device, self.dtype)
+            model_kwargs["img_ids"] = img_ids
         elif self.model_type == "sd3":
             pass
         elif self.model_type == "qwen-image":
@@ -257,15 +269,14 @@ class DiffusionModelTrainer:
                 f"_prepare_model_inputs not implemented for model_type: {self.model_type}"
             )
 
-        model_kwargs = {}
-
         # text encode
         input_ids_tuple = batch["input_ids"]
         if self.model_type == "flux-dev" or self.model_type == "flux-kontext":
             model_kwargs["return_dict"] = False
-            model_kwargs["joint_attention_kwargs"] = self.pipe.joint_attention_kwargs
+            model_kwargs["joint_attention_kwargs"] = {}
 
             num_images_per_prompt = 1
+            guidance_scale = 3.5
             # clip -> pooled_prompt_embeds
             input_ids_clip = input_ids_tuple[0].to(self.device)
             pooled_prompt_embeds = self.text_encoders[0](
@@ -304,18 +315,19 @@ class DiffusionModelTrainer:
 
             # add noise
             noise = torch.randn_like(img_latents)
-            timesteps = torch.randint(
-                1,
-                self.scheduler.config.num_train_timesteps,
-                (batch_size,),
-                device=img_latents.device,
-            ).long()
-
+            indices = torch.randint(0, self.scheduler.config.num_train_timesteps, (batch_size,)).to(self.device)
+            schedule_timesteps_gpu = self.scheduler.timesteps.to(self.device)
+            timesteps = schedule_timesteps_gpu[indices]
             noisy_latents = self.scheduler.scale_noise(
                 sample=img_latents,
                 timestep=timesteps,
                 noise=noise,
             )
+
+            # handle guidance
+            guidance = torch.full([1], guidance_scale, device=self.device, dtype=torch.float32)
+            guidance = guidance.expand(batch_size)
+            model_kwargs["guidance"] = guidance
         elif self.model_type == "sd3":
             pass
         elif self.model_type == "qwen-image":
@@ -361,6 +373,26 @@ class DiffusionModelTrainer:
             raise NotImplementedError(
                 f"_prepare_model_inputs not implemented for model_type: {self.model_type}"
             )
+        
+        # update global context
+        # TODO: support all attr in global_context
+        patch_size = 2
+        hidden_seq_height = noise.shape[2] // patch_size
+        hidden_seq_width = noise.shape[3] // patch_size
+        hidden_seq_len = noise.shape[2] // patch_size * noise.shape[3] // patch_size
+        global_context.update(hidden_seq_len=hidden_seq_len)
+        global_context.update(hidden_seq_width=hidden_seq_width)
+        global_context.update(hidden_seq_height=hidden_seq_height)
+        if "encoder_hidden_states" in model_kwargs:
+            global_context.update(encoder_hidden_seq_len=model_kwargs["encoder_hidden_states"].size(1))
+
+        if self.model_type == "flux-dev" or self.model_type == "flux-kontext":
+            # pack for hidden state
+            height, width = noisy_latents.shape[-2:]
+            num_channels_latents = self.pipe.transformer.config.in_channels // 4
+            noisy_latents = self.pipe._pack_latents(noisy_latents, batch_size, num_channels_latents, height, width)
+            noise = self.pipe._pack_latents(noise, batch_size, num_channels_latents, height, width)
+            timesteps = timesteps / 1000
 
         return noisy_latents, timesteps, noise, model_kwargs
 
@@ -390,8 +422,8 @@ class DiffusionModelTrainer:
                 ratios.append(hook.diff_ratio)
         if ratios:
             avg_ratio = torch.mean(torch.stack(ratios))
-            target_ratio = 0.5  
-            target_ratio_tensor = torch.tensor([target_ratio], device=avg_ratio.device)
+            target_ratio = self.config.extra_config.get("target_ratio", 0.5)
+            target_ratio_tensor = torch.tensor(target_ratio, device=avg_ratio.device)
             diffcr_loss = F.mse_loss(avg_ratio, target_ratio_tensor)
             custom_losses.append(diffcr_loss)
 
@@ -408,6 +440,8 @@ class DiffusionModelTrainer:
     def train(self):
         print("Starting training...")
         global_step = 0
+
+        global_context.update(encoder_flag=True)
 
         for hook in HookManager.get_all_hooks().values():
             if isinstance(hook, nn.Module):
@@ -471,7 +505,7 @@ class DiffusionModelTrainer:
             print(f"Finetune {output_dir}/model_dit.pt")
 
         hook_params = {}
-        for name, hook in HookManager.get_all_hooks():
+        for name, hook in HookManager.get_all_hooks().items():
             if isinstance(hook, nn.Module):
                 hook_params[name] = hook.state_dict()
 

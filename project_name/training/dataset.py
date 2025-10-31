@@ -141,8 +141,8 @@ def collate_fn(batch):
         for i in range(input_ids_tuple_len):
             input_ids_lists[i].append(item['input_ids'][i].squeeze(0))
 
-            
-    stacked_pixel_values = torch.stack(pixel_values_list)
+
+    stacked_pixel_values = torch.concat(pixel_values_list) # we can't increase dim
     stacked_original_size = torch.stack(original_size_list)
     stacked_input_ids_tuple = tuple(
         torch.stack(id_list) for id_list in input_ids_lists
