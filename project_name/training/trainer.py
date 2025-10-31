@@ -519,10 +519,25 @@ class DiffusionModelTrainer:
             print(f"  Avg Hook Loss:  {avg_hook_loss:.4f}")
             print(f"--------------------------------------")
 
+            block_ratios_for_tb = {}
+            hook_ratios = []
+            for name, hook in HookManager.get_all_hooks().items():
+                if isinstance(hook, DiffCRDitBlockHook):
+                    ratio_val = hook.diff_ratio.item() 
+                    hook_ratios.append(ratio_val)
+                    print(f"    {name}: {ratio_val:.4f}")
+                    clean_name = name.split('.')[-1]
+                    block_ratios_for_tb[clean_name] = ratio_val
+            print(f"--------------------------------------")
+
             if self.writer:
                 self.writer.add_scalar("validation/total_loss", avg_val_loss, global_step)
                 self.writer.add_scalar("validation/main_loss", avg_main_loss, global_step)
                 self.writer.add_scalar("validation/hook_loss", avg_hook_loss, global_step)
+                if block_ratios_for_tb:
+                    self.writer.add_scalars("validation/block_ratios", block_ratios_for_tb, global_step)
+                    avg_ratio = sum(hook_ratios) / len(hook_ratios)
+                    self.writer.add_scalar("validation/avg_ratio", avg_ratio, global_step)
         else:
             print(f"Validation dataloader is empty, skipping logging.")
 
@@ -599,6 +614,7 @@ class DiffusionModelTrainer:
         self.scheduler.timesteps = original_timesteps
         print(f"  Restored original training scheduler timesteps (length {len(self.scheduler.timesteps)})")
 
+        torch.clear_autocast_cache()
         self.model.train()
         for hook in HookManager.get_all_hooks().values():
             if isinstance(hook, nn.Module):

@@ -170,11 +170,6 @@ class DiffCRDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
 
-    def loss(self, avg_ratio):
-        target_ratio_tensor = torch.tensor([self.diff_ratio], device=avg_ratio.device)
-        loss = F.mse_loss(avg_ratio, target_ratio_tensor)
-        return loss
-
 
 if __name__ == "__main__":
     model_type = "flux-dev"
