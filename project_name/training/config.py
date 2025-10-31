@@ -19,6 +19,9 @@ class TrainerConfig:
     model_path: str = None
     output_dir: str = "./checkpoints/"
 
+    log_with_tensorboard: bool = True
+    tensorboard_log_dir: str = "logs"
+
     training_mode: TrainingMode = "hook_only"
     lora_config: LoraConfig = field(default_factory=LoraConfig)
     trainable_hook_config: Tuple[type, Dict[str, Any]] = None 

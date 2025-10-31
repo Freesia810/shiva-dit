@@ -42,7 +42,7 @@ if __name__ == "__main__":
         "val_metadata_file": "./test/training/dataset/meta.json",
         "val_image_dir": "./test/training/dataset",
         "run_inference_validation": True,
-        "inference_steps": 500,
+        "inference_steps": 200,
         "inference_metadata_file": "./test/training/dataset/meta.json",
         "inference_seed": 42,
         "inference_num_inference_steps": 50,

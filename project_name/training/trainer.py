@@ -146,6 +146,17 @@ class DiffusionModelTrainer:
         self.num_training_steps = num_update_steps_per_epoch * config.num_epochs
         self.lr_scheduler = self._setup_scheduler()
 
+        self.writer = None
+        self.pil_to_tensor_transform = None
+        if config.log_with_tensorboard:
+            from torch.utils.tensorboard import SummaryWriter
+            import torchvision.transforms as T
+            tb_log_path = os.path.join(config.output_dir, config.tensorboard_log_dir)
+            os.makedirs(tb_log_path, exist_ok=True)
+            self.writer = SummaryWriter(log_dir=tb_log_path)
+            self.pil_to_tensor_transform = T.ToTensor()
+            print(f"TensorBoard logging enabled. Logs will be saved to: {tb_log_path}")
+
         print(f"--- Training Config ---")
         print(f"  Mode: {config.training_mode}")
         print(f"  Micro Batch Size: {config.train_batch_size}")
@@ -507,6 +518,11 @@ class DiffusionModelTrainer:
             print(f"  Avg Main Loss:  {avg_main_loss:.4f}")
             print(f"  Avg Hook Loss:  {avg_hook_loss:.4f}")
             print(f"--------------------------------------")
+
+            if self.writer:
+                self.writer.add_scalar("validation/total_loss", avg_val_loss, global_step)
+                self.writer.add_scalar("validation/main_loss", avg_main_loss, global_step)
+                self.writer.add_scalar("validation/hook_loss", avg_hook_loss, global_step)
         else:
             print(f"Validation dataloader is empty, skipping logging.")
 
@@ -568,6 +584,10 @@ class DiffusionModelTrainer:
                 
                 safe_prompt = "".join(c if c.isalnum() else '_' for c in prompt)[:50]
                 image.save(os.path.join(sample_dir, f"sample_{i+1:03d}_{safe_prompt}.png"))
+                if self.writer and self.pil_to_tensor_transform:
+                    tag = f"inference_sample/{i+1:03d}_{safe_prompt}"
+                    image_tensor = self.pil_to_tensor_transform(image)
+                    self.writer.add_image(tag, image_tensor, global_step)
             except Exception as e:
                 print(f"  Failed to generate image for prompt: '{prompt}'. Error: {e}")
         
@@ -623,6 +643,13 @@ class DiffusionModelTrainer:
                     self.lr_scheduler.step()
                     self.optimizer.zero_grad()
                     global_step += 1
+
+                    if self.writer:
+                        self.writer.add_scalar("train/total_loss", total_loss.item(), global_step)
+                        self.writer.add_scalar("train/main_loss", main_loss.item(), global_step)
+                        self.writer.add_scalar("train/hook_loss", hook_loss.item(), global_step)
+                        self.writer.add_scalar("train/lr", self.lr_scheduler.get_last_lr()[0], global_step)
+
                     if global_step % self.config.logging_steps == 0:
                         progress_bar.set_postfix(
                             loss=total_loss.item(),  # (显示 micro-batch 的 loss)
