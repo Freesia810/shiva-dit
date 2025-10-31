@@ -31,8 +31,6 @@ class DiffCRDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.token_scores = None
         self.index = None
 
-        self.eval()
-
     def _select_topk_and_remaining_tokens(self, x, token_scores, k, C):
         B, N, _ = x.shape
         token_scores, topk_indices = torch.topk(torch.sigmoid(token_scores), k=k, sorted=False)
