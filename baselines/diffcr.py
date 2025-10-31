@@ -1,6 +1,7 @@
 import inspect
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Literal
 from project_name.hook import BaseDiTBlockHook, BaseDelegator, HookManager
 from project_name.utils import (
@@ -62,7 +63,6 @@ class DiffCRDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.hidden_router = nn.Linear(hidden_dim, 1, bias=False)
         self.dtype = torch.float32
         self.to(device=next(block.parameters()).device, dtype=self.dtype)
-        
 
     def delegated_call(self, func, module_self, *args, **kwargs):
         sig = inspect.signature(func)
@@ -169,6 +169,11 @@ class DiffCRDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             hidden_output = hidden_output * (self.token_scores.gather(dim=1, index=self.index).unsqueeze(2).to(hidden_output.dtype))
 
         return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
+
+    def loss(self, avg_ratio):
+        target_ratio_tensor = torch.tensor([self.diff_ratio], device=avg_ratio.device)
+        loss = F.mse_loss(avg_ratio, target_ratio_tensor)
+        return loss
 
 
 if __name__ == "__main__":

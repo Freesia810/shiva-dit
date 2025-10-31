@@ -7,6 +7,7 @@ from peft import LoraConfig as PeftLoraConfig, get_peft_model, PeftModel
 from tqdm import tqdm
 import os
 
+from baselines.diffcr import DiffCRDitBlockHook
 from diffusers.pipelines.flux.pipeline_flux_kontext import retrieve_latents
 from project_name.hook import HookManager
 from project_name.utils import get_pipeline
@@ -381,9 +382,18 @@ class DiffusionModelTrainer:
         )
         hook_loss = torch.tensor(0.0, device=self.device)
         custom_losses = []
+
+        ### DiffCR Loss ###
+        ratios = []
         for hook in HookManager.get_all_hooks().values():
-            if isinstance(hook, nn.Module) and hasattr(hook, "loss"):
-                custom_losses.append(hook.loss())
+            if isinstance(hook, DiffCRDitBlockHook):
+                ratios.append(hook.diff_ratio)
+        if ratios:
+            avg_ratio = torch.mean(torch.stack(ratios))
+            target_ratio = 0.5  
+            target_ratio_tensor = torch.tensor([target_ratio], device=avg_ratio.device)
+            diffcr_loss = F.mse_loss(avg_ratio, target_ratio_tensor)
+            custom_losses.append(diffcr_loss)
 
         if custom_losses:
             hook_loss = torch.stack(custom_losses).mean()
