@@ -1,5 +1,6 @@
 import os
 import json
+import copy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -584,8 +585,7 @@ class DiffusionModelTrainer:
         
         print(f"  Temporarily patching pipe.{model_attr_name} with trained model ({self.model.__class__.__name__})")
 
-        original_timesteps = self.scheduler.timesteps.clone()
-        print(f"  Saved original training scheduler timesteps (length {len(original_timesteps)})")
+        original_scheduler = copy.deepcopy(self.scheduler)
 
         sample_dir = os.path.join(self.config.output_dir, self.config.inference_output_dir, f"step_{global_step}")
         os.makedirs(sample_dir, exist_ok=True)
@@ -611,10 +611,8 @@ class DiffusionModelTrainer:
         setattr(self.pipe, model_attr_name, original_model_in_pipe)
         print(f"  Restored original model to pipe.{model_attr_name}")
 
-        self.scheduler.timesteps = original_timesteps
-        print(f"  Restored original training scheduler timesteps (length {len(self.scheduler.timesteps)})")
+        self.scheduler = original_scheduler
 
-        torch.clear_autocast_cache()
         self.model.train()
         for hook in HookManager.get_all_hooks().values():
             if isinstance(hook, nn.Module):
