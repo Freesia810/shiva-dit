@@ -66,7 +66,7 @@ class DiffCRDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
     def delegated_call(self, func, module_self, *args, **kwargs):
         sig = inspect.signature(func)
-        bound = sig.bind_partial(*args, **kwargs)
+        bound = sig.bind_partial(module_self, *args, **kwargs)
         bound.apply_defaults()
 
         hidden_states = bound.arguments.get('hidden_states', None)
@@ -116,7 +116,7 @@ class DiffCRDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 bound.arguments["image_rotary_emb"] = image_rotary_emb
 
             # call original function
-            result = func(module_self, *bound.args, **bound.kwargs)
+            result = func(*bound.args, **bound.kwargs)
 
             if isinstance(result, tuple) and len(result) == 2:
                 encoder_hidden_states, hidden_states = result

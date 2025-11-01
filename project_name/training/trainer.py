@@ -108,6 +108,7 @@ class DiffusionModelTrainer:
             image_dir=config.image_dir,
             image_processor=self.pipe.image_processor,
             tokenizers=self.tokenizers,
+            pipe=self.pipe,
         )
         self.train_dataloader = DataLoader(
             self.train_dataset,
@@ -126,6 +127,7 @@ class DiffusionModelTrainer:
                     image_dir=config.val_image_dir,
                     image_processor=self.pipe.image_processor,
                     tokenizers=self.tokenizers,
+                    pipe=self.pipe,
                 )
                 val_batch_size = config.val_batch_size if config.val_batch_size else config.train_batch_size
                 self.val_dataloader = DataLoader(
@@ -292,9 +294,7 @@ class DiffusionModelTrainer:
                 generator=self.generator,
                 sample_mode="argmax",
             )
-            img_latents = (
-                img_latents - self.vae.config.shift_factor
-            ) * self.vae.config.scaling_factor
+            img_latents = img_latents * self.vae.config.scaling_factor
         elif self.model_type == "qwen-image":
             img_latents = retrieve_latents(
                 self.vae.encode(pixel_values),
@@ -399,7 +399,7 @@ class DiffusionModelTrainer:
 
             input_ids = input_ids_tuple[0].to(self.device)
             prompt_attention_mask = batch["attention_mask"][0].to(self.device)
-            prompt_embeds = self.text_encoder[0](
+            prompt_embeds = self.text_encoders[0](
                 input_ids, attention_mask=prompt_attention_mask
             )[0].to(dtype=self.dtype, device=self.device)
 
@@ -414,7 +414,7 @@ class DiffusionModelTrainer:
                 prompt_attention_mask = self.empty_prompt_attention_mask
 
             model_kwargs["encoder_hidden_states"] = prompt_embeds
-            model_kwargs["encoder_hidden_states_mask"] = prompt_embeds_mask
+            model_kwargs["encoder_attention_mask"] = prompt_attention_mask
 
             # add noise
             noise = torch.randn_like(img_latents)
@@ -423,7 +423,7 @@ class DiffusionModelTrainer:
             timesteps = schedule_timesteps_gpu[indices]
             noisy_latents = self.scheduler.add_noise(
                 original_samples=img_latents,
-                timestep=timesteps,
+                timesteps=timesteps,
                 noise=noise,
             )
 
@@ -507,6 +507,9 @@ class DiffusionModelTrainer:
                 timestep=timesteps,
                 **model_kwargs,
             )[0]
+        
+        if self.model_type == "pixart-sigma":
+            noise_pred = noise_pred.chunk(2, dim=1)[0]
 
         main_loss = F.mse_loss(
             noise_pred.float(), noise_target.float(), reduction="mean"

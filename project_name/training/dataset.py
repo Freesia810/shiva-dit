@@ -38,6 +38,8 @@ class ImageTextDataset(Dataset):
             )
             self.prompt_template_encode_start_idx = kwargs.get("prompt_template_encode_start_idx", 34)
 
+        self.pipe = kwargs.get("pipe", None)
+
     def __len__(self):
         return len(self.metadata)
 
@@ -84,7 +86,7 @@ class ImageTextDataset(Dataset):
         elif self.model_type == "pixart-sigma":
             prompt = self.pipe._text_preprocessing(prompt, clean_caption=True)
             max_sequence_length = 300
-            text_inputs = self.tokenizer(
+            text_inputs = self.tokenizers[0](
                 prompt,
                 padding="max_length",
                 max_length=max_sequence_length,

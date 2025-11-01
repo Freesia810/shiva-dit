@@ -1,5 +1,6 @@
 # Requires: Python >= 3.10
 accelerate==1.8.1
+beautifulsoup4==4.14.2
 clip==0.2.0
 datasets>=2.21,<3.0
 fairscale==0.4.13

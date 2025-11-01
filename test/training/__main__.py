@@ -20,7 +20,7 @@ if __name__ == "__main__":
         "model_type": "pixart-sigma",  # "pixart-sigma", "flux-dev"
         "model_path": None,
         "output_dir": "./checkpoints/",
-        "training_mode": "lora",  # "hook_only" "finetune" "lora"
+        "training_mode": "hook_only",  # "hook_only" "finetune" "lora"
         "lora_config": LoraConfig(**lora_config),
         "trainable_hook_config": (HookType, hook_config),
         "caption_dropout_rate": 0.25,
@@ -30,10 +30,10 @@ if __name__ == "__main__":
         "learning_rate": 1e-4,
         "optimizer": "AdamW",
         "weight_decay": 3e-2,
-        "lr_scheduler": "cosine",
+        "lr_scheduler": "cosine", # "linear", "cosine", "constant"
         "num_warmup_steps": 0,
         "main_loss_weight": 1.0,
-        "hook_loss_weight": 0.3,
+        "hook_loss_weight": 0.1,
         "seed": 42,
         "logging_steps": 1,
         "save_steps": 5000,
