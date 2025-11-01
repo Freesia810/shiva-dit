@@ -651,7 +651,7 @@ class DiffusionModelTrainer:
                 is_last_step = (step + 1) == len(self.train_dataloader)
 
                 if is_update_step or is_last_step:
-                    # torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
 
                     self.optimizer.step()
                     self.lr_scheduler.step()

@@ -164,10 +164,6 @@ class DiffCRDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         hidden_output: torch.Tensor,
         encoder_hidden_output: torch.Tensor = None,
     ):
-        if module_name == "ffn":
-            # gate with topk scores
-            hidden_output = hidden_output * (self.token_scores.gather(dim=1, index=self.index).unsqueeze(2).to(hidden_output.dtype))
-
         return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
 
 
