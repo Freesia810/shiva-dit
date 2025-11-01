@@ -51,6 +51,17 @@ class ImageTextDataset(Dataset):
             image = load_image(image_path)
             original_size = (image.height, image.width)
             processed_image = self.image_processor.preprocess(image)
+            if self.model_type == "pixart-sigma":
+                from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
+                    ASPECT_RATIO_1024_BIN,
+                )
+                height, width = self.image_processor.classify_height_width_bin(
+                    original_size[0], original_size[1], ASPECT_RATIO_1024_BIN
+                )
+                processed_image = self.image_processor.resize_and_crop_tensor(
+                    processed_image, height, width
+                )
+
         except Exception as e:
             print(f"Error loading image {image_path}: {e}")
             return self.__getitem__((idx + 1) % len(self))
@@ -70,6 +81,20 @@ class ImageTextDataset(Dataset):
                 ).input_ids
                 for tokenizer in self.tokenizers
             )
+        elif self.model_type == "pixart-sigma":
+            prompt = self.pipe._text_preprocessing(prompt, clean_caption=True)
+            max_sequence_length = 300
+            text_inputs = self.tokenizer(
+                prompt,
+                padding="max_length",
+                max_length=max_sequence_length,
+                truncation=True,
+                add_special_tokens=True,
+                return_tensors="pt",
+            )
+            input_ids = (text_inputs.input_ids,)
+            attention_mask = (text_inputs.attention_mask,)
+            return_dict["attention_mask"] = attention_mask
         elif self.model_type == "sd3":
             # (clip, clip, t5)
             assert len(self.tokenizers) == 3, "SD3 model_type requires 3 tokenizers"
@@ -118,10 +143,10 @@ class ImageTextDataset(Dataset):
 
 def collate_fn(batch):
     elem = batch[0]
-    
+
     pixel_values_list = []
     original_size_list = []
-    
+
     input_ids_tuple_len = len(elem['input_ids'])
     input_ids_lists = [[] for _ in range(input_ids_tuple_len)]
 
@@ -137,20 +162,19 @@ def collate_fn(batch):
     for item in batch:
         pixel_values_list.append(item['pixel_values'])
         original_size_list.append(item['original_size'])
-        
+
         for i in range(input_ids_tuple_len):
             input_ids_lists[i].append(item['input_ids'][i].squeeze(0))
-
 
     stacked_pixel_values = torch.concat(pixel_values_list) # we can't increase dim
     stacked_original_size = torch.stack(original_size_list)
     stacked_input_ids_tuple = tuple(
         torch.stack(id_list) for id_list in input_ids_lists
     )
-    
+
     collated_batch = {
         "pixel_values": stacked_pixel_values,
-        "input_ids": stacked_input_ids_tuple, # 格式为 (tensor_1, tensor_2, ...)
+        "input_ids": stacked_input_ids_tuple,
         "original_size": stacked_original_size,
         "attention_mask": stacked_attention_mask_tuple if 'attention_mask' in elem else None,
     }

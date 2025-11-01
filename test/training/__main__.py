@@ -13,16 +13,17 @@ if __name__ == "__main__":
         "rank": 32,
         "target_modules": ("to_q", "to_k", "to_v", "to_out.0"),
     }
-    
+
     trainer_config = {
         "metadata_file": "./test/training/dataset/meta.json",
         "image_dir": "./test/training/dataset",
-        "model_type": "flux-dev",
+        "model_type": "pixart-sigma",  # "pixart-sigma", "flux-dev"
         "model_path": None,
         "output_dir": "./checkpoints/",
-        "training_mode": "lora", # "hook_only" "finetune" "lora"
+        "training_mode": "lora",  # "hook_only" "finetune" "lora"
         "lora_config": LoraConfig(**lora_config),
         "trainable_hook_config": (HookType, hook_config),
+        "caption_dropout_rate": 0.25,
         "num_epochs": 10000,
         "train_batch_size": 1,
         "gradient_accumulation_steps": 8,
@@ -47,10 +48,10 @@ if __name__ == "__main__":
         "inference_seed": 42,
         "inference_num_inference_steps": 50,
         "inference_output_dir": "inference_samples",
-        "mixed_precision": "bf16",
+        "mixed_precision": "fp16",  # "no", "fp16", "bf16"
         "extra_config": {
             "target_ratio": 0.5,
-        }
+        },
     }
 
     config = TrainerConfig(**trainer_config)

@@ -26,6 +26,8 @@ class TrainerConfig:
     lora_config: LoraConfig = field(default_factory=LoraConfig)
     trainable_hook_config: Tuple[type, Dict[str, Any]] = None 
 
+    caption_dropout_rate: float = 0.25
+
     num_epochs: int = 10
     train_batch_size: int = 1  # (micro-batch)
     gradient_accumulation_steps: int = 4 # batch_size = train_batch_size * gradient_accumulation_steps

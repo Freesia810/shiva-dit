@@ -147,6 +147,21 @@ class DiffusionModelTrainer:
         self.num_training_steps = num_update_steps_per_epoch * config.num_epochs
         self.lr_scheduler = self._setup_scheduler()
 
+        if self.config.caption_dropout_rate > 0:
+            print(f"Caption dropout enabled with rate: {self.config.caption_dropout_rate}")
+            if self.model_type == 'pixart-sigma':
+                self.empty_prompt_embeds, self.empty_prompt_attention_mask, _, _ = (
+                    self.pipe.encode_prompt(
+                        "",
+                        do_classifier_free_guidance=False,
+                        device=self.device,
+                        dtype=self.dtype,
+                        clean_caption=True,
+                    )
+                )
+            else:
+                raise NotImplementedError("Caption dropout is only implemented for 'pixart-sigma' model_type currently.")
+
         self.writer = None
         self.pil_to_tensor_transform = None
         if config.log_with_tensorboard:
@@ -271,6 +286,15 @@ class DiffusionModelTrainer:
             model_kwargs["img_ids"] = img_ids
         elif self.model_type == "sd3":
             pass
+        elif self.model_type == "pixart-sigma":
+            img_latents = retrieve_latents(
+                self.vae.encode(pixel_values),
+                generator=self.generator,
+                sample_mode="argmax",
+            )
+            img_latents = (
+                img_latents - self.vae.config.shift_factor
+            ) * self.vae.config.scaling_factor
         elif self.model_type == "qwen-image":
             img_latents = retrieve_latents(
                 self.vae.encode(pixel_values),
@@ -363,9 +387,46 @@ class DiffusionModelTrainer:
             )
 
             # handle guidance
+            # TODO: is it right?
             guidance = torch.full([1], guidance_scale, device=self.device, dtype=torch.float32)
             guidance = guidance.expand(batch_size)
             model_kwargs["guidance"] = guidance
+        elif self.model_type == "pixart-sigma":
+            model_kwargs["return_dict"] = False
+            added_cond_kwargs = {"resolution": None, "aspect_ratio": None}
+            model_kwargs["added_cond_kwargs"] = added_cond_kwargs
+            num_images_per_prompt = 1
+
+            input_ids = input_ids_tuple[0].to(self.device)
+            prompt_attention_mask = batch["attention_mask"][0].to(self.device)
+            prompt_embeds = self.text_encoder[0](
+                input_ids, attention_mask=prompt_attention_mask
+            )[0].to(dtype=self.dtype, device=self.device)
+
+            bs_embed, seq_len, _ = prompt_embeds.shape
+            prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
+            prompt_embeds = prompt_embeds.view(bs_embed * num_images_per_prompt, seq_len, -1)
+            prompt_attention_mask = prompt_attention_mask.repeat(1, num_images_per_prompt)
+            prompt_attention_mask = prompt_attention_mask.view(bs_embed * num_images_per_prompt, -1)
+
+            if torch.rand(1).item() < self.config.caption_dropout_rate:
+                prompt_embeds = self.empty_prompt_embeds
+                prompt_attention_mask = self.empty_prompt_attention_mask
+
+            model_kwargs["encoder_hidden_states"] = prompt_embeds
+            model_kwargs["encoder_hidden_states_mask"] = prompt_embeds_mask
+
+            # add noise
+            noise = torch.randn_like(img_latents)
+            indices = torch.randint(0, self.scheduler.config.num_train_timesteps, (batch_size,)).to(self.device)
+            schedule_timesteps_gpu = self.scheduler.timesteps.to(self.device)
+            timesteps = schedule_timesteps_gpu[indices]
+            noisy_latents = self.scheduler.add_noise(
+                original_samples=img_latents,
+                timestep=timesteps,
+                noise=noise,
+            )
+
         elif self.model_type == "sd3":
             pass
         elif self.model_type == "qwen-image":
@@ -411,7 +472,7 @@ class DiffusionModelTrainer:
             raise NotImplementedError(
                 f"_prepare_model_inputs not implemented for model_type: {self.model_type}"
             )
-        
+
         # update global context
         # TODO: support all attr in global_context
         patch_size = 2
@@ -474,14 +535,14 @@ class DiffusionModelTrainer:
         )
 
         return total_loss, main_loss, hook_loss
-    
+
     @torch.no_grad()
     def validate(self, global_step):
         if self.val_dataloader is None or not self.config.run_validation:
             return
 
         print(f"\nRunning validation at step {global_step}...")
-        
+
         self.model.eval()
         for hook in HookManager.get_all_hooks().values():
             if isinstance(hook, nn.Module):
@@ -490,7 +551,7 @@ class DiffusionModelTrainer:
         total_val_loss = 0.0
         total_main_loss = 0.0
         total_hook_loss = 0.0
-        
+
         val_progress_bar = tqdm(
             self.val_dataloader, 
             desc=f"Validation Step {global_step}", 
@@ -501,7 +562,7 @@ class DiffusionModelTrainer:
         for batch in val_progress_bar:
             try:
                 total_loss, main_loss, hook_loss = self._compute_loss(batch)
-                
+
                 total_val_loss += total_loss.item()
                 total_main_loss += main_loss.item()
                 total_hook_loss += hook_loss.item()
@@ -582,7 +643,7 @@ class DiffusionModelTrainer:
         model_attr_name = self.model_attrs[0]
         original_model_in_pipe = getattr(self.pipe, model_attr_name)
         setattr(self.pipe, model_attr_name, self.model)
-        
+
         print(f"  Temporarily patching pipe.{model_attr_name} with trained model ({self.model.__class__.__name__})")
 
         original_scheduler = copy.deepcopy(self.scheduler)
@@ -596,7 +657,7 @@ class DiffusionModelTrainer:
                     generator=inference_generator,
                     num_inference_steps=self.config.inference_num_inference_steps,
                 ).images[0]
-                
+
                 safe_prompt = "".join(c if c.isalnum() else '_' for c in prompt)[:50]
                 image.save(os.path.join(sample_dir, f"sample_{i+1:03d}_{safe_prompt}.png"))
                 if self.writer and self.pil_to_tensor_transform:
@@ -605,7 +666,7 @@ class DiffusionModelTrainer:
                     self.writer.add_image(tag, image_tensor, global_step)
             except Exception as e:
                 print(f"  Failed to generate image for prompt: '{prompt}'. Error: {e}")
-        
+
         print(f"  Saved {len(prompts)} inference samples to {sample_dir}")
 
         setattr(self.pipe, model_attr_name, original_model_in_pipe)
@@ -672,10 +733,10 @@ class DiffusionModelTrainer:
                             lr=self.lr_scheduler.get_last_lr()[0],
                             step=global_step,
                         )
-                    
+
                     if global_step % self.config.validation_steps == 0:
                         self.validate(global_step)
-                    
+
                     if global_step % self.config.inference_steps == 0:
                         self.run_inference_validation(global_step)
 
@@ -684,20 +745,20 @@ class DiffusionModelTrainer:
 
         print("Training completed.")
         self.save_model("final")
-    
+
     def save_model(self, step_name):
         output_dir = os.path.join(self.config.output_dir, f"checkpoint-{step_name}")
         os.makedirs(output_dir, exist_ok=True)
 
         save_model = self.model
-        
+
         if self.config.training_mode == "lora":
             if not isinstance(save_model, PeftModel):
-                 print(f"Warning: training_mode is 'lora' but model is not a PeftModel. Skipping model save.")
+                print(f"Warning: training_mode is 'lora' but model is not a PeftModel. Skipping model save.")
             else:
                 save_model.save_pretrained(os.path.join(output_dir, "model_lora"))
                 print(f"Saved LoRA adapter to {output_dir}/model_lora")
-            
+
             hook_params = {}
             for name, hook in HookManager.get_all_hooks().items():
                 if isinstance(hook, nn.Module):
@@ -717,7 +778,7 @@ class DiffusionModelTrainer:
             for name, hook in HookManager.get_all_hooks().items():
                 if isinstance(hook, nn.Module):
                     hook_params[name] = hook.state_dict()
-            
+
             if hook_params:
                 torch.save(hook_params, os.path.join(output_dir, "hook_params.pt"))
                 print(f"Saved Hook parameters to {output_dir}/hook_params.pt")
