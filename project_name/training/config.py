@@ -22,9 +22,13 @@ class TrainerConfig:
     log_with_tensorboard: bool = True
     tensorboard_log_dir: str = "logs"
 
-    training_mode: TrainingMode = "hook_only"
+    training_mode: TrainingMode = "hook_only" # "hook_only" "finetune" "lora" "auto-lora"
     lora_config: LoraConfig = field(default_factory=LoraConfig)
     trainable_hook_config: Tuple[type, Dict[str, Any]] = None 
+
+    # 0 -> hook_warmup_steps -> hook_only_steps
+    hook_warmup_steps: int = 0
+    hook_only_steps: int = 0
 
     caption_dropout_rate: float = 0.25
 

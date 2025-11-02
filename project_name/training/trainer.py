@@ -213,7 +213,7 @@ class DiffusionModelTrainer:
                 if isinstance(hook, nn.Module):
                     hook.requires_grad_(True)
                     params_to_train.extend(hook.parameters())
-        elif self.config.training_mode == "lora":
+        elif self.config.training_mode == "lora" or self.config.training_mode == "auto-lora":
             print("Training mode: lora (applying LoRA to DiT model)")
             if not self.config.lora_config.enable:
                 raise ValueError(
@@ -495,7 +495,7 @@ class DiffusionModelTrainer:
 
         return noisy_latents, timesteps, noise, model_kwargs
 
-    def _compute_loss(self, batch):
+    def _compute_loss(self, batch, global_step: int):
         noisy_latents, timesteps, noise_target, model_kwargs = (
             self._prepare_model_inputs(batch)
         )
@@ -532,9 +532,13 @@ class DiffusionModelTrainer:
         if custom_losses:
             hook_loss = torch.stack(custom_losses).mean()
 
+        current_hook_loss_weight = self.config.hook_loss_weight
+        if global_step < self.config.hook_warmup_steps:
+            current_hook_loss_weight = 0.0
+
         total_loss = (
             self.config.main_loss_weight * main_loss
-            + self.config.hook_loss_weight * hook_loss
+            + current_hook_loss_weight * hook_loss
         )
 
         return total_loss, main_loss, hook_loss
@@ -695,6 +699,16 @@ class DiffusionModelTrainer:
         self.vae.eval()
         for text_encoder in self.text_encoders:
             text_encoder.eval()
+        
+        if self.config.training_mode == "auto-lora" and self.config.hook_only_steps > 0:
+            print("Training in 'auto-lora' mode with hook_only_steps > 0.")
+            print(f"Freezing LoRA parameters for the first {self.config.hook_only_steps} steps.")
+            lora_count = 0
+            for name, param in self.model.named_parameters():
+                if 'lora_' in name:
+                    param.requires_grad_(False)
+                    lora_count += param.numel()
+            print(f"  Froze {lora_count} LoRA parameters.")
 
         for epoch in range(self.config.num_epochs):
             progress_bar = tqdm(
@@ -706,7 +720,7 @@ class DiffusionModelTrainer:
             self.optimizer.zero_grad()
 
             for step, batch in enumerate(progress_bar):
-                total_loss, main_loss, hook_loss = self._compute_loss(batch)
+                total_loss, main_loss, hook_loss = self._compute_loss(batch, global_step)
                 loss_to_backward = total_loss / self.config.gradient_accumulation_steps
                 loss_to_backward.backward()
                 is_update_step = (
@@ -721,6 +735,16 @@ class DiffusionModelTrainer:
                     self.lr_scheduler.step()
                     self.optimizer.zero_grad()
                     global_step += 1
+
+                    if self.config.training_mode == "auto-lora" and global_step == self.config.hook_only_steps:
+                        print(f"[Step {global_step}]: End of hook-only phase.")
+                        print(f"End of hook-only phase. Unfreezing LoRA parameters for joint training.")
+                        lora_count = 0
+                        for name, param in self.model.named_parameters():
+                            if 'lora_' in name:
+                                param.requires_grad_(True)
+                                lora_count += param.numel()
+                        print(f"  Unfroze {lora_count} LoRA parameters.")
 
                     if self.writer:
                         self.writer.add_scalar("train/total_loss", total_loss.item(), global_step)

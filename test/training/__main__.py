@@ -22,18 +22,18 @@ if __name__ == "__main__":
         "output_dir": "./checkpoints/",
         "training_mode": "lora",  # "hook_only" "finetune" "lora"
         "lora_config": LoraConfig(**lora_config),
-        # "trainable_hook_config": (HookType, hook_config),
+        "trainable_hook_config": (HookType, hook_config),
         "caption_dropout_rate": 0.25,
         "num_epochs": 10000,
         "train_batch_size": 1,
         "gradient_accumulation_steps": 8,
-        "learning_rate": 1e-5,
+        "learning_rate": 1e-4,
         "optimizer": "AdamW",
         "weight_decay": 3e-2,
         "lr_scheduler": "cosine", # "linear", "cosine", "constant"
         "num_warmup_steps": 0,
         "main_loss_weight": 1.0,
-        "hook_loss_weight": 0.0,
+        "hook_loss_weight": 0.3,
         "seed": 42,
         "logging_steps": 1,
         "save_steps": 5000,
@@ -48,9 +48,9 @@ if __name__ == "__main__":
         "inference_seed": 42,
         "inference_num_inference_steps": 50,
         "inference_output_dir": "inference_samples",
-        "mixed_precision": "fp16",  # "no", "fp16", "bf16"
+        "mixed_precision": "bf16",  # "no", "fp16", "bf16"
         "extra_config": {
-            "target_ratio": 0.9,
+            "target_ratio": 0.7,
         },
     }
 

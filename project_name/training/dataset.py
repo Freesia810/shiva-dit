@@ -7,7 +7,6 @@ from diffusers.image_processor import VaeImageProcessor
 from diffusers.utils import load_image
 
 class ImageTextDataset(Dataset):
-
     def __init__(
         self,
         model_type: str,
@@ -24,11 +23,7 @@ class ImageTextDataset(Dataset):
         self.image_processor = image_processor
 
         self.metadata = []
-        with open(metadata_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                item = json.loads(line)
-                if 'file_name' in item and 'text' in item:
-                    self.metadata.append(item)
+        self.process_metadata(metadata_file)
 
         if self.model_type == "qwen-image":
             self.tokenizer_max_length = kwargs.get("tokenizer_max_length", 1024)
@@ -39,6 +34,13 @@ class ImageTextDataset(Dataset):
             self.prompt_template_encode_start_idx = kwargs.get("prompt_template_encode_start_idx", 34)
 
         self.pipe = kwargs.get("pipe", None)
+
+    def process_metadata(self, metadata_file):
+        with open(metadata_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                item = json.loads(line)
+                if 'file_name' in item and 'text' in item:
+                    self.metadata.append(item)
 
     def __len__(self):
         return len(self.metadata)
