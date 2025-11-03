@@ -13,6 +13,7 @@ from tqdm import tqdm
 
 from baselines.diffcr import DiffCRDitBlockHook
 from diffusers.pipelines.flux.pipeline_flux_kontext import retrieve_latents
+from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from project_name.hook import HookManager
 from project_name.utils import get_pipeline
 from project_name.training.config import TrainerConfig
@@ -267,7 +268,6 @@ class DiffusionModelTrainer:
         )
         return scheduler
 
-    @torch.no_grad()
     def _prepare_model_inputs(self, batch):
         batch_size = batch["pixel_values"].shape[0]
         model_kwargs = {}
@@ -566,24 +566,32 @@ class DiffusionModelTrainer:
             noise = self.pipe._pack_latents(noise, batch_size, num_channels_latents, height, width)
             timesteps = timesteps / 1000
 
-        return noisy_latents, timesteps, noise, model_kwargs
+        return img_latents, noise, noisy_latents, timesteps, model_kwargs
 
     def _compute_loss(self, batch, global_step: int):
-        noisy_latents, timesteps, noise_target, model_kwargs = (
+        img_latents, noise, noisy_latents, timesteps, model_kwargs = (
             self._prepare_model_inputs(batch)
         )
+
+        noisy_latents = noisy_latents.clone().to(self.dtype).detach().requires_grad_(True)
 
         with torch.amp.autocast(device_type="cuda",
                                 enabled=(self.config.mixed_precision != "no"),
                                 dtype=(torch.bfloat16 if self.config.mixed_precision == "bf16" else (torch.float16 if self.config.mixed_precision == "fp16" else None))):
             noise_pred = self.model(
-                hidden_states=noisy_latents.to(self.dtype),
+                hidden_states=noisy_latents,
                 timestep=timesteps,
                 **model_kwargs,
             )[0]
         
         if self.model_type == "pixart-sigma":
             noise_pred = noise_pred.chunk(2, dim=1)[0]
+        
+        if isinstance(self.scheduler, FlowMatchEulerDiscreteScheduler):
+            # in flow-matching, we need to compute the noise target as vector field
+            noise_target = noise - img_latents
+        else:
+            noise_target = noise
 
         main_loss = F.mse_loss(
             noise_pred.float(), noise_target.float(), reduction="mean"
@@ -797,6 +805,8 @@ class DiffusionModelTrainer:
                     frozen_params += param.numel()
             print(f"  Froze {frozen_params} LoRA parameters.")
 
+        prev_lora_state = None
+        self.model.enable_adapter_layers()
         for epoch in range(self.epoch, self.config.num_epochs):
             self.epoch = epoch
             progress_bar = tqdm(
@@ -809,6 +819,9 @@ class DiffusionModelTrainer:
             self.optimizer.zero_grad(set_to_none=True)
 
             for step, batch in enumerate(progress_bar):
+                if step % self.config.gradient_accumulation_steps == 0:
+                    self.optimizer.zero_grad(set_to_none=True)
+
                 total_loss, main_loss, hook_loss = self._compute_loss(batch, self.global_step)
                 loss_to_backward = total_loss / self.config.gradient_accumulation_steps
                 loss_to_backward.backward()
@@ -820,7 +833,6 @@ class DiffusionModelTrainer:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                     self.optimizer.step()
                     self.lr_scheduler.step()
-                    self.optimizer.zero_grad(set_to_none=True)
                     self.global_step += 1
 
                     if (
@@ -834,21 +846,59 @@ class DiffusionModelTrainer:
                                 param.requires_grad_(True)
                                 unfrozen += param.numel()
                         print(f"  Unfroze {unfrozen} LoRA parameters.")
+                    
+                    if self.config.training_mode in ["lora", "auto-lora"]:                        
+                        lora_params = [p for n, p in self.model.named_parameters() if "lora_" in n]
+
+                        lora_norm = torch.norm(
+                            torch.stack([torch.norm(p.detach()) for p in lora_params])
+                        ).item()
+
+                        lora_grads = [
+                            torch.norm(p.grad.detach()) for p in lora_params
+                            if p.grad is not None
+                        ]
+
+                        if len(lora_grads) > 0:
+                            lora_grad_norm = torch.norm(torch.stack(lora_grads)).item()
+                        else:
+                            lora_grad_norm = 0.0
+
+                        if prev_lora_state is not None:
+                            deltas = [
+                                torch.norm(p.detach().cpu() - prev_lora_state[i])
+                                for i, p in enumerate(lora_params)
+                            ]
+                            lora_delta = torch.mean(torch.stack(deltas)).item()
+                        else:
+                            lora_delta = 0.0
+                        prev_lora_state = [p.detach().cpu().clone() for p in lora_params]
+
+                        if self.writer:
+                            self.writer.add_scalar("lora/param_norm", lora_norm, self.global_step)
+                            self.writer.add_scalar("lora/grad_norm", lora_grad_norm, self.global_step)
+                            self.writer.add_scalar("lora/param_delta", lora_delta, self.global_step)
 
                     if self.writer:
                         self.writer.add_scalar("train/total_loss", total_loss.item(), self.global_step)
                         self.writer.add_scalar("train/main_loss", main_loss.item(), self.global_step)
                         self.writer.add_scalar("train/hook_loss", hook_loss.item(), self.global_step)
                         self.writer.add_scalar("train/lr", self.lr_scheduler.get_last_lr()[0], self.global_step)
-
+                    
                     if self.global_step % self.config.logging_steps == 0:
-                        progress_bar.set_postfix(
-                            loss=total_loss.item(),
-                            main_loss=main_loss.item(),
-                            hook_loss=hook_loss.item(),
-                            lr=self.lr_scheduler.get_last_lr()[0],
-                            step=self.global_step,
-                        )
+                        postfix_dict = {
+                            "loss": f"{total_loss.item():.4f}",
+                            "main_loss": f"{main_loss.item():.4f}",
+                            "hook_loss": f"{hook_loss.item():.4f}",
+                            "lr": f"{self.lr_scheduler.get_last_lr()[0]:.2e}",
+                            "step": self.global_step,
+                        }
+                        if self.config.training_mode in ["lora", "auto-lora"]:
+                            postfix_dict["lora_norm"] = f"{lora_norm:.4f}"
+                            postfix_dict["lora_grad_norm"] = f"{lora_grad_norm:.4e}"
+                            postfix_dict["lora_delta"] = f"{lora_delta:.4e}"
+
+                        progress_bar.set_postfix(postfix_dict)
 
                     if (
                         hasattr(self.config, "validation_steps")
@@ -856,8 +906,8 @@ class DiffusionModelTrainer:
                         and self.global_step % self.config.validation_steps == 0
                     ):
                         val_metric = self.validate(self.global_step)
-                        if self.config.get("save_best", True):
-                            self.auto_save_best(val_metric, higher_is_better=self.config.get("best_metric_higher_is_better", False))
+                        if self.config.save_best:
+                            self.auto_save_best(val_metric, higher_is_better=self.config.best_metric_higher_is_better)
 
                     if (
                         hasattr(self.config, "inference_steps")
