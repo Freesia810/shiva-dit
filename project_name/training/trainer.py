@@ -838,8 +838,19 @@ class DiffusionModelTrainer:
                     param.requires_grad_(False)
                     frozen_params += param.numel()
             print(f"  Froze {frozen_params} LoRA parameters.")
+        elif self.config.training_mode == "auto-finetune" and self.config.hook_only_steps == 0:
+            print("Training in 'auto-finetune' mode with hook_only_steps == 0.")
+            print(f"  Training all parameters for the first {self.config.hook_only_steps} steps...")
+            frozen_params = 0
+            unwrapped_model = self.accelerator.unwrap_model(self.model)
+            for name, param in unwrapped_model.named_parameters():
+                if 'hook' not in name:
+                    param.requires_grad_(False)
+                    frozen_params += param.numel()
+            print(f"  Froze {frozen_params} parameters.")
 
         prev_lora_state = None
+        prev_finetune_state = None
         unwrapped_model = self.accelerator.unwrap_model(self.model)
         if hasattr(unwrapped_model, "enable_adapter_layers"):
             unwrapped_model.enable_adapter_layers()
@@ -946,6 +957,31 @@ class DiffusionModelTrainer:
                                 self.writer.add_scalar("lora/param_norm", lora_norm, self.global_step)
                                 self.writer.add_scalar("lora/grad_norm", lora_grad_norm, self.global_step)
                                 self.writer.add_scalar("lora/param_delta", lora_delta, self.global_step)
+                        elif self.config.training_mode == "finetune":
+                            all_trainable_params = [p for p in self.model.parameters() if p.requires_grad]
+                            param_norm = torch.norm(
+                                torch.stack([torch.norm(p.detach()) for p in all_trainable_params])
+                            ).item()
+                            param_grads = [
+                                torch.norm(p.grad.detach()) for p in all_trainable_params
+                                if p.grad is not None
+                            ]
+                            grad_norm = torch.norm(torch.stack(param_grads)).item() if param_grads else 0.0
+                            if prev_finetune_state is not None:
+                                deltas = [
+                                    torch.norm(p.detach().cpu() - prev_finetune_state[i])
+                                    for i, p in enumerate(all_trainable_params)
+                                ]
+                                param_delta = torch.mean(torch.stack(deltas)).item()
+                            else:
+                                param_delta = 0.0
+                            
+                            prev_finetune_state = [p.detach().cpu().clone() for p in all_trainable_params]
+
+                            if self.writer:
+                                self.writer.add_scalar("finetune/param_norm", param_norm, self.global_step)
+                                self.writer.add_scalar("finetune/grad_norm", grad_norm, self.global_step)
+                                self.writer.add_scalar("finetune/param_delta", param_delta, self.global_step)
 
                         if self.writer:
                             self.writer.add_scalar("train/total_loss", gathered_total_loss.item(), self.global_step)
@@ -965,6 +1001,10 @@ class DiffusionModelTrainer:
                                 postfix_dict["lora_norm"] = f"{lora_norm:.4f}"
                                 postfix_dict["lora_grad_norm"] = f"{lora_grad_norm:.4e}"
                                 postfix_dict["lora_delta"] = f"{lora_delta:.4e}"
+                            elif self.config.training_mode == "finetune":
+                                postfix_dict["param_norm"] = f"{param_norm:.4f}"
+                                postfix_dict["grad_norm"] = f"{grad_norm:.4e}"
+                                postfix_dict["param_delta"] = f"{param_delta:.4e}"
 
                             progress_bar.set_postfix(postfix_dict)
 

@@ -24,9 +24,9 @@ trainer_config = {
     "hook_warmup_steps": 0,
     "hook_only_steps": 0,
     "lora_config": LoraConfig(**lora_config),
-    # "trainable_hook_config": (HookType, hook_config),
+    "trainable_hook_config": (HookType, hook_config),
     "caption_dropout_rate": 0.25,
-    "num_epochs": 10,
+    "num_epochs": 50,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16,
     "learning_rate": 1e-5,
@@ -45,14 +45,14 @@ trainer_config = {
     "val_metadata_file": "../dataset/MJHQ-5K/val_meta.jsonl",
     "val_image_dir": "../dataset/MJHQ-5K/",
     "run_inference_validation": True,
-    "inference_steps": 306,
+    "inference_steps": 612,
     "inference_metadata_file": "../dataset/MJHQ-5K/test_meta.jsonl",
     "inference_seed": 42,
     "inference_num_inference_steps": 50,
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
     "extra_config": {
-        "target_ratio": 0.7,
+        "target_ratio": 0.8,
     },
 }
 
