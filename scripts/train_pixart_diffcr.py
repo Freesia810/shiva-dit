@@ -20,7 +20,7 @@ trainer_config = {
     "model_type": "pixart-sigma",  # "pixart-sigma", "flux-dev"
     "model_path": None,
     "output_dir": "./checkpoints/",
-    "training_mode": "lora",  # "hook_only" "finetune" "lora"
+    "training_mode": "lora",  # "hook_only" "finetune" "auto-finetune" "lora" "auto-lora"
     "hook_warmup_steps": 0,
     "hook_only_steps": 0,
     "lora_config": LoraConfig(**lora_config),

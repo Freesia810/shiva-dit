@@ -22,7 +22,7 @@ class TrainerConfig:
     log_with_tensorboard: bool = True
     tensorboard_log_dir: str = "logs"
 
-    training_mode: TrainingMode = "hook_only" # "hook_only" "finetune" "lora" "auto-lora"
+    training_mode: TrainingMode = "hook_only" # "hook_only" "finetune" "auto-finetune" "lora" "auto-lora"
     lora_config: LoraConfig = field(default_factory=LoraConfig)
     trainable_hook_config: Tuple[type, Dict[str, Any]] = None 
 
