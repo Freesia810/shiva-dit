@@ -3,20 +3,22 @@ from baselines.dy_dit import DynamicDiTBlockHook
 
 HookType = DynamicDiTBlockHook
 hook_config = {
-    "dynamic_width": {
-        "enable": False,
-        "select_threshold": 0.5,
-    },
-    "dynamic_token": {
-        "enable": True,
-        "select_threshold": 0.5,
-        "tau": 5.0,
+    "config": {
+        "dynamic_width": {
+            "enable": False,
+            "select_threshold": 0.5,
+        },
+        "dynamic_token": {
+            "enable": True,
+            "select_threshold": 0.5,
+            "tau": 5.0,
+        },
     },
 }
 lora_config = {
     "enable": True,
     "rank": 32,
-    "lora_alpha": 32,
+    "lora_alpha": 8,
     "target_modules": [
         "to_q",
         "to_k",
@@ -25,7 +27,6 @@ lora_config = {
         "linear",
         "proj_mlp",
         "proj_out",
-        "net.0",
         "net.2",
     ],
 }
@@ -36,7 +37,7 @@ trainer_config = {
     "model_type": "flux-dev",  # "pixart-sigma", "flux-dev"
     "model_path": None,
     "output_dir": "./checkpoints/",
-    "training_mode": "lora",  # "hook_only" "finetune" "auto-finetune" "lora" "auto-lora"
+    "training_mode": "hook_only",  # "hook_only" "finetune" "auto-finetune" "lora" "auto-lora"
     "hook_warmup_steps": 0,
     "hook_only_steps": 0,
     "lora_config": LoraConfig(**lora_config),

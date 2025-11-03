@@ -170,6 +170,23 @@ class DiffCRDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             hidden_output = hidden_output * (self.token_scores.gather(dim=1, index=self.index).unsqueeze(2).to(hidden_output.dtype))
         return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
 
+def calculate_ratio_loss(config: dict, device: torch.device):
+    target_ratio = config["target_ratio"]
+    ratios = []
+    custom_losses = []
+    for hook in HookManager.get_all_hooks().values():
+        if isinstance(hook, DiffCRDitBlockHook):
+            ratios.append(hook.diff_ratio)
+    if ratios:
+        avg_ratio = torch.mean(torch.stack(ratios))
+        target_ratio_tensor = torch.tensor(target_ratio, device=avg_ratio.device)
+        diffcr_loss = F.mse_loss(avg_ratio, target_ratio_tensor)
+        custom_losses.append(diffcr_loss)
+
+    if custom_losses:
+        return torch.stack(custom_losses).mean()
+    else:
+        return torch.tensor(0.0, device)
 
 if __name__ == "__main__":
     model_type = "pixart-sigma"
@@ -192,22 +209,3 @@ if __name__ == "__main__":
         res.save(f"{model_type}_diffcr.png")
 
     print(global_context)
-
-
-def calculate_ratio_loss(config: dict, device: torch.device):
-    target_ratio = config["target_ratio"]
-    ratios = []
-    custom_losses = []
-    for hook in HookManager.get_all_hooks().values():
-        if isinstance(hook, DiffCRDitBlockHook):
-            ratios.append(hook.diff_ratio)
-    if ratios:
-        avg_ratio = torch.mean(torch.stack(ratios))
-        target_ratio_tensor = torch.tensor(target_ratio, device=avg_ratio.device)
-        diffcr_loss = F.mse_loss(avg_ratio, target_ratio_tensor)
-        custom_losses.append(diffcr_loss)
-
-    if custom_losses:
-        return torch.stack(custom_losses).mean()
-    else:
-        return torch.tensor(0.0, device)

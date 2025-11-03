@@ -41,10 +41,17 @@ class DiffusionModelTrainer:
             config.seed
         )
 
+        if self.config.mixed_precision == "bf16":
+            dtype = torch.bfloat16
+        elif self.config.mixed_precision == "fp16":
+            dtype = torch.float16
+        else:
+            dtype = torch.float32
+
         self.pipe, self.model_attrs = get_pipeline(
             self.model_type,
             model_path=config.model_path,
-            dtype=torch.float32,
+            dtype=dtype,
         )
 
         # we only to get the ref of this modules, no need to move them to device again
@@ -66,12 +73,13 @@ class DiffusionModelTrainer:
             teacher_pipe, teacher_attrs = get_pipeline(
                 self.model_type,
                 model_path=config.model_path,
-                dtype=torch.float32,
+                dtype=dtype,
             )
             self.teacher_model = getattr(teacher_pipe, teacher_attrs[0]) # TODO: support dual DiT like Wan
             self.teacher_model.requires_grad_(False)
             self.teacher_model.eval()
             self.teacher_model = self.teacher_model.to(self.device)
+            del teacher_pipe
             if self.accelerator.is_main_process:
                 print("Teacher model loaded.")
 
@@ -510,7 +518,7 @@ class DiffusionModelTrainer:
             )
 
             guidance = torch.full(
-                [3.5], guidance_scale, device=self.device, dtype=torch.float32
+                [1], guidance_scale, device=self.device, dtype=torch.float32
             )
             guidance = guidance.expand(batch_size)
             model_kwargs["guidance"] = guidance
@@ -718,6 +726,9 @@ class DiffusionModelTrainer:
             # pack for hidden state
             height, width = noisy_latents.shape[-2:]
             num_channels_latents = self.pipe.transformer.config.in_channels // 4
+            img_latents = self.pipe._pack_latents(
+                img_latents, batch_size, num_channels_latents, height, width
+            )
             noisy_latents = self.pipe._pack_latents(
                 noisy_latents, batch_size, num_channels_latents, height, width
             )
@@ -751,46 +762,49 @@ class DiffusionModelTrainer:
             if self.teacher_model is not None and (
                 self.config.distillation_final_weight > 0 or self.config.distillation_middle_weight > 0
             ):
-                model_kwargs["output_hidden_states"] = True
+                if self.config.distillation_middle_weight > 0:
+                    model_kwargs["output_hidden_states"] = True
+                    model_kwargs["output_hidden_states_step"] = self.config.distillation_layer_skip
+                else:
+                    model_kwargs["output_hidden_states"] = False
                 with torch.no_grad():
                     teacher_output = self.teacher_model(
                         hidden_states=noisy_latents,
                         timestep=timesteps,
                         **model_kwargs,
                     )
-                    Y_s = teacher_output[0]
+                    Y_s = teacher_output[0]   
+
+                student_output = self.model(
+                    hidden_states=noisy_latents,
+                    timestep=timesteps,
+                    **model_kwargs,
+                )
+                Y_d = student_output[0]
+
+                noise_pred = Y_d
+
+                loss_v = F.mse_loss(Y_d.float(), Y_s.float(), reduction="mean")
+                distill_loss += loss_v * self.config.distillation_final_weight
+
+                if self.config.distillation_middle_weight > 0:
                     X_s_all = teacher_output[1]
-
-                    student_output = self.model(
-                        hidden_states=noisy_latents,
-                        timestep=timesteps,
-                        **model_kwargs,
-                    )
-                    Y_d = student_output[0]
                     X_d_all = student_output[1]
+                    loss_u_total = torch.tensor(0.0, device=self.device, dtype=self.dtype)
+                    num_layers_compared = 0
 
-                    noise_pred = Y_d
+                    layer_indices = range(0, len(X_s_all))
 
-                    loss_v = F.mse_loss(Y_d.float(), Y_s.float(), reduction="mean")
-                    distill_loss += loss_v * self.config.distillation_final_weight
+                    for l in layer_indices:
+                        loss_u_total += F.mse_loss(X_d_all[l].float(), X_s_all[l].float(), reduction="mean")
+                        num_layers_compared += 1
 
-                    if self.config.distillation_middle_weight > 0:
-                        loss_u_total = torch.tensor(0.0, device=self.device, dtype=self.dtype)
-                        num_layers_compared = 0
-
-                        layer_indices = range(0, len(X_s_all), self.config.distillation_layer_skip)
-
-                        for l in layer_indices:
-                            loss_u_total += F.mse_loss(X_d_all[l].float(), X_s_all[l].float(), reduction="mean")
-                            num_layers_compared += 1
-
-                        if num_layers_compared > 0:
-                            loss_u_avg = loss_u_total / num_layers_compared
-                            distill_loss += (
-                                loss_u_avg * self.config.distillation_middle_weight
-                            )
+                    if num_layers_compared > 0:
+                        loss_u_avg = loss_u_total / num_layers_compared
+                        distill_loss += (
+                            loss_u_avg * self.config.distillation_middle_weight
+                        )
             else:
-                model_kwargs["output_hidden_states"] = False
                 noise_pred = self.model(
                     hidden_states=noisy_latents,
                     timestep=timesteps,
@@ -827,7 +841,7 @@ class DiffusionModelTrainer:
             + distill_loss
         )
 
-        return total_loss, main_loss, hook_loss
+        return total_loss, main_loss, hook_loss, distill_loss
 
     @torch.no_grad()
     def validate(self, global_step):

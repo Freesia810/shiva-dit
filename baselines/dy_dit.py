@@ -121,25 +121,6 @@ class DynamicDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         # Timestep-wise Dynamic Width
         # todo: source code not released yet
 
-        # calculate static FLOPs per block
-        N = global_context.hidden_seq_len
-        C = global_context.hidden_dim
-        D_MLP = C * 4
-
-        # (QKV proj) + (Attn Scores) + (Attn * V) + (Out proj)
-        # (2*N*C*3*C) + (2*H*N*(C/H)*N) + (2*H*N*N*(C/H)) + (2*N*C*C)
-        f_qkv = 6 * N * C**2
-        f_scores = 2 * N**2 * C
-        f_v_agg = 2 * N**2 * C
-        f_out = 2 * N * C**2
-        self.f_static_mhsa = f_qkv + f_scores + f_v_agg + f_out
-
-        # (FC1: C -> 4C) + (FC2: 4C -> C)
-        f_fc1 = 2 * N * C * D_MLP
-        f_fc2 = 2 * N * D_MLP * C
-        self.f_static_mlp = f_fc1 + f_fc2
-        self.f_static_total_block = self.f_static_mhsa + self.f_static_mlp
-
         # Spatial-wise Dynamic Token
         if self.config["dynamic_token"]["enable"]:
             self.dynamic_token_selector = TokenSelect_baesd_on_x_t_text(
@@ -147,12 +128,12 @@ class DynamicDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 conditioning_dim=encoder_hidden_dim,
                 is_hard=True,
                 threshold=self.config["dynamic_token"]["select_threshold"],
-                enable_text=global_context.encoder_hidden_seq_len is not None,
+                enable_text=global_context.model_name in ["sd3", "flux-dev", "flux-kontext", "qwen-image", "qwen-image-edit"],
             )
         else:
             self.dynamic_token_selector = None
 
-        self.dtype = torch.float32
+        self.dtype = torch.bfloat16
         self.to(device=next(block.parameters()).device, dtype=self.dtype)
 
     def hook_pre_norm(
@@ -166,37 +147,47 @@ class DynamicDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         if module_name == 'ffn' or module_name == 'parallel':
             if self.config["dynamic_token"]["enable"]:
                 this_temb = self.temb if self.dynamic_token_selector.enable_text else global_context.embedded_timestep
-                token_mask = self.dynamic_token_selector(
-                    hidden_states.to(self.dtype), 
-                    this_temb.to(self.dtype), 
-                    encoder_hidden_states.to(self.dtype) if encoder_hidden_states is not None else None, 
-                    tau=self.config["dynamic_token"]["tau"]
+
+                original_differentiable_mask = self.dynamic_token_selector(
+                    hidden_states.to(self.dtype),
+                    this_temb.to(self.dtype),
+                    encoder_hidden_states.to(self.dtype)
+                    if encoder_hidden_states is not None
+                    else None,
+                    tau=self.config["dynamic_token"]["tau"],
                 ) # (batch, seq_len, 1)
+                
+                # ======== calculate dynamic FLOPs per batch =========
+                m_token_per_sample_for_loss = original_differentiable_mask.squeeze(-1)
+                n_tokens_active_per_sample = m_token_per_sample_for_loss.sum(dim=-1)
+                N = hidden_states.shape[1]
+                f_dyn_mlp_batch = (
+                    n_tokens_active_per_sample / N
+                ) * self.f_static_mlp
+                f_dyn_mhsa_batch = torch.full_like(
+                    f_dyn_mlp_batch, self.f_static_mhsa
+                )
+                self.f_dynamic_batch = f_dyn_mhsa_batch + f_dyn_mlp_batch
 
                 ## for original DyFlux's implement, they didn't consider the case that batch > 1
                 ## so we only select tokens that masked as 1 in all batch
-                aligned_mask = (token_mask_2d == 1).all(dim=0)  # (seq_len)
-                token_mask = (
+                token_mask_2d_hard = original_differentiable_mask.squeeze(-1) > 0.5
+                aligned_mask = token_mask_2d_hard.all(dim=0)  # (N,)
+                token_mask_for_indexing = (
                     aligned_mask.unsqueeze(0)
                     .unsqueeze(-1)
                     .repeat(hidden_states.shape[0], 1, 1)
-                )  # (batch, seq_len, 1)
-                token_mask = token_mask.reshape(
-                    -1, *token_mask.shape[2:]
-                )  # (batch * seq_len, 1)
+                )  # (B, N, 1)
 
-                # ======== calculate dynamic FLOPs per batch =========
-                m_token_per_sample = token_mask.squeeze(-1)  # (B, N)
-                n_tokens_active_per_sample = m_token_per_sample.sum(dim=-1)  # (B,)
-                N = hidden_states.shape[1]
-                f_dyn_mlp_batch = (n_tokens_active_per_sample / N) * self.f_static_mlp
-                f_dyn_mhsa_batch = torch.full_like(f_dyn_mlp_batch, self.f_static_mhsa)
-                self.f_dynamic_batch = f_dyn_mhsa_batch + f_dyn_mlp_batch
-                # =================================
-                token_mask_2d = token_mask.squeeze(-1) # (batch, seq_len)
-                self.token_idx = token_mask.nonzero()[:, 0]
+                token_mask_for_indexing = token_mask_for_indexing.reshape(
+                    -1, *token_mask_for_indexing.shape[2:]
+                )  # (B * N, 1)
+
+                self.token_idx = token_mask_for_indexing.nonzero()[:, 0]
             else:
                 self.token_idx = None
+                self.f_dynamic_batch = None
+
         elif module_name == "self-attn":
             if self.config["dynamic_token"]["enable"]:
                 self.temb = temb
@@ -242,13 +233,33 @@ class DynamicDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         encoder_hidden_output: torch.Tensor = None,
     ):
         if module_name == 'ffn' and self.token_idx is not None:
-            self.ff_output = self.ff_output.reshape(-1, *self.ff_output.shape[2:])
+            self.ff_output = self.ff_output.reshape(-1, *self.ff_output.shape[2:]).to(dtype=hidden_output.dtype)
             self.ff_output[self.token_idx, :] = hidden_output.reshape(-1, *hidden_output.shape[2:])
             hidden_output = self.ff_output.reshape(hidden_output.shape[0], global_context.hidden_seq_len + global_context.hidden_extra_seq_len if global_context.hidden_extra_seq_len else global_context.hidden_seq_len, global_context.hidden_dim)
             self.ff_output = self.token_idx = self.temb = None
         return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
 
     def delegated_call(self, func, module_self, *args, **kwargs):
+        if self.training and self.f_static_total_block == 0:
+            # calculate static FLOPs per block
+            N = global_context.hidden_seq_len
+            C = global_context.hidden_dim
+            D_MLP = C * 4
+
+            # (QKV proj) + (Attn Scores) + (Attn * V) + (Out proj)
+            # (2*N*C*3*C) + (2*H*N*(C/H)*N) + (2*H*N*N*(C/H)) + (2*N*C*C)
+            f_qkv = 6 * N * C**2
+            f_scores = 2 * N**2 * C
+            f_v_agg = 2 * N**2 * C
+            f_out = 2 * N * C**2
+            self.f_static_mhsa = f_qkv + f_scores + f_v_agg + f_out
+
+            # (FC1: C -> 4C) + (FC2: 4C -> C)
+            f_fc1 = 2 * N * C * D_MLP
+            f_fc2 = 2 * N * D_MLP * C
+            self.f_static_mlp = f_fc1 + f_fc2
+            self.f_static_total_block = self.f_static_mhsa + self.f_static_mlp
+
         if isinstance(module_self, FluxSingleTransformerBlock) and self.config["dynamic_token"]["enable"]:
             # special forward for FluxSingleTransformerBlock with Dynamic Token
             sig = inspect.signature(func)
@@ -348,9 +359,32 @@ class DynamicDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         else:
             return super().delegated_call(func, module_self, *args, **kwargs)
 
+def calculate_flops_loss(config: dict, device: torch.device) -> torch.Tensor:
+    lambda_target = config["target_flops"]
+    w_flops = config["flops_weight"]
+
+    f_dynamic_all_blocks = []
+    f_static_all_blocks = []
+
+    for hook in HookManager.get_all_hooks().values():
+        if isinstance(hook, DynamicDiTBlockHook):
+            if hook.f_dynamic_batch is not None:
+                f_dynamic_all_blocks.append(hook.f_dynamic_batch)
+                f_static_all_blocks.append(hook.f_static_total_block)
+
+    if not f_dynamic_all_blocks:
+        return torch.tensor(0.0, device=device)
+
+    f_dynamic_per_sample = torch.stack(f_dynamic_all_blocks).sum(dim=0)
+    f_static_total = sum(f_static_all_blocks)
+
+    avg_flop_ratio_batch = (f_dynamic_per_sample / f_static_total).mean()
+    l_flops = (avg_flop_ratio_batch - lambda_target) ** 2
+
+    return w_flops * l_flops
 
 if __name__ == "__main__":
-    model_type = "pixart-sigma"
+    model_type = "flux-dev"
     pipe, model_attrs = get_pipeline(model_type)
 
     dydit_config = {
@@ -380,28 +414,3 @@ if __name__ == "__main__":
         res.save(f"{model_type}_dydit.png")
 
     print(global_context)
-
-
-def calculate_flops_loss(config: dict, device: torch.device) -> torch.Tensor:
-    lambda_target = config["target_flops"]
-    w_flops = config["flops_weight"]
-
-    f_dynamic_all_blocks = []
-    f_static_all_blocks = []
-
-    for hook in HookManager.get_all_hooks():
-        if isinstance(hook, DynamicDiTBlockHook):
-            if hook.f_dynamic_batch is not None:
-                f_dynamic_all_blocks.append(hook.f_dynamic_batch)
-                f_static_all_blocks.append(hook.f_static_total_block)
-
-    if not f_dynamic_all_blocks:
-        return torch.tensor(0.0, device=device)
-
-    f_dynamic_per_sample = torch.stack(f_dynamic_all_blocks).sum(dim=0)
-    f_static_total = sum(f_static_all_blocks)
-
-    avg_flop_ratio_batch = (f_dynamic_per_sample / f_static_total).mean()
-    l_flops = (avg_flop_ratio_batch - lambda_target) ** 2
-
-    return w_flops * l_flops
