@@ -132,7 +132,7 @@ class ImageTextDataset(Dataset):
             txt = [template.format(prompt)]
             txt_tokens = self.tokenizer(
                 txt, max_length=self.tokenizer_max_length + drop_idx, padding=True, truncation=True, return_tensors="pt"
-            ).to(self.device)
+            )
             input_ids = (txt_tokens.input_ids,)
             attention_mask = (txt_tokens.attention_mask,)
             return_dict["attention_mask"] = attention_mask

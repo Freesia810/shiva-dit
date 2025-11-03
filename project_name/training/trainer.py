@@ -59,6 +59,7 @@ class DiffusionModelTrainer:
         if self.model_type == "flux-dev" or self.model_type == "flux-kontext":
             self.tokenizers = (self.pipe.tokenizer, self.pipe.tokenizer_2)
             self.text_encoders = (self.pipe.text_encoder, self.pipe.text_encoder_2)
+            self.text_encoder_names = ("text_encoder", "text_encoder_2")
         elif (
             self.model_type == "pixart-sigma"
             or self.model_type == "qwen-image"
@@ -67,6 +68,7 @@ class DiffusionModelTrainer:
         ):
             self.tokenizers = (self.pipe.tokenizer,)
             self.text_encoders = (self.pipe.text_encoder,)
+            self.text_encoder_names = ("text_encoder",)
         elif self.model_type == "sd3":
             self.tokenizers = (
                 self.pipe.tokenizer,
@@ -78,6 +80,7 @@ class DiffusionModelTrainer:
                 self.pipe.text_encoder_2,
                 self.pipe.text_encoder_3,
             )
+            self.text_encoder_names = ("text_encoder", "text_encoder_2", "text_encoder_3")
         else:
             raise ValueError(f"Undefined model_type: {self.model_type}")
 
@@ -177,17 +180,19 @@ class DiffusionModelTrainer:
         )
         if self.val_dataloader is not None:
             self.val_dataloader = self.accelerator.prepare(self.val_dataloader)
+        
+        unwrapped_model = self.accelerator.unwrap_model(self.model)
+        self.dtype = unwrapped_model.dtype
 
         if self.config.caption_dropout_rate > 0:
             print(f"Caption dropout enabled with rate: {self.config.caption_dropout_rate}")
             if self.model_type == 'pixart-sigma':
-                unwrapped_pipe = self.accelerator.unwrap_model(self.pipe)
                 self.empty_prompt_embeds, self.empty_prompt_attention_mask, _, _ = (
-                    unwrapped_pipe.encode_prompt(
+                    self.pipe.encode_prompt(
                         "",
                         do_classifier_free_guidance=False,
                         device=self.device,
-                        dtype=self.model.dtype,
+                        dtype=self.dtype,
                         clean_caption=True,
                     )
                 )
@@ -196,7 +201,7 @@ class DiffusionModelTrainer:
 
         self.writer = None
         self.pil_to_tensor_transform = None
-        if self.accelerator.is_main_process andconfig.log_with_tensorboard:
+        if self.accelerator.is_main_process and config.log_with_tensorboard:
             from torch.utils.tensorboard import SummaryWriter
             import torchvision.transforms as T
             tb_log_path = os.path.join(config.output_dir, config.tensorboard_log_dir)
@@ -314,7 +319,7 @@ class DiffusionModelTrainer:
 
             height, width = img_latents.shape[2], img_latents.shape[3]
 
-            img_ids = self.pipe._prepare_latent_image_ids(batch_size, height // 2, width // 2, self.dtype)
+            img_ids = self.pipe._prepare_latent_image_ids(batch_size, height // 2, width // 2, self.device, self.dtype)
             model_kwargs["img_ids"] = img_ids
         elif self.model_type == "sd3":
             img_latents = retrieve_latents(
@@ -384,7 +389,7 @@ class DiffusionModelTrainer:
             )
             pooled_prompt_embeds = pooled_prompt_embeds.pooler_output
             pooled_prompt_embeds = pooled_prompt_embeds.to(
-                dtype=self.text_encoders[0].dtype
+                dtype=self.dtype, device=self.device
             )
             pooled_prompt_embeds = pooled_prompt_embeds.repeat(1, num_images_per_prompt)
             pooled_prompt_embeds = pooled_prompt_embeds.view(
@@ -397,7 +402,7 @@ class DiffusionModelTrainer:
                 input_ids_t5, output_hidden_states=False
             )[0]
             prompt_embeds = prompt_embeds.to(
-                dtype=self.text_encoders[1].dtype, device=self.text_encoders[1].device
+                dtype=self.dtype, device=self.device
             )
             _, seq_len, _ = prompt_embeds.shape
             prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
@@ -406,7 +411,7 @@ class DiffusionModelTrainer:
             )
 
             text_ids = torch.zeros(prompt_embeds.shape[1], 3).to(
-                dtype=self.text_encoders[0].dtype
+                dtype=self.dtype, device=self.device
             )
 
             model_kwargs["encoder_hidden_states"] = prompt_embeds
@@ -415,8 +420,8 @@ class DiffusionModelTrainer:
 
             # add noise
             noise = torch.randn_like(img_latents)
-            indices = torch.randint(0, self.scheduler.config.num_train_timesteps, (batch_size,))
-            schedule_timesteps_gpu = self.scheduler.timesteps
+            indices = torch.randint(0, self.scheduler.config.num_train_timesteps, (batch_size,), device=self.device)
+            schedule_timesteps_gpu = self.scheduler.timesteps.to(self.device)
             timesteps = schedule_timesteps_gpu[indices]
             noisy_latents = self.scheduler.scale_noise(
                 sample=img_latents,
@@ -426,7 +431,7 @@ class DiffusionModelTrainer:
 
             # handle guidance
             # TODO: is it right?
-            guidance = torch.full([1], guidance_scale, dtype=torch.float32)
+            guidance = torch.full([1], guidance_scale, device=self.device, dtype=torch.float32)
             guidance = guidance.expand(batch_size)
             model_kwargs["guidance"] = guidance
         elif self.model_type == "pixart-sigma":
@@ -439,7 +444,7 @@ class DiffusionModelTrainer:
             prompt_attention_mask = batch["attention_mask"][0]
             prompt_embeds = self.text_encoders[0](
                 input_ids, attention_mask=prompt_attention_mask
-            )[0].to(dtype=self.dtype)
+            )[0].to(dtype=self.dtype, device=self.device)
 
             bs_embed, seq_len, _ = prompt_embeds.shape
             prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
@@ -456,8 +461,8 @@ class DiffusionModelTrainer:
 
             # add noise
             noise = torch.randn_like(img_latents)
-            indices = torch.randint(0, self.scheduler.config.num_train_timesteps, (batch_size,))
-            schedule_timesteps_gpu = self.scheduler.timesteps
+            indices = torch.randint(0, self.scheduler.config.num_train_timesteps, (batch_size,), device=self.device)
+            schedule_timesteps_gpu = self.scheduler.timesteps.to(self.device)
             timesteps = schedule_timesteps_gpu[indices]
             noisy_latents = self.scheduler.add_noise(
                 original_samples=img_latents,
@@ -478,7 +483,7 @@ class DiffusionModelTrainer:
                 else:
                     prompt_embeds = prompt_embeds.hidden_states[-(clip_skip + 2)]
 
-                prompt_embeds = prompt_embeds.to(dtype=self.text_encoder.dtype)
+                prompt_embeds = prompt_embeds.to(dtype=self.dtype, device=self.device)
 
                 _, seq_len, _ = prompt_embeds.shape
                 # duplicate text embeddings for each generation per prompt, using mps friendly method
@@ -492,8 +497,7 @@ class DiffusionModelTrainer:
             
             def _t5_encode(text_encoder, text_input_ids):
                 prompt_embeds = text_encoder(text_input_ids)[0]
-                dtype = text_encoder.dtype
-                prompt_embeds = prompt_embeds.to(dtype=dtype)
+                prompt_embeds = prompt_embeds.to(dtype=self.dtype, device=self.device)
 
                 _, seq_len, _ = prompt_embeds.shape
 
@@ -554,15 +558,15 @@ class DiffusionModelTrainer:
                 ]
             )
 
-            prompt_embeds = prompt_embeds.to(dtype=self.dtype)
+            prompt_embeds = prompt_embeds.to(dtype=self.dtype, device=self.device)
 
             model_kwargs["encoder_hidden_states"] = prompt_embeds
             model_kwargs["encoder_hidden_states_mask"] = prompt_embeds_mask
 
             # add noise
             noise = torch.randn_like(img_latents)
-            indices = torch.randint(0, self.scheduler.config.num_train_timesteps, (batch_size,))
-            schedule_timesteps_gpu = self.scheduler.timesteps
+            indices = torch.randint(0, self.scheduler.config.num_train_timesteps, (batch_size,), device=self.device)
+            schedule_timesteps_gpu = self.scheduler.timesteps.to(self.device)
             timesteps = schedule_timesteps_gpu[indices]
             noisy_latents = self.scheduler.scale_noise(
                 sample=img_latents,
@@ -764,11 +768,11 @@ class DiffusionModelTrainer:
         model_attr_name = self.model_attrs[0]
         original_model_in_pipe = getattr(self.pipe, model_attr_name)
         original_vae_in_pipe = self.pipe.vae
-        original_text_encoders_in_pipe = [getattr(self.pipe, te_name) for te_name in self.pipe.text_encoder_names]
+        original_text_encoders_in_pipe = [getattr(self.pipe, te_name) for te_name in self.text_encoder_names]
 
         setattr(self.pipe, model_attr_name, unwrapped_model)
         self.pipe.vae = unwrapped_vae
-        for te_name, te_unwrapped in zip(self.pipe.text_encoder_names, unwrapped_text_encoders):
+        for te_name, te_unwrapped in zip(self.text_encoder_names, unwrapped_text_encoders):
             setattr(self.pipe, te_name, te_unwrapped)
         print(f"  Temporarily patching pipe.{model_attr_name} with unwrapped trained model")
 
@@ -798,7 +802,7 @@ class DiffusionModelTrainer:
 
         setattr(self.pipe, model_attr_name, original_model_in_pipe)
         self.pipe.vae = original_vae_in_pipe
-        for te_name, te_original in zip(self.pipe.text_encoder_names, original_text_encoders_in_pipe):
+        for te_name, te_original in zip(self.text_encoder_names, original_text_encoders_in_pipe):
             setattr(self.pipe, te_name, te_original)
             
         print(f"  Restored original model to pipe.{model_attr_name}")
@@ -881,11 +885,35 @@ class DiffusionModelTrainer:
                                 unfrozen += param.numel()
                         print(f"  Unfroze {unfrozen} LoRA parameters.")
                     
-                    if self.accelerator.is_main_process:
-                        gathered_total_loss = self.accelerator.gather(total_loss).mean().item()
-                        gathered_main_loss = self.accelerator.gather(main_loss).mean().item()
-                        gathered_hook_loss = self.accelerator.gather(hook_loss).mean().item()
+                    gathered_total_loss = self.accelerator.gather(total_loss).mean()
+                    gathered_main_loss = self.accelerator.gather(main_loss).mean()
+                    gathered_hook_loss = self.accelerator.gather(hook_loss).mean()
 
+                    log_trigger = max(1, self.config.logging_steps // self.accelerator.num_processes)
+                    
+                    validate_trigger = (
+                        max(1, self.config.validation_steps // self.accelerator.num_processes)
+                        if hasattr(self.config, "validation_steps") and self.config.validation_steps > 0
+                        else None
+                    )
+                    
+                    inference_trigger = (
+                        max(1, self.config.inference_steps // self.accelerator.num_processes)
+                        if hasattr(self.config, "inference_steps") and self.config.inference_steps > 0
+                        else None
+                    )
+
+                    save_trigger = (
+                        max(1, self.config.save_steps // self.accelerator.num_processes)
+                        if hasattr(self.config, "save_steps") and self.config.save_steps > 0
+                        else None
+                    )
+
+                    val_metric = None
+                    if validate_trigger and self.global_step % validate_trigger == 0:
+                        val_metric = self.validate(self.global_step)
+
+                    if self.accelerator.is_main_process:
                         # lora metrics
                         if self.config.training_mode in ["lora", "auto-lora"]:                        
                             lora_params = [p for n, p in self.model.named_parameters() if "lora_" in n]
@@ -925,7 +953,7 @@ class DiffusionModelTrainer:
                             self.writer.add_scalar("train/hook_loss", gathered_hook_loss.item(), self.global_step)
                             self.writer.add_scalar("train/lr", self.lr_scheduler.get_last_lr()[0], self.global_step)
                     
-                        if self.global_step % self.config.logging_steps == 0:
+                        if self.global_step % log_trigger == 0:
                             postfix_dict = {
                                 "loss": f"{gathered_total_loss.item():.4f}",
                                 "main_loss": f"{gathered_main_loss.item():.4f}",
@@ -940,23 +968,13 @@ class DiffusionModelTrainer:
 
                             progress_bar.set_postfix(postfix_dict)
 
-                        if (
-                            hasattr(self.config, "validation_steps")
-                            and self.config.validation_steps > 0
-                            and self.global_step % self.config.validation_steps == 0
-                        ):
-                            val_metric = self.validate(self.global_step)
-                            if self.config.save_best:
-                                self.auto_save_best(val_metric, higher_is_better=self.config.best_metric_higher_is_better)
+                        if self.config.save_best and val_metric is not None:
+                            self.auto_save_best(val_metric, higher_is_better=self.config.best_metric_higher_is_better)
 
-                        if (
-                            hasattr(self.config, "inference_steps")
-                            and self.config.inference_steps > 0
-                            and self.global_step % self.config.inference_steps == 0
-                        ):
+                        if inference_trigger and self.global_step % inference_trigger == 0:
                             self.run_inference_validation(self.global_step)
 
-                        if hasattr(self, "maybe_save_periodically"):
+                        if save_trigger and self.global_step % save_trigger == 0:
                             self.maybe_save_periodically()
 
             if self.accelerator.is_main_process:

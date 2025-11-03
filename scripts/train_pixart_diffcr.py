@@ -38,7 +38,7 @@ trainer_config = {
     "hook_loss_weight": 0.3,
     "seed": 42,
     "logging_steps": 5,
-    "save_steps": 5000,
+    "save_steps": 612,
     "run_validation": True,
     "validation_steps": 153,
     "val_batch_size": None,
