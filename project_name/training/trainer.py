@@ -1,6 +1,8 @@
 import os
 import json
 import copy
+import re
+import glob
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -287,7 +289,15 @@ class DiffusionModelTrainer:
             img_ids = self.pipe._prepare_latent_image_ids(batch_size, height // 2, width // 2, self.device, self.dtype)
             model_kwargs["img_ids"] = img_ids
         elif self.model_type == "sd3":
-            pass
+            img_latents = retrieve_latents(
+                self.vae.encode(pixel_values),
+                generator=self.generator,
+                sample_mode="argmax",
+            )
+            img_latents = (
+                img_latents - self.vae.config.shift_factor
+            ) * self.vae.config.scaling_factor
+
         elif self.model_type == "pixart-sigma":
             img_latents = retrieve_latents(
                 self.vae.encode(pixel_values),
@@ -428,7 +438,59 @@ class DiffusionModelTrainer:
             )
 
         elif self.model_type == "sd3":
-            pass
+            model_kwargs["return_dict"] = False
+            model_kwargs["joint_attention_kwargs"] = {}
+            num_images_per_prompt = 1
+            def _clip_encode(text_encoder, text_input_ids, clip_skip=None):
+                prompt_embeds = text_encoder(text_input_ids.to(self.device), output_hidden_states=True)
+                pooled_prompt_embeds = prompt_embeds[0]
+
+                if clip_skip is None:
+                    prompt_embeds = prompt_embeds.hidden_states[-2]
+                else:
+                    prompt_embeds = prompt_embeds.hidden_states[-(clip_skip + 2)]
+
+                prompt_embeds = prompt_embeds.to(dtype=self.text_encoder.dtype, device=self.device)
+
+                _, seq_len, _ = prompt_embeds.shape
+                # duplicate text embeddings for each generation per prompt, using mps friendly method
+                prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
+                prompt_embeds = prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+
+                pooled_prompt_embeds = pooled_prompt_embeds.repeat(1, num_images_per_prompt, 1)
+                pooled_prompt_embeds = pooled_prompt_embeds.view(batch_size * num_images_per_prompt, -1)
+
+                return prompt_embeds, pooled_prompt_embeds
+            
+            def _t5_encode(text_encoder, text_input_ids):
+                prompt_embeds = text_encoder(text_input_ids.to(self.device))[0]
+                dtype = text_encoder.dtype
+                prompt_embeds = prompt_embeds.to(dtype=dtype, device=self.device)
+
+                _, seq_len, _ = prompt_embeds.shape
+
+                # duplicate text embeddings and attention mask for each generation per prompt, using mps friendly method
+                prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
+                prompt_embeds = prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+
+                return prompt_embeds
+            
+            prompt_embed, pooled_prompt_embed = _clip_encode(self.text_encoders[0], input_ids_tuple[0])
+            prompt_embed2, pooled_prompt_embed2 = _clip_encode(self.text_encoders[1], input_ids_tuple[1], clip_skip=self.config.clip_skip)
+            clip_prompt_embeds = torch.cat([prompt_embed, prompt_embed2], dim=-1)
+
+            t5_prompt_embed = _t5_encode(self.text_encoders[2], input_ids_tuple[2])
+
+            clip_prompt_embeds = torch.nn.functional.pad(
+                clip_prompt_embeds, (0, t5_prompt_embed.shape[-1] - clip_prompt_embeds.shape[-1])
+            )
+
+            prompt_embeds = torch.cat([clip_prompt_embeds, t5_prompt_embed], dim=-2)
+            pooled_prompt_embeds = torch.cat([pooled_prompt_embed, pooled_prompt_embed2], dim=-1)
+
+            model_kwargs["encoder_hidden_states"] = prompt_embeds
+            model_kwargs["pooled_projections"] = pooled_prompt_embeds
+            
         elif self.model_type == "qwen-image":
             model_kwargs["return_dict"] = False
             model_kwargs["attention_kwargs"] = self.pipe.attention_kwargs
@@ -468,6 +530,17 @@ class DiffusionModelTrainer:
 
             model_kwargs["encoder_hidden_states"] = prompt_embeds
             model_kwargs["encoder_hidden_states_mask"] = prompt_embeds_mask
+
+            # add noise
+            noise = torch.randn_like(img_latents)
+            indices = torch.randint(0, self.scheduler.config.num_train_timesteps, (batch_size,)).to(self.device)
+            schedule_timesteps_gpu = self.scheduler.timesteps.to(self.device)
+            timesteps = schedule_timesteps_gpu[indices]
+            noisy_latents = self.scheduler.scale_noise(
+                sample=img_latents,
+                timestep=timesteps,
+                noise=noise,
+            )
         else:
             raise NotImplementedError(
                 f"_prepare_model_inputs not implemented for model_type: {self.model_type}"
@@ -615,6 +688,8 @@ class DiffusionModelTrainer:
         for hook in HookManager.get_all_hooks().values():
             if isinstance(hook, nn.Module):
                 hook.train()
+        
+        return avg_val_loss
 
     @torch.no_grad()
     def run_inference_validation(self, global_step):
@@ -689,126 +764,242 @@ class DiffusionModelTrainer:
 
     def train(self):
         print("Starting training...")
-        global_step = 0
-
         global_context.update(encoder_flag=True)
 
-        for hook in HookManager.get_all_hooks().values():
-            if isinstance(hook, nn.Module):
-                hook.train()
+        if hasattr(self, "resume_if_available"):
+            resumed = self.resume_if_available()
+            if resumed:
+                print(f"Resumed training from step={self.global_step}, epoch={self.epoch}")
+            else:
+                self.global_step = 0
+                self.epoch = 0
+                self.best_val_metric = None
+        else:
+            self.global_step = 0
+            self.epoch = 0
+            self.best_val_metric = None
+
         self.model.train()
         self.vae.eval()
         for text_encoder in self.text_encoders:
             text_encoder.eval()
-        
+        for hook in HookManager.get_all_hooks().values():
+            if isinstance(hook, nn.Module):
+                hook.train()
+
         if self.config.training_mode == "auto-lora" and self.config.hook_only_steps > 0:
             print("Training in 'auto-lora' mode with hook_only_steps > 0.")
-            print(f"Freezing LoRA parameters for the first {self.config.hook_only_steps} steps.")
-            lora_count = 0
+            print(f"  Freezing LoRA parameters for the first {self.config.hook_only_steps} steps...")
+            frozen_params = 0
             for name, param in self.model.named_parameters():
                 if 'lora_' in name:
                     param.requires_grad_(False)
-                    lora_count += param.numel()
-            print(f"  Froze {lora_count} LoRA parameters.")
+                    frozen_params += param.numel()
+            print(f"  Froze {frozen_params} LoRA parameters.")
 
-        for epoch in range(self.config.num_epochs):
+        for epoch in range(self.epoch, self.config.num_epochs):
+            self.epoch = epoch
             progress_bar = tqdm(
                 self.train_dataloader,
                 desc=f"Epoch {epoch+1}/{self.config.num_epochs}",
                 total=len(self.train_dataloader),
+                dynamic_ncols=True,
             )
 
-            self.optimizer.zero_grad()
+            self.optimizer.zero_grad(set_to_none=True)
 
             for step, batch in enumerate(progress_bar):
-                total_loss, main_loss, hook_loss = self._compute_loss(batch, global_step)
+                total_loss, main_loss, hook_loss = self._compute_loss(batch, self.global_step)
                 loss_to_backward = total_loss / self.config.gradient_accumulation_steps
                 loss_to_backward.backward()
-                is_update_step = (
-                    step + 1
-                ) % self.config.gradient_accumulation_steps == 0
+
+                is_update_step = (step + 1) % self.config.gradient_accumulation_steps == 0
                 is_last_step = (step + 1) == len(self.train_dataloader)
 
                 if is_update_step or is_last_step:
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-
                     self.optimizer.step()
                     self.lr_scheduler.step()
-                    self.optimizer.zero_grad()
-                    global_step += 1
+                    self.optimizer.zero_grad(set_to_none=True)
+                    self.global_step += 1
 
-                    if self.config.training_mode == "auto-lora" and global_step == self.config.hook_only_steps:
-                        print(f"[Step {global_step}]: End of hook-only phase.")
-                        print(f"End of hook-only phase. Unfreezing LoRA parameters for joint training.")
-                        lora_count = 0
+                    if (
+                        self.config.training_mode == "auto-lora"
+                        and self.global_step == self.config.hook_only_steps
+                    ):
+                        print(f"\n[Step {self.global_step}]: Hook-only phase complete. Unfreezing LoRA parameters...")
+                        unfrozen = 0
                         for name, param in self.model.named_parameters():
                             if 'lora_' in name:
                                 param.requires_grad_(True)
-                                lora_count += param.numel()
-                        print(f"  Unfroze {lora_count} LoRA parameters.")
+                                unfrozen += param.numel()
+                        print(f"  Unfroze {unfrozen} LoRA parameters.")
 
                     if self.writer:
-                        self.writer.add_scalar("train/total_loss", total_loss.item(), global_step)
-                        self.writer.add_scalar("train/main_loss", main_loss.item(), global_step)
-                        self.writer.add_scalar("train/hook_loss", hook_loss.item(), global_step)
-                        self.writer.add_scalar("train/lr", self.lr_scheduler.get_last_lr()[0], global_step)
+                        self.writer.add_scalar("train/total_loss", total_loss.item(), self.global_step)
+                        self.writer.add_scalar("train/main_loss", main_loss.item(), self.global_step)
+                        self.writer.add_scalar("train/hook_loss", hook_loss.item(), self.global_step)
+                        self.writer.add_scalar("train/lr", self.lr_scheduler.get_last_lr()[0], self.global_step)
 
-                    if global_step % self.config.logging_steps == 0:
+                    if self.global_step % self.config.logging_steps == 0:
                         progress_bar.set_postfix(
-                            loss=total_loss.item(),  # (显示 micro-batch 的 loss)
+                            loss=total_loss.item(),
                             main_loss=main_loss.item(),
                             hook_loss=hook_loss.item(),
                             lr=self.lr_scheduler.get_last_lr()[0],
-                            step=global_step,
+                            step=self.global_step,
                         )
 
-                    if global_step % self.config.validation_steps == 0:
-                        self.validate(global_step)
+                    if (
+                        hasattr(self.config, "validation_steps")
+                        and self.config.validation_steps > 0
+                        and self.global_step % self.config.validation_steps == 0
+                    ):
+                        val_metric = self.validate(self.global_step)
+                        if self.config.get("save_best", True):
+                            self.auto_save_best(val_metric, higher_is_better=self.config.get("best_metric_higher_is_better", False))
 
-                    if global_step % self.config.inference_steps == 0:
-                        self.run_inference_validation(global_step)
+                    if (
+                        hasattr(self.config, "inference_steps")
+                        and self.config.inference_steps > 0
+                        and self.global_step % self.config.inference_steps == 0
+                    ):
+                        self.run_inference_validation(self.global_step)
 
-                    if global_step % self.config.save_steps == 0:
-                        self.save_model(global_step)
+                    if hasattr(self, "maybe_save_periodically"):
+                        self.maybe_save_periodically()
 
-        print("Training completed.")
-        self.save_model("final")
+            print(f"Epoch {epoch+1} completed.")
 
-    def save_model(self, step_name):
-        output_dir = os.path.join(self.config.output_dir, f"checkpoint-{step_name}")
-        os.makedirs(output_dir, exist_ok=True)
+        print("Training completed. Saving final model...")
+        final_path = os.path.join(self.config.output_dir, "final.pt")
+        self.save_checkpoint(final_path)
+        print(f"Final model saved to {final_path}")
 
-        save_model = self.model
+    def save_checkpoint(self, save_path: str, save_optimizer: bool = True):
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
-        if self.config.training_mode == "lora":
-            if not isinstance(save_model, PeftModel):
-                print(f"Warning: training_mode is 'lora' but model is not a PeftModel. Skipping model save.")
+        model_state = {}
+
+        mode = self.config.training_mode
+        state_dict = self.model.state_dict()
+
+        if mode == "lora":
+            for k, v in state_dict.items():
+                if "lora" in k or "hook" in k:
+                    model_state[k] = v
+
+        elif mode == "hook_only":
+            model_state = {k: v for k, v in state_dict.items() if "hook" in k}
+
+        elif mode == "finetune":
+            model_state = state_dict
+
+        else:
+            raise ValueError(f"Unknown training_mode: {mode}")
+
+        checkpoint = {
+            "model": model_state,
+            "optimizer": self.optimizer.state_dict() if save_optimizer and self.optimizer is not None else None,
+            "lr_scheduler": self.lr_scheduler.state_dict() if save_optimizer and self.lr_scheduler is not None else None,
+            "epoch": getattr(self, "epoch", 0),
+            "global_step": getattr(self, "global_step", 0),
+            "training_mode": mode,
+            "mixed_precision": self.config.mixed_precision,
+            "extra_config": getattr(self.config, "extra_config", {}),
+            "best_val_metric": getattr(self, "best_val_metric", None),
+        }
+
+        torch.save(checkpoint, save_path)
+        print(f"Saved checkpoint to {save_path} "
+              f"(mode={mode}, step={checkpoint['global_step']})")
+
+    def load_checkpoint(self, ckpt_path: str,
+                        strict: bool = True,
+                        load_optimizer: bool = True,
+                        for_inference: bool = False):
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+
+        checkpoint = torch.load(ckpt_path, map_location="cpu")
+        ckpt_mode = checkpoint.get("training_mode", "unknown")
+
+        print(f"Loading checkpoint from {ckpt_path} "
+              f"(saved_mode={ckpt_mode}, current_mode={self.config.training_mode})")
+
+        model_state = checkpoint["model"]
+
+        mode = self.config.training_mode
+        if mode == "lora":
+            load_dict = {k: v for k, v in model_state.items()
+                         if "lora" in k or "hook" in k}
+            missing, unexpected = self.model.load_state_dict(load_dict, strict=False)
+        elif mode == "hook_only":
+            load_dict = {k: v for k, v in model_state.items()
+                         if "hook" in k}
+            missing, unexpected = self.model.load_state_dict(load_dict, strict=False)
+        elif mode == "finetune":
+            missing, unexpected = self.model.load_state_dict(model_state, strict=strict)
+        else:
+            raise ValueError(f"Unknown training_mode: {mode}")
+
+        print(f"Loaded model params (missing={len(missing)}, unexpected={len(unexpected)})")
+
+        if (not for_inference) and load_optimizer:
+            if checkpoint.get("optimizer") and self.optimizer is not None:
+                self.optimizer.load_state_dict(checkpoint["optimizer"])
+            if checkpoint.get("lr_scheduler") and self.lr_scheduler is not None:
+                self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+            self.global_step = checkpoint.get("global_step", 0)
+            self.epoch = checkpoint.get("epoch", 0)
+            self.best_val_metric = checkpoint.get("best_val_metric", None)
+            print(f"Resumed training from step {self.global_step}, epoch {self.epoch}")
+
+        self.model.to(self.device, dtype=self.dtype)
+        print(f"Loaded checkpoint successfully (mode={self.config.training_mode})")
+
+    def resume_if_available(self, resume_dir: str = None):
+        ckpt_dir = resume_dir or self.config.output_dir
+        if not os.path.isdir(ckpt_dir):
+            print(f"No checkpoint directory found at {ckpt_dir}, starting fresh.")
+            return False
+
+        ckpts = glob.glob(os.path.join(ckpt_dir, "*.pt"))
+        if not ckpts:
+            print(f"No checkpoints found in {ckpt_dir}, starting fresh.")
+            return False
+
+        def extract_step(path):
+            match = re.search(r"(\d+)\.pt$", os.path.basename(path))
+            return int(match.group(1)) if match else -1
+
+        latest_ckpt = max(ckpts, key=extract_step)
+        print(f"Found latest checkpoint: {latest_ckpt}")
+        self.load_checkpoint(latest_ckpt)
+        return True
+
+    def auto_save_best(self, val_metric: float, higher_is_better: bool = False):
+        is_best = False
+        if not hasattr(self, "best_val_metric") or self.best_val_metric is None:
+            is_best = True
+        else:
+            if higher_is_better:
+                is_best = val_metric > self.best_val_metric
             else:
-                save_model.save_pretrained(os.path.join(output_dir, "model_lora"))
-                print(f"Saved LoRA adapter to {output_dir}/model_lora")
+                is_best = val_metric < self.best_val_metric
 
-            hook_params = {}
-            for name, hook in HookManager.get_all_hooks().items():
-                if isinstance(hook, nn.Module):
-                    hook_params[name] = hook.state_dict()
-            if hook_params:
-                torch.save(hook_params, os.path.join(output_dir, "hook_params.pt"))
-                print(f"Saved Hook parameters to {output_dir}/hook_params.pt")
+        if is_best:
+            self.best_val_metric = val_metric
+            save_path = os.path.join(self.config.output_dir, "best.pt")
+            self.save_checkpoint(save_path, save_optimizer=False)
+            print(f"New best model saved at {save_path} (metric={val_metric:.4f})")
+        else:
+            print(f"Validation metric {val_metric:.4f} not improved (best={self.best_val_metric:.4f})")
 
-        elif self.config.training_mode == "finetune":
-            torch.save(
-                save_model.state_dict(), os.path.join(output_dir, "model_dit.pt")
+    def maybe_save_periodically(self):
+        if hasattr(self.config, "save_steps") and self.global_step % self.config.save_steps == 0:
+            save_path = os.path.join(
+                self.config.output_dir,
+                f"checkpoint_step_{self.global_step:06d}.pt"
             )
-            print(f"Saved Finetuned model (DiT + Hooks) to {output_dir}/model_dit.pt")
-
-        elif self.config.training_mode == "hook_only":
-            hook_params = {}
-            for name, hook in HookManager.get_all_hooks().items():
-                if isinstance(hook, nn.Module):
-                    hook_params[name] = hook.state_dict()
-
-            if hook_params:
-                torch.save(hook_params, os.path.join(output_dir, "hook_params.pt"))
-                print(f"Saved Hook parameters to {output_dir}/hook_params.pt")
-            else:
-                print(f"Warning: 'hook_only' mode but no hook parameters found to save.")
+            self.save_checkpoint(save_path)

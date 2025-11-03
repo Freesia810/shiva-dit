@@ -48,6 +48,8 @@ class TrainerConfig:
     seed: int = 42
     logging_steps: int = 50
     save_steps: int = 500
+    save_best: bool = False
+    best_metric_higher_is_better: bool = False
 
     run_validation: bool = True
     validation_steps: int = 500
