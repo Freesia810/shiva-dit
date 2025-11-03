@@ -775,6 +775,7 @@ class FluxTransformer2DModel(
         controlnet_single_block_samples=None,
         return_dict: bool = True,
         controlnet_blocks_repeat: bool = False,
+        output_hidden_states: bool = False,
     ) -> Union[torch.Tensor, Transformer2DModelOutput]:
         """
         The [`FluxTransformer2DModel`] forward method.
@@ -851,6 +852,9 @@ class FluxTransformer2DModel(
             ip_hidden_states = self.encoder_hid_proj(ip_adapter_image_embeds)
             joint_attention_kwargs.update({"ip_hidden_states": ip_hidden_states})
 
+        if output_hidden_states:
+            all_hidden_states = ()
+
         for index_block, block in enumerate(self.transformer_blocks):
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 encoder_hidden_states, hidden_states = self._gradient_checkpointing_func(
@@ -870,6 +874,8 @@ class FluxTransformer2DModel(
                     image_rotary_emb=image_rotary_emb,
                     joint_attention_kwargs=joint_attention_kwargs,
                 )
+
+            all_hidden_states = all_hidden_states + (hidden_states, ) if output_hidden_states else all_hidden_states
 
             # controlnet residual
             if controlnet_block_samples is not None:
@@ -903,6 +909,8 @@ class FluxTransformer2DModel(
                     joint_attention_kwargs=joint_attention_kwargs,
                 )
 
+            all_hidden_states = all_hidden_states + (hidden_states, ) if output_hidden_states else all_hidden_states
+
             # controlnet residual
             if controlnet_single_block_samples is not None:
                 interval_control = len(self.single_transformer_blocks) / len(controlnet_single_block_samples)
@@ -917,6 +925,8 @@ class FluxTransformer2DModel(
             unscale_lora_layers(self, lora_scale)
 
         if not return_dict:
+            if output_hidden_states:
+                return (output, all_hidden_states)
             return (output,)
 
         return Transformer2DModelOutput(sample=output)

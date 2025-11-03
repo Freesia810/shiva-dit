@@ -190,14 +190,24 @@ if __name__ == "__main__":
         HookManager.inject_hooks(model_type=model_type, pipe=pipe, model_attrs=model_attrs)
         res = process_quick_start(pipe)
         res.save(f"{model_type}_diffcr.png")
-    
+
     print(global_context)
 
 
-# def calculate_diffcr_loss(self, ratios, target_ratio):
+def calculate_ratio_loss(config: dict, device: torch.device):
+    target_ratio = config["target_ratio"]
+    ratios = []
+    custom_losses = []
+    for hook in HookManager.get_all_hooks().values():
+        if isinstance(hook, DiffCRDitBlockHook):
+            ratios.append(hook.diff_ratio)
+    if ratios:
+        avg_ratio = torch.mean(torch.stack(ratios))
+        target_ratio_tensor = torch.tensor(target_ratio, device=avg_ratio.device)
+        diffcr_loss = F.mse_loss(avg_ratio, target_ratio_tensor)
+        custom_losses.append(diffcr_loss)
 
-#     avg_mod_ratio = torch.mean(torch.stack(ratios))
-#     target_ratio_tensor = torch.tensor([target_ratio], device=avg_mod_ratio.device)
-#     loss = F.mse_loss(avg_mod_ratio, target_ratio_tensor)
-
-#     return loss
+    if custom_losses:
+        return torch.stack(custom_losses).mean()
+    else:
+        return torch.tensor(0.0, device)

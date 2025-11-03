@@ -51,6 +51,10 @@ class TrainerConfig:
     save_best: bool = False
     best_metric_higher_is_better: bool = False
 
+    distillation_final_weight: float = 0.0 
+    distillation_middle_weight: float = 0.0
+    distillation_layer_skip: int = 4
+
     run_validation: bool = True
     validation_steps: int = 500
     val_batch_size: int = None # if not specified, use train_batch_size
