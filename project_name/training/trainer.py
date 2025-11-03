@@ -10,6 +10,8 @@ from torch.utils.data import DataLoader
 from transformers import get_scheduler
 from peft import LoraConfig as PeftLoraConfig, get_peft_model, PeftModel
 from tqdm import tqdm
+from accelerate import Accelerator
+from accelerate.utils import set_seed
 
 from baselines.diffcr import DiffCRDitBlockHook
 from diffusers.pipelines.flux.pipeline_flux_kontext import retrieve_latents
@@ -25,24 +27,23 @@ class DiffusionModelTrainer:
     def __init__(self, config: TrainerConfig):
         self.config = config
         self.model_type = config.model_type
-        self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-        self.generator = (
-            torch.Generator("cuda").manual_seed(config.seed)
-            if torch.cuda.is_available()
-            else torch.Generator().manual_seed(config.seed)
-        )
 
-        self.dtype = torch.float32
-        if config.mixed_precision == "fp16":
-            self.dtype = torch.float16
-        elif config.mixed_precision == "bf16":
-            self.dtype = torch.bfloat16
+        self.accelerator = Accelerator(
+            mixed_precision=config.mixed_precision,
+            gradient_accumulation_steps=config.gradient_accumulation_steps,
+            log_with="tensorboard" if config.log_with_tensorboard else None,
+            project_dir=os.path.join(config.output_dir, config.tensorboard_log_dir),
+        )
+        self.device = self.accelerator.device
+        set_seed(config.seed)
+        self.generator = torch.Generator(device=self.accelerator.device).manual_seed(
+            config.seed
+        )
 
         self.pipe, self.model_attrs = get_pipeline(
             self.model_type,
             model_path=config.model_path,
-            dtype=self.dtype,
-            device=self.device,
+            dtype=torch.float32,
         )
 
         # we only to get the ref of this modules, no need to move them to device again
@@ -82,12 +83,19 @@ class DiffusionModelTrainer:
 
         if self.image_processor is None or self.vae is None or self.model is None:
             raise ValueError("NoneType found in image_processor, vae or model.")
+        
+        self.vae.requires_grad_(False)
+        self.vae.eval()
+        for text_encoder in self.text_encoders:
+            text_encoder.requires_grad_(False)
+            text_encoder.eval()
 
-        print("model_type:", config.model_type)
-        print("image_processor:", self.image_processor.__class__.__name__)
-        print("vae:", self.vae.__class__.__name__)
-        print("scheduler:", self.scheduler.__class__.__name__)
-        print("model (DiT):", self.model.__class__.__name__)
+        if self.accelerator.is_main_process:
+            print("model_type:", config.model_type)
+            print("image_processor:", self.image_processor.__class__.__name__)
+            print("vae:", self.vae.__class__.__name__)
+            print("scheduler:", self.scheduler.__class__.__name__)
+            print("model (DiT):", self.model.__class__.__name__)
 
         # inject
         if config.trainable_hook_config:
@@ -120,6 +128,12 @@ class DiffusionModelTrainer:
             collate_fn=collate_fn,
         )
 
+        num_update_steps_per_epoch = max(
+            1, len(self.train_dataloader) // config.gradient_accumulation_steps
+        )
+        self.num_training_steps = num_update_steps_per_epoch * config.num_epochs
+        self.lr_scheduler = self._setup_scheduler()
+
         self.val_dataloader = None
         if config.val_metadata_file and config.val_image_dir:
             print("Setting up validation dataloader...")
@@ -146,21 +160,34 @@ class DiffusionModelTrainer:
         else:
             print("Validation data not provided (val_metadata_file or val_image_dir is None), skipping validation setup.")
 
-        num_update_steps_per_epoch = max(
-            1, len(self.train_dataloader) // config.gradient_accumulation_steps
+        (
+            self.model,
+            self.optimizer,
+            self.lr_scheduler,
+            self.train_dataloader,
+            self.vae,
+            *self.text_encoders
+        ) = self.accelerator.prepare(
+            self.model,
+            self.optimizer,
+            self.lr_scheduler,
+            self.train_dataloader,
+            self.vae,
+            *self.text_encoders
         )
-        self.num_training_steps = num_update_steps_per_epoch * config.num_epochs
-        self.lr_scheduler = self._setup_scheduler()
+        if self.val_dataloader is not None:
+            self.val_dataloader = self.accelerator.prepare(self.val_dataloader)
 
         if self.config.caption_dropout_rate > 0:
             print(f"Caption dropout enabled with rate: {self.config.caption_dropout_rate}")
             if self.model_type == 'pixart-sigma':
+                unwrapped_pipe = self.accelerator.unwrap_model(self.pipe)
                 self.empty_prompt_embeds, self.empty_prompt_attention_mask, _, _ = (
-                    self.pipe.encode_prompt(
+                    unwrapped_pipe.encode_prompt(
                         "",
                         do_classifier_free_guidance=False,
                         device=self.device,
-                        dtype=self.dtype,
+                        dtype=self.model.dtype,
                         clean_caption=True,
                     )
                 )
@@ -169,7 +196,7 @@ class DiffusionModelTrainer:
 
         self.writer = None
         self.pil_to_tensor_transform = None
-        if config.log_with_tensorboard:
+        if self.accelerator.is_main_process andconfig.log_with_tensorboard:
             from torch.utils.tensorboard import SummaryWriter
             import torchvision.transforms as T
             tb_log_path = os.path.join(config.output_dir, config.tensorboard_log_dir)
@@ -178,15 +205,16 @@ class DiffusionModelTrainer:
             self.pil_to_tensor_transform = T.ToTensor()
             print(f"TensorBoard logging enabled. Logs will be saved to: {tb_log_path}")
 
-        print(f"--- Training Config ---")
-        print(f"  Mode: {config.training_mode}")
-        print(f"  Micro Batch Size: {config.train_batch_size}")
-        print(f"  Grad Acc Step: {config.gradient_accumulation_steps}")
-        print(
-            f"  Actual Batch Size: {config.train_batch_size * config.gradient_accumulation_steps}"
-        )
-        print(f"  Total training steps: {self.num_training_steps}")
-        print(f"------------------")
+        if self.accelerator.is_main_process:
+            print(f"--- Training Config ---")
+            print(f"  Mode: {config.training_mode}")
+            print(f"  Micro Batch Size: {config.train_batch_size}")
+            print(f"  Grad Acc Step: {config.gradient_accumulation_steps}")
+            print(
+                f"  Actual Batch Size: {config.train_batch_size * config.gradient_accumulation_steps}"
+            )
+            print(f"  Total training steps: {self.num_training_steps}")
+            print(f"------------------")
 
     def _setup_model_and_optimizer(self):
         # freeze VAE and Text Encoder(s)
@@ -273,7 +301,7 @@ class DiffusionModelTrainer:
         model_kwargs = {}
 
         # vae encode
-        pixel_values = batch["pixel_values"].to(self.device, dtype=self.vae.dtype)
+        pixel_values = batch["pixel_values"].to(dtype=self.vae.dtype)
         if self.model_type == "flux-dev" or self.model_type == "flux-kontext":
             img_latents = retrieve_latents(
                 self.vae.encode(pixel_values),
@@ -286,7 +314,7 @@ class DiffusionModelTrainer:
 
             height, width = img_latents.shape[2], img_latents.shape[3]
 
-            img_ids = self.pipe._prepare_latent_image_ids(batch_size, height // 2, width // 2, self.device, self.dtype)
+            img_ids = self.pipe._prepare_latent_image_ids(batch_size, height // 2, width // 2, self.dtype)
             model_kwargs["img_ids"] = img_ids
         elif self.model_type == "sd3":
             img_latents = retrieve_latents(
@@ -350,13 +378,13 @@ class DiffusionModelTrainer:
             num_images_per_prompt = 1
             guidance_scale = 3.5
             # clip -> pooled_prompt_embeds
-            input_ids_clip = input_ids_tuple[0].to(self.device)
+            input_ids_clip = input_ids_tuple[0]
             pooled_prompt_embeds = self.text_encoders[0](
                 input_ids_clip, output_hidden_states=False
             )
             pooled_prompt_embeds = pooled_prompt_embeds.pooler_output
             pooled_prompt_embeds = pooled_prompt_embeds.to(
-                dtype=self.text_encoders[0].dtype, device=self.text_encoders[0].device
+                dtype=self.text_encoders[0].dtype
             )
             pooled_prompt_embeds = pooled_prompt_embeds.repeat(1, num_images_per_prompt)
             pooled_prompt_embeds = pooled_prompt_embeds.view(
@@ -364,7 +392,7 @@ class DiffusionModelTrainer:
             )
 
             # t5 -> prompt_embeds
-            input_ids_t5 = input_ids_tuple[1].to(self.device)
+            input_ids_t5 = input_ids_tuple[1]
             prompt_embeds = self.text_encoders[1](
                 input_ids_t5, output_hidden_states=False
             )[0]
@@ -378,7 +406,7 @@ class DiffusionModelTrainer:
             )
 
             text_ids = torch.zeros(prompt_embeds.shape[1], 3).to(
-                device=self.device, dtype=self.text_encoders[0].dtype
+                dtype=self.text_encoders[0].dtype
             )
 
             model_kwargs["encoder_hidden_states"] = prompt_embeds
@@ -387,8 +415,8 @@ class DiffusionModelTrainer:
 
             # add noise
             noise = torch.randn_like(img_latents)
-            indices = torch.randint(0, self.scheduler.config.num_train_timesteps, (batch_size,)).to(self.device)
-            schedule_timesteps_gpu = self.scheduler.timesteps.to(self.device)
+            indices = torch.randint(0, self.scheduler.config.num_train_timesteps, (batch_size,))
+            schedule_timesteps_gpu = self.scheduler.timesteps
             timesteps = schedule_timesteps_gpu[indices]
             noisy_latents = self.scheduler.scale_noise(
                 sample=img_latents,
@@ -398,7 +426,7 @@ class DiffusionModelTrainer:
 
             # handle guidance
             # TODO: is it right?
-            guidance = torch.full([1], guidance_scale, device=self.device, dtype=torch.float32)
+            guidance = torch.full([1], guidance_scale, dtype=torch.float32)
             guidance = guidance.expand(batch_size)
             model_kwargs["guidance"] = guidance
         elif self.model_type == "pixart-sigma":
@@ -407,11 +435,11 @@ class DiffusionModelTrainer:
             model_kwargs["added_cond_kwargs"] = added_cond_kwargs
             num_images_per_prompt = 1
 
-            input_ids = input_ids_tuple[0].to(self.device)
-            prompt_attention_mask = batch["attention_mask"][0].to(self.device)
+            input_ids = input_ids_tuple[0]
+            prompt_attention_mask = batch["attention_mask"][0]
             prompt_embeds = self.text_encoders[0](
                 input_ids, attention_mask=prompt_attention_mask
-            )[0].to(dtype=self.dtype, device=self.device)
+            )[0].to(dtype=self.dtype)
 
             bs_embed, seq_len, _ = prompt_embeds.shape
             prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
@@ -428,8 +456,8 @@ class DiffusionModelTrainer:
 
             # add noise
             noise = torch.randn_like(img_latents)
-            indices = torch.randint(0, self.scheduler.config.num_train_timesteps, (batch_size,)).to(self.device)
-            schedule_timesteps_gpu = self.scheduler.timesteps.to(self.device)
+            indices = torch.randint(0, self.scheduler.config.num_train_timesteps, (batch_size,))
+            schedule_timesteps_gpu = self.scheduler.timesteps
             timesteps = schedule_timesteps_gpu[indices]
             noisy_latents = self.scheduler.add_noise(
                 original_samples=img_latents,
@@ -442,7 +470,7 @@ class DiffusionModelTrainer:
             model_kwargs["joint_attention_kwargs"] = {}
             num_images_per_prompt = 1
             def _clip_encode(text_encoder, text_input_ids, clip_skip=None):
-                prompt_embeds = text_encoder(text_input_ids.to(self.device), output_hidden_states=True)
+                prompt_embeds = text_encoder(text_input_ids, output_hidden_states=True)
                 pooled_prompt_embeds = prompt_embeds[0]
 
                 if clip_skip is None:
@@ -450,7 +478,7 @@ class DiffusionModelTrainer:
                 else:
                     prompt_embeds = prompt_embeds.hidden_states[-(clip_skip + 2)]
 
-                prompt_embeds = prompt_embeds.to(dtype=self.text_encoder.dtype, device=self.device)
+                prompt_embeds = prompt_embeds.to(dtype=self.text_encoder.dtype)
 
                 _, seq_len, _ = prompt_embeds.shape
                 # duplicate text embeddings for each generation per prompt, using mps friendly method
@@ -463,9 +491,9 @@ class DiffusionModelTrainer:
                 return prompt_embeds, pooled_prompt_embeds
             
             def _t5_encode(text_encoder, text_input_ids):
-                prompt_embeds = text_encoder(text_input_ids.to(self.device))[0]
+                prompt_embeds = text_encoder(text_input_ids)[0]
                 dtype = text_encoder.dtype
-                prompt_embeds = prompt_embeds.to(dtype=dtype, device=self.device)
+                prompt_embeds = prompt_embeds.to(dtype=dtype)
 
                 _, seq_len, _ = prompt_embeds.shape
 
@@ -526,15 +554,15 @@ class DiffusionModelTrainer:
                 ]
             )
 
-            prompt_embeds = prompt_embeds.to(dtype=self.dtype, device=self.device)
+            prompt_embeds = prompt_embeds.to(dtype=self.dtype)
 
             model_kwargs["encoder_hidden_states"] = prompt_embeds
             model_kwargs["encoder_hidden_states_mask"] = prompt_embeds_mask
 
             # add noise
             noise = torch.randn_like(img_latents)
-            indices = torch.randint(0, self.scheduler.config.num_train_timesteps, (batch_size,)).to(self.device)
-            schedule_timesteps_gpu = self.scheduler.timesteps.to(self.device)
+            indices = torch.randint(0, self.scheduler.config.num_train_timesteps, (batch_size,))
+            schedule_timesteps_gpu = self.scheduler.timesteps
             timesteps = schedule_timesteps_gpu[indices]
             noisy_latents = self.scheduler.scale_noise(
                 sample=img_latents,
@@ -630,79 +658,84 @@ class DiffusionModelTrainer:
         if self.val_dataloader is None or not self.config.run_validation:
             return
 
-        print(f"\nRunning validation at step {global_step}...")
+        if self.accelerator.is_main_process:
+            print(f"\nRunning validation at step {global_step}...")
 
         self.model.eval()
         for hook in HookManager.get_all_hooks().values():
             if isinstance(hook, nn.Module):
                 hook.eval()
 
-        total_val_loss = 0.0
-        total_main_loss = 0.0
-        total_hook_loss = 0.0
+        all_total_losses = []
+        all_main_losses = []
+        all_hook_losses = []
 
         val_progress_bar = tqdm(
             self.val_dataloader, 
             desc=f"Validation Step {global_step}", 
             leave=False,
-            total=len(self.val_dataloader)
+            total=len(self.val_dataloader),
+            disable=not self.accelerator.is_local_main_process
         )
 
         for batch in val_progress_bar:
             try:
                 total_loss, main_loss, hook_loss = self._compute_loss(batch, global_step)
 
-                total_val_loss += total_loss.item()
-                total_main_loss += main_loss.item()
-                total_hook_loss += hook_loss.item()
+                all_total_losses.append(total_loss)
+                all_main_losses.append(main_loss)
+                all_hook_losses.append(hook_loss)
             except Exception as e:
-                print(f"Error during validation batch: {e}")
+                if self.accelerator.is_main_process:
+                    print(f"Error during validation batch: {e}")
                 continue
 
         if len(self.val_dataloader) > 0:
-            avg_val_loss = total_val_loss / len(self.val_dataloader)
-            avg_main_loss = total_main_loss / len(self.val_dataloader)
-            avg_hook_loss = total_hook_loss / len(self.val_dataloader)
+            avg_val_loss = self.accelerator.gather(torch.stack(all_total_losses)).mean().item()
+            avg_main_loss = self.accelerator.gather(torch.stack(all_main_losses)).mean().item()
+            avg_hook_loss = self.accelerator.gather(torch.stack(all_hook_losses)).mean().item()
 
-            print(f"--- Validation Results (Step {global_step}) ---")
-            print(f"  Avg Total Loss: {avg_val_loss:.4f}")
-            print(f"  Avg Main Loss:  {avg_main_loss:.4f}")
-            print(f"  Avg Hook Loss:  {avg_hook_loss:.4f}")
-            print(f"--------------------------------------")
+            if self.accelerator.is_main_process:
+                print(f"--- Validation Results (Step {global_step}) ---")
+                print(f"  Avg Total Loss: {avg_val_loss:.4f}")
+                print(f"  Avg Main Loss:  {avg_main_loss:.4f}")
+                print(f"  Avg Hook Loss:  {avg_hook_loss:.4f}")
+                print(f"--------------------------------------")
 
-            block_ratios_for_tb = {}
-            hook_ratios = []
-            for name, hook in HookManager.get_all_hooks().items():
-                if isinstance(hook, DiffCRDitBlockHook):
-                    ratio_val = hook.diff_ratio.item() 
-                    hook_ratios.append(ratio_val)
-                    print(f"    {name}: {ratio_val:.4f}")
-                    clean_name = name.split('.')[-1]
-                    block_ratios_for_tb[clean_name] = ratio_val
-            print(f"--------------------------------------")
+                block_ratios_for_tb = {}
+                hook_ratios = []
+                for name, hook in HookManager.get_all_hooks().items():
+                    if isinstance(hook, DiffCRDitBlockHook):
+                        ratio_val = hook.diff_ratio.item() 
+                        hook_ratios.append(ratio_val)
+                        print(f"    {name}: {ratio_val:.4f}")
+                        clean_name = name.split('.')[-1]
+                        block_ratios_for_tb[clean_name] = ratio_val
+                print(f"--------------------------------------")
 
-            if self.writer:
-                self.writer.add_scalar("validation/total_loss", avg_val_loss, global_step)
-                self.writer.add_scalar("validation/main_loss", avg_main_loss, global_step)
-                self.writer.add_scalar("validation/hook_loss", avg_hook_loss, global_step)
-                if block_ratios_for_tb:
-                    self.writer.add_scalars("validation/block_ratios", block_ratios_for_tb, global_step)
-                    avg_ratio = sum(hook_ratios) / len(hook_ratios)
-                    self.writer.add_scalar("validation/avg_ratio", avg_ratio, global_step)
-        else:
-            print(f"Validation dataloader is empty, skipping logging.")
+                if self.writer:
+                    self.writer.add_scalar("validation/total_loss", avg_val_loss, global_step)
+                    self.writer.add_scalar("validation/main_loss", avg_main_loss, global_step)
+                    self.writer.add_scalar("validation/hook_loss", avg_hook_loss, global_step)
+                    if block_ratios_for_tb:
+                        self.writer.add_scalars("validation/block_ratios", block_ratios_for_tb, global_step)
+                        avg_ratio = sum(hook_ratios) / len(hook_ratios)
+                        self.writer.add_scalar("validation/avg_ratio", avg_ratio, global_step)
+        elif self.accelerator.is_main_process:
+            print(f"Validation dataloader is empty or validation failed, skipping logging.")
 
         self.model.train()
         for hook in HookManager.get_all_hooks().values():
             if isinstance(hook, nn.Module):
                 hook.train()
         
-        return avg_val_loss
+        return avg_val_loss if 'avg_val_loss' in locals() else None
 
     @torch.no_grad()
     def run_inference_validation(self, global_step):
         if (
-            not self.config.run_inference_validation
+            not self.accelerator.is_main_process
+            or not self.config.run_inference_validation
             or not self.config.inference_metadata_file
         ):
             return
@@ -722,25 +755,30 @@ class DiffusionModelTrainer:
         except Exception as e:
             print(f"  Failed to read or parse inference metadata file: {e}. Skipping inference validation.")
             return
-
-        self.model.eval()
-        for hook in HookManager.get_all_hooks().values():
-            if isinstance(hook, nn.Module):
-                hook.eval()
-
-        inference_generator = torch.Generator(device=self.device).manual_seed(self.config.inference_seed)
+        
+        unwrapped_model = self.accelerator.unwrap_model(self.model)
+        unwrapped_vae = self.accelerator.unwrap_model(self.vae)
+        unwrapped_text_encoders = [self.accelerator.unwrap_model(te) for te in self.text_encoders]
 
         # TODO: dual model attr
         model_attr_name = self.model_attrs[0]
         original_model_in_pipe = getattr(self.pipe, model_attr_name)
-        setattr(self.pipe, model_attr_name, self.model)
+        original_vae_in_pipe = self.pipe.vae
+        original_text_encoders_in_pipe = [getattr(self.pipe, te_name) for te_name in self.pipe.text_encoder_names]
 
-        print(f"  Temporarily patching pipe.{model_attr_name} with trained model ({self.model.__class__.__name__})")
+        setattr(self.pipe, model_attr_name, unwrapped_model)
+        self.pipe.vae = unwrapped_vae
+        for te_name, te_unwrapped in zip(self.pipe.text_encoder_names, unwrapped_text_encoders):
+            setattr(self.pipe, te_name, te_unwrapped)
+        print(f"  Temporarily patching pipe.{model_attr_name} with unwrapped trained model")
+
+        inference_generator = torch.Generator(device=self.device).manual_seed(self.config.inference_seed)
 
         original_scheduler = copy.deepcopy(self.scheduler)
 
         sample_dir = os.path.join(self.config.output_dir, self.config.inference_output_dir, f"step_{global_step}")
         os.makedirs(sample_dir, exist_ok=True)
+
         for i, prompt in enumerate(prompts):
             try:
                 image = self.pipe(
@@ -758,17 +796,16 @@ class DiffusionModelTrainer:
             except Exception as e:
                 print(f"  Failed to generate image for prompt: '{prompt}'. Error: {e}")
 
-        print(f"  Saved {len(prompts)} inference samples to {sample_dir}")
-
         setattr(self.pipe, model_attr_name, original_model_in_pipe)
+        self.pipe.vae = original_vae_in_pipe
+        for te_name, te_original in zip(self.pipe.text_encoder_names, original_text_encoders_in_pipe):
+            setattr(self.pipe, te_name, te_original)
+            
         print(f"  Restored original model to pipe.{model_attr_name}")
 
         self.scheduler = original_scheduler
 
         self.model.train()
-        for hook in HookManager.get_all_hooks().values():
-            if isinstance(hook, nn.Module):
-                hook.train()
 
     def train(self):
         print("Starting training...")
@@ -787,50 +824,47 @@ class DiffusionModelTrainer:
             self.epoch = 0
             self.best_val_metric = None
 
-        self.model.train()
-        self.vae.eval()
-        for text_encoder in self.text_encoders:
-            text_encoder.eval()
-        for hook in HookManager.get_all_hooks().values():
-            if isinstance(hook, nn.Module):
-                hook.train()
-
         if self.config.training_mode == "auto-lora" and self.config.hook_only_steps > 0:
             print("Training in 'auto-lora' mode with hook_only_steps > 0.")
             print(f"  Freezing LoRA parameters for the first {self.config.hook_only_steps} steps...")
             frozen_params = 0
-            for name, param in self.model.named_parameters():
+            unwrapped_model = self.accelerator.unwrap_model(self.model)
+            for name, param in unwrapped_model.named_parameters():
                 if 'lora_' in name:
                     param.requires_grad_(False)
                     frozen_params += param.numel()
             print(f"  Froze {frozen_params} LoRA parameters.")
 
         prev_lora_state = None
-        self.model.enable_adapter_layers()
+        unwrapped_model = self.accelerator.unwrap_model(self.model)
+        if hasattr(unwrapped_model, "enable_adapter_layers"):
+            unwrapped_model.enable_adapter_layers()
+
         for epoch in range(self.epoch, self.config.num_epochs):
             self.epoch = epoch
+            self.model.train()
             progress_bar = tqdm(
                 self.train_dataloader,
                 desc=f"Epoch {epoch+1}/{self.config.num_epochs}",
                 total=len(self.train_dataloader),
                 dynamic_ncols=True,
+                disable=not self.accelerator.is_local_main_process,
             )
-
-            self.optimizer.zero_grad(set_to_none=True)
 
             for step, batch in enumerate(progress_bar):
                 if step % self.config.gradient_accumulation_steps == 0:
                     self.optimizer.zero_grad(set_to_none=True)
 
                 total_loss, main_loss, hook_loss = self._compute_loss(batch, self.global_step)
-                loss_to_backward = total_loss / self.config.gradient_accumulation_steps
-                loss_to_backward.backward()
+                self.accelerator.backward(total_loss)
 
                 is_update_step = (step + 1) % self.config.gradient_accumulation_steps == 0
                 is_last_step = (step + 1) == len(self.train_dataloader)
 
                 if is_update_step or is_last_step:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                    if self.accelerator.sync_gradients:
+                        self.accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
+                    
                     self.optimizer.step()
                     self.lr_scheduler.step()
                     self.global_step += 1
@@ -847,92 +881,106 @@ class DiffusionModelTrainer:
                                 unfrozen += param.numel()
                         print(f"  Unfroze {unfrozen} LoRA parameters.")
                     
-                    if self.config.training_mode in ["lora", "auto-lora"]:                        
-                        lora_params = [p for n, p in self.model.named_parameters() if "lora_" in n]
+                    if self.accelerator.is_main_process:
+                        gathered_total_loss = self.accelerator.gather(total_loss).mean().item()
+                        gathered_main_loss = self.accelerator.gather(main_loss).mean().item()
+                        gathered_hook_loss = self.accelerator.gather(hook_loss).mean().item()
 
-                        lora_norm = torch.norm(
-                            torch.stack([torch.norm(p.detach()) for p in lora_params])
-                        ).item()
+                        # lora metrics
+                        if self.config.training_mode in ["lora", "auto-lora"]:                        
+                            lora_params = [p for n, p in self.model.named_parameters() if "lora_" in n]
 
-                        lora_grads = [
-                            torch.norm(p.grad.detach()) for p in lora_params
-                            if p.grad is not None
-                        ]
+                            lora_norm = torch.norm(
+                                torch.stack([torch.norm(p.detach()) for p in lora_params])
+                            ).item()
 
-                        if len(lora_grads) > 0:
-                            lora_grad_norm = torch.norm(torch.stack(lora_grads)).item()
-                        else:
-                            lora_grad_norm = 0.0
-
-                        if prev_lora_state is not None:
-                            deltas = [
-                                torch.norm(p.detach().cpu() - prev_lora_state[i])
-                                for i, p in enumerate(lora_params)
+                            lora_grads = [
+                                torch.norm(p.grad.detach()) for p in lora_params
+                                if p.grad is not None
                             ]
-                            lora_delta = torch.mean(torch.stack(deltas)).item()
-                        else:
-                            lora_delta = 0.0
-                        prev_lora_state = [p.detach().cpu().clone() for p in lora_params]
+
+                            if len(lora_grads) > 0:
+                                lora_grad_norm = torch.norm(torch.stack(lora_grads)).item()
+                            else:
+                                lora_grad_norm = 0.0
+
+                            if prev_lora_state is not None:
+                                deltas = [
+                                    torch.norm(p.detach().cpu() - prev_lora_state[i])
+                                    for i, p in enumerate(lora_params)
+                                ]
+                                lora_delta = torch.mean(torch.stack(deltas)).item()
+                            else:
+                                lora_delta = 0.0
+                            prev_lora_state = [p.detach().cpu().clone() for p in lora_params]
+
+                            if self.writer:
+                                self.writer.add_scalar("lora/param_norm", lora_norm, self.global_step)
+                                self.writer.add_scalar("lora/grad_norm", lora_grad_norm, self.global_step)
+                                self.writer.add_scalar("lora/param_delta", lora_delta, self.global_step)
 
                         if self.writer:
-                            self.writer.add_scalar("lora/param_norm", lora_norm, self.global_step)
-                            self.writer.add_scalar("lora/grad_norm", lora_grad_norm, self.global_step)
-                            self.writer.add_scalar("lora/param_delta", lora_delta, self.global_step)
-
-                    if self.writer:
-                        self.writer.add_scalar("train/total_loss", total_loss.item(), self.global_step)
-                        self.writer.add_scalar("train/main_loss", main_loss.item(), self.global_step)
-                        self.writer.add_scalar("train/hook_loss", hook_loss.item(), self.global_step)
-                        self.writer.add_scalar("train/lr", self.lr_scheduler.get_last_lr()[0], self.global_step)
+                            self.writer.add_scalar("train/total_loss", gathered_total_loss.item(), self.global_step)
+                            self.writer.add_scalar("train/main_loss", gathered_main_loss.item(), self.global_step)
+                            self.writer.add_scalar("train/hook_loss", gathered_hook_loss.item(), self.global_step)
+                            self.writer.add_scalar("train/lr", self.lr_scheduler.get_last_lr()[0], self.global_step)
                     
-                    if self.global_step % self.config.logging_steps == 0:
-                        postfix_dict = {
-                            "loss": f"{total_loss.item():.4f}",
-                            "main_loss": f"{main_loss.item():.4f}",
-                            "hook_loss": f"{hook_loss.item():.4f}",
-                            "lr": f"{self.lr_scheduler.get_last_lr()[0]:.2e}",
-                            "step": self.global_step,
-                        }
-                        if self.config.training_mode in ["lora", "auto-lora"]:
-                            postfix_dict["lora_norm"] = f"{lora_norm:.4f}"
-                            postfix_dict["lora_grad_norm"] = f"{lora_grad_norm:.4e}"
-                            postfix_dict["lora_delta"] = f"{lora_delta:.4e}"
+                        if self.global_step % self.config.logging_steps == 0:
+                            postfix_dict = {
+                                "loss": f"{gathered_total_loss.item():.4f}",
+                                "main_loss": f"{gathered_main_loss.item():.4f}",
+                                "hook_loss": f"{gathered_hook_loss.item():.4f}",
+                                "lr": f"{self.lr_scheduler.get_last_lr()[0]:.2e}",
+                                "step": self.global_step,
+                            }
+                            if self.config.training_mode in ["lora", "auto-lora"]:
+                                postfix_dict["lora_norm"] = f"{lora_norm:.4f}"
+                                postfix_dict["lora_grad_norm"] = f"{lora_grad_norm:.4e}"
+                                postfix_dict["lora_delta"] = f"{lora_delta:.4e}"
 
-                        progress_bar.set_postfix(postfix_dict)
+                            progress_bar.set_postfix(postfix_dict)
 
-                    if (
-                        hasattr(self.config, "validation_steps")
-                        and self.config.validation_steps > 0
-                        and self.global_step % self.config.validation_steps == 0
-                    ):
-                        val_metric = self.validate(self.global_step)
-                        if self.config.save_best:
-                            self.auto_save_best(val_metric, higher_is_better=self.config.best_metric_higher_is_better)
+                        if (
+                            hasattr(self.config, "validation_steps")
+                            and self.config.validation_steps > 0
+                            and self.global_step % self.config.validation_steps == 0
+                        ):
+                            val_metric = self.validate(self.global_step)
+                            if self.config.save_best:
+                                self.auto_save_best(val_metric, higher_is_better=self.config.best_metric_higher_is_better)
 
-                    if (
-                        hasattr(self.config, "inference_steps")
-                        and self.config.inference_steps > 0
-                        and self.global_step % self.config.inference_steps == 0
-                    ):
-                        self.run_inference_validation(self.global_step)
+                        if (
+                            hasattr(self.config, "inference_steps")
+                            and self.config.inference_steps > 0
+                            and self.global_step % self.config.inference_steps == 0
+                        ):
+                            self.run_inference_validation(self.global_step)
 
-                    if hasattr(self, "maybe_save_periodically"):
-                        self.maybe_save_periodically()
+                        if hasattr(self, "maybe_save_periodically"):
+                            self.maybe_save_periodically()
 
-            print(f"Epoch {epoch+1} completed.")
+            if self.accelerator.is_main_process:
+                print(f"Epoch {epoch+1} completed.")
 
-        print("Training completed. Saving final model...")
-        final_path = os.path.join(self.config.output_dir, "final.pt")
-        self.save_checkpoint(final_path)
-        print(f"Final model saved to {final_path}")
+        if self.accelerator.is_main_process:
+            print("Training completed. Saving final model...")
+            final_path = os.path.join(self.config.output_dir, "final.pt")
+            self.save_checkpoint(final_path) # save_checkpoint 内部需要 unwrap
+            print(f"Final model saved to {final_path}")
 
     def save_checkpoint(self, save_path: str, save_optimizer: bool = True):
+        self.accelerator.wait_for_everyone()
+        if not self.accelerator.is_main_process:
+            return
+
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
 
         model_state = {}
 
+        unwrapped_model = self.accelerator.unwrap_model(self.model)
+        state_dict = unwrapped_model.state_dict()
+
         mode = self.config.training_mode
-        state_dict = self.model.state_dict()
 
         if mode == "lora":
             for k, v in state_dict.items():
@@ -947,6 +995,9 @@ class DiffusionModelTrainer:
 
         else:
             raise ValueError(f"Unknown training_mode: {mode}")
+        
+        unwrapped_optimizer_state = self.optimizer.state_dict()
+        unwrapped_lr_scheduler_state = self.lr_scheduler.state_dict()
 
         checkpoint = {
             "model": model_state,
@@ -974,22 +1025,25 @@ class DiffusionModelTrainer:
         checkpoint = torch.load(ckpt_path, map_location="cpu")
         ckpt_mode = checkpoint.get("training_mode", "unknown")
 
-        print(f"Loading checkpoint from {ckpt_path} "
-              f"(saved_mode={ckpt_mode}, current_mode={self.config.training_mode})")
+        if self.accelerator.is_main_process:
+            print(f"Loading checkpoint from {ckpt_path} "
+                f"(saved_mode={ckpt_mode}, current_mode={self.config.training_mode})")
 
         model_state = checkpoint["model"]
+
+        unwrapped_model = self.accelerator.unwrap_model(self.model)
 
         mode = self.config.training_mode
         if mode == "lora":
             load_dict = {k: v for k, v in model_state.items()
                          if "lora" in k or "hook" in k}
-            missing, unexpected = self.model.load_state_dict(load_dict, strict=False)
+            missing, unexpected = unwrapped_model.load_state_dict(load_dict, strict=False)
         elif mode == "hook_only":
             load_dict = {k: v for k, v in model_state.items()
                          if "hook" in k}
-            missing, unexpected = self.model.load_state_dict(load_dict, strict=False)
+            missing, unexpected = unwrapped_model.load_state_dict(load_dict, strict=False)
         elif mode == "finetune":
-            missing, unexpected = self.model.load_state_dict(model_state, strict=strict)
+            missing, unexpected = unwrapped_model.load_state_dict(model_state, strict=strict)
         else:
             raise ValueError(f"Unknown training_mode: {mode}")
 
@@ -1005,30 +1059,64 @@ class DiffusionModelTrainer:
             self.best_val_metric = checkpoint.get("best_val_metric", None)
             print(f"Resumed training from step {self.global_step}, epoch {self.epoch}")
 
-        self.model.to(self.device, dtype=self.dtype)
-        print(f"Loaded checkpoint successfully (mode={self.config.training_mode})")
+        if self.accelerator.is_main_process:
+            print(f"Loaded checkpoint successfully (mode={self.config.training_mode})")
 
     def resume_if_available(self, resume_dir: str = None):
         ckpt_dir = resume_dir or self.config.output_dir
+
+        if not self.accelerator.is_main_process:
+            self.accelerator.wait_for_everyone()
+            return os.path.isdir(ckpt_dir) and len(glob.glob(os.path.join(ckpt_dir, "*.pt"))) > 0
+
         if not os.path.isdir(ckpt_dir):
             print(f"No checkpoint directory found at {ckpt_dir}, starting fresh.")
+            self.accelerator.wait_for_everyone()
             return False
 
         ckpts = glob.glob(os.path.join(ckpt_dir, "*.pt"))
         if not ckpts:
             print(f"No checkpoints found in {ckpt_dir}, starting fresh.")
+            self.accelerator.wait_for_everyone()
             return False
 
         def extract_step(path):
-            match = re.search(r"(\d+)\.pt$", os.path.basename(path))
-            return int(match.group(1)) if match else -1
+            match_step = re.search(r"step_(\d+)\.pt$", os.path.basename(path))
+            if match_step:
+                return int(match_step.group(1))
+            if "best.pt" in path:
+                return -1
+            if "final.pt" in path:
+                return -2
+            return -3
 
         latest_ckpt = max(ckpts, key=extract_step)
+        
+        step_ckpts = [p for p in ckpts if "step_" in os.path.basename(p)]
+        if step_ckpts:
+             latest_step_ckpt = max(step_ckpts, key=extract_step)
+             if extract_step(latest_step_ckpt) > extract_step(latest_ckpt):
+                 latest_ckpt = latest_step_ckpt
+        
         print(f"Found latest checkpoint: {latest_ckpt}")
-        self.load_checkpoint(latest_ckpt)
-        return True
+        try:
+            self.load_checkpoint(latest_ckpt)
+            resumed = True
+        except Exception as e:
+            print(f"Failed to load checkpoint {latest_ckpt}. Error: {e}. Starting fresh.")
+            resumed = False
+
+        self.accelerator.wait_for_everyone()
+        return resumed
 
     def auto_save_best(self, val_metric: float, higher_is_better: bool = False):
+        if not self.accelerator.is_main_process:
+            return
+
+        if val_metric is None:
+            print(f"Validation metric is None, skipping best model save.")
+            return
+
         is_best = False
         if not hasattr(self, "best_val_metric") or self.best_val_metric is None:
             is_best = True
@@ -1047,6 +1135,9 @@ class DiffusionModelTrainer:
             print(f"Validation metric {val_metric:.4f} not improved (best={self.best_val_metric:.4f})")
 
     def maybe_save_periodically(self):
+        if not self.accelerator.is_main_process:
+            return
+
         if hasattr(self.config, "save_steps") and self.global_step % self.config.save_steps == 0:
             save_path = os.path.join(
                 self.config.output_dir,
