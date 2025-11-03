@@ -499,9 +499,10 @@ class DiffusionModelTrainer:
         noisy_latents, timesteps, noise_target, model_kwargs = (
             self._prepare_model_inputs(batch)
         )
-        with torch.amp.autocast(
-            device_type="cuda", enabled=self.config.mixed_precision != "no"
-        ):
+
+        with torch.amp.autocast(device_type="cuda",
+                                enabled=(self.config.mixed_precision != "no"),
+                                dtype=(torch.bfloat16 if self.config.mixed_precision == "bf16" else (torch.float16 if self.config.mixed_precision == "fp16" else None))):
             noise_pred = self.model(
                 hidden_states=noisy_latents.to(self.dtype),
                 timestep=timesteps,
@@ -568,7 +569,7 @@ class DiffusionModelTrainer:
 
         for batch in val_progress_bar:
             try:
-                total_loss, main_loss, hook_loss = self._compute_loss(batch)
+                total_loss, main_loss, hook_loss = self._compute_loss(batch, global_step)
 
                 total_val_loss += total_loss.item()
                 total_main_loss += main_loss.item()
