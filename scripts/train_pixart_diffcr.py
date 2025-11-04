@@ -17,7 +17,7 @@ lora_config = {
 trainer_config = {
     "metadata_file": "../dataset/MJHQ-30K/train.jsonl",
     "image_dir": "../dataset/MJHQ-30K/",
-    "model_type": "pixart-sigma",  # "pixart-sigma", "flux-dev"
+    "model_type": "sd3",  # "pixart-sigma", "flux-dev"
     "model_path": None,
     "output_dir": "./checkpoints/",
     "training_mode": "lora",  # "hook_only" "finetune" "auto-finetune" "lora" "auto-lora"

@@ -122,16 +122,7 @@ class DiffusionModelTrainer:
         self.vae.eval()
         for text_encoder in self.text_encoders:
             text_encoder.requires_grad_(False)
-            text_encoder.to(dtype=torch.float32)
             text_encoder.eval()
-
-        if self.accelerator.is_main_process:
-            print("model_type:", config.model_type)
-            print("image_processor:", self.image_processor.__class__.__name__)
-            print("vae:", self.vae.__class__.__name__, "dtype:", self.vae.dtype)
-            print("scheduler:", self.scheduler.__class__.__name__)
-            print("model (DiT):", self.model.__class__.__name__, "dtype:", self.model.dtype)
-            print("text_encoder:", self.text_encoders[0].__class__.__name__, "dtype:", self.text_encoders[0].dtype)
 
         # inject
         self.hook_type = None
@@ -217,8 +208,6 @@ class DiffusionModelTrainer:
             self.optimizer,
             self.lr_scheduler,
             self.train_dataloader,
-            self.vae,
-            *self.text_encoders,
         ]
 
         if self.teacher_model is not None:
@@ -233,15 +222,20 @@ class DiffusionModelTrainer:
         self.optimizer = prepared[idx]; idx += 1
         self.lr_scheduler = prepared[idx]; idx += 1
         self.train_dataloader = prepared[idx]; idx += 1
-        self.vae = prepared[idx]; idx += 1
-        self.text_encoders = tuple(prepared[idx:])
-        # ==========================================================
-
         if self.val_dataloader is not None:
             self.val_dataloader = self.accelerator.prepare(self.val_dataloader)
 
+        # ==========================================================
         unwrapped_model = self.accelerator.unwrap_model(self.model)
         self.dtype = unwrapped_model.dtype
+
+        if self.accelerator.is_main_process:
+            print("model_type:", config.model_type)
+            print("image_processor:", self.image_processor.__class__.__name__)
+            print("scheduler:", self.scheduler.__class__.__name__)
+            print("vae:", self.vae.__class__.__name__, "dtype:", self.vae.dtype)
+            print("text_encoder:", self.text_encoders[0].__class__.__name__, "dtype:", self.text_encoders[0].dtype)
+            print("model (DiT):", self.model.__class__.__name__, "dtype:", self.dtype)
 
         if self.config.caption_dropout_rate > 0:
             print(
@@ -253,10 +247,11 @@ class DiffusionModelTrainer:
                         "",
                         do_classifier_free_guidance=False,
                         device=self.device,
-                        dtype=self.dtype,
                         clean_caption=True,
                     )
                 )
+                self.empty_prompt_embeds = self.empty_prompt_embeds.to(self.dtype)
+                self.empty_prompt_attention_mask = self.empty_prompt_attention_mask.to(self.dtype)
             elif self.model_type == "flux-dev" or self.model_type == "flux-kontext":
                 (
                     self.empty_prompt_embeds,
@@ -267,6 +262,9 @@ class DiffusionModelTrainer:
                     device=self.device,
                     num_images_per_prompt=1,
                 )
+                self.empty_prompt_embeds = self.empty_prompt_embeds.to(self.dtype)
+                self.empty_pooled_prompt_embeds = self.empty_pooled_prompt_embeds.to(self.dtype)
+                self.empty_text_ids = self.empty_text_ids.to(self.dtype)
             elif self.model_type == "sd3":
                 (
                     self.empty_prompt_embeds,
@@ -281,6 +279,8 @@ class DiffusionModelTrainer:
                     do_classifier_free_guidance=False,
                     num_images_per_prompt=1,
                 )
+                self.empty_prompt_embeds = self.empty_prompt_embeds.to(self.dtype)
+                self.empty_pooled_prompt_embeds = self.empty_pooled_prompt_embeds.to(self.dtype)
             else:
                 raise NotImplementedError(
                     "Caption dropout is only implemented for 'pixart-sigma' model_type currently."
@@ -1029,25 +1029,11 @@ class DiffusionModelTrainer:
             return
 
         unwrapped_model = self.accelerator.unwrap_model(self.model)
-        unwrapped_vae = self.accelerator.unwrap_model(self.vae)
-        unwrapped_text_encoders = [
-            self.accelerator.unwrap_model(te) for te in self.text_encoders
-        ]
 
         # TODO: dual model attr
         model_attr_name = self.model_attrs[0]
         original_model_in_pipe = getattr(self.pipe, model_attr_name)
-        original_vae_in_pipe = self.pipe.vae
-        original_text_encoders_in_pipe = [
-            getattr(self.pipe, te_name) for te_name in self.text_encoder_names
-        ]
-
         setattr(self.pipe, model_attr_name, unwrapped_model)
-        self.pipe.vae = unwrapped_vae
-        for te_name, te_unwrapped in zip(
-            self.text_encoder_names, unwrapped_text_encoders
-        ):
-            setattr(self.pipe, te_name, te_unwrapped)
         print(
             f"  Temporarily patching pipe.{model_attr_name} with unwrapped trained model"
         )
@@ -1067,11 +1053,12 @@ class DiffusionModelTrainer:
 
         for i, prompt in enumerate(prompts):
             try:
-                image = self.pipe(
-                    prompt=prompt,
-                    generator=inference_generator,
-                    num_inference_steps=self.config.inference_num_inference_steps,
-                ).images[0]
+                with self.accelerator.autocast():
+                    image = self.pipe(
+                        prompt=prompt,
+                        generator=inference_generator,
+                        num_inference_steps=self.config.inference_num_inference_steps,
+                    ).images[0]
 
                 safe_prompt = "".join(c if c.isalnum() else "_" for c in prompt)[:50]
                 image.save(
@@ -1085,12 +1072,6 @@ class DiffusionModelTrainer:
                 print(f"  Failed to generate image for prompt: '{prompt}'. Error: {e}")
 
         setattr(self.pipe, model_attr_name, original_model_in_pipe)
-        self.pipe.vae = original_vae_in_pipe
-        for te_name, te_original in zip(
-            self.text_encoder_names, original_text_encoders_in_pipe
-        ):
-            setattr(self.pipe, te_name, te_original)
-
         print(f"  Restored original model to pipe.{model_attr_name}")
 
         self.scheduler = original_scheduler
