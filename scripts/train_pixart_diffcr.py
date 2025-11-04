@@ -17,7 +17,7 @@ lora_config = {
 trainer_config = {
     "metadata_file": "../dataset/MJHQ-30K/train.jsonl",
     "image_dir": "../dataset/MJHQ-30K/",
-    "model_type": "sd3",  # "pixart-sigma", "flux-dev"
+    "model_type": "pixart-sigma",  # "pixart-sigma", "flux-dev"
     "model_path": None,
     "output_dir": "./checkpoints/",
     "training_mode": "lora",  # "hook_only" "finetune" "lora"
@@ -55,6 +55,10 @@ trainer_config = {
         "ratio_loss_weight": 0.3,
         "target_ratio": 0.8,
     },
+    "log_with_tensorboard": False,
+    "log_with_wandb": True,
+    "wandb_project": "generative-model-boost",
+    "wandb_run_name": "pixart-diffcr",
 }
 
 config = TrainerConfig(**trainer_config)

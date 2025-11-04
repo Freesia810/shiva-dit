@@ -12,6 +12,7 @@ from peft import LoraConfig as PeftLoraConfig, get_peft_model
 from tqdm import tqdm
 from accelerate import Accelerator
 from accelerate.utils import set_seed
+from dataclasses import asdict
 
 from baselines.diffcr import DiffCRDitBlockHook, calculate_ratio_loss
 from baselines.dy_dit import DynamicDiTBlockHook, calculate_flops_loss
@@ -288,7 +289,7 @@ class DiffusionModelTrainer:
                             "wandb_run_name",
                             os.path.basename(config.output_dir),
                         ),
-                        config_dict=config.to_dict(),
+                        config_dict=asdict(config),
                         entity=getattr(config, "wandb_entity", None),
                     )
                 )
@@ -709,15 +710,15 @@ class DiffusionModelTrainer:
                 else:
                     lora_grad_norm = 0.0
 
-                if prev_lora_state is not None:
+                if self.prev_lora_state is not None:
                     deltas = [
-                        torch.norm(p.detach().cpu() - prev_lora_state[i])
+                        torch.norm(p.detach().cpu() - self.prev_lora_state[i])
                         for i, p in enumerate(lora_params)
                     ]
                     lora_delta = torch.mean(torch.stack(deltas)).item()
                 else:
                     lora_delta = 0.0
-                prev_lora_state = [p.detach().cpu().clone() for p in lora_params]
+                self.prev_lora_state = [p.detach().cpu().clone() for p in lora_params]
                 metrics_to_log.update({
                     "lora/param_norm": lora_norm, 
                     "lora/grad_norm": lora_grad_norm, 
@@ -738,16 +739,16 @@ class DiffusionModelTrainer:
                 grad_norm = (
                     torch.norm(torch.stack(param_grads)).item() if param_grads else 0.0
                 )
-                if prev_finetune_state is not None:
+                if self.prev_finetune_state is not None:
                     deltas = [
-                        torch.norm(p.detach().cpu() - prev_finetune_state[i])
+                        torch.norm(p.detach().cpu() - self.prev_finetune_state[i])
                         for i, p in enumerate(all_trainable_params)
                     ]
                     param_delta = torch.mean(torch.stack(deltas)).item()
                 else:
                     param_delta = 0.0
 
-                prev_finetune_state = [
+                self.prev_finetune_state = [
                     p.detach().cpu().clone() for p in all_trainable_params
                 ]
                 metrics_to_log.update({

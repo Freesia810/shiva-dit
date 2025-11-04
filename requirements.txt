@@ -26,3 +26,4 @@ torchvision>=0.21,<0.22
 torchmetrics==1.7.3
 transformers==4.57.1
 tqdm>=4.66,<5.0
+wandb==0.22.3
