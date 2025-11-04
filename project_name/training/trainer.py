@@ -265,6 +265,20 @@ class DiffusionModelTrainer:
                     device=self.device,
                     num_images_per_prompt=1,
                 )
+            elif self.model_type == "sd3":
+                (
+                    self.empty_prompt_embeds,
+                    _,
+                    self.empty_pooled_prompt_embeds,
+                    _,
+                ) = self.pipe.encode_prompt(
+                    prompt="",
+                    prompt_2=None,
+                    prompt_3=None,
+                    device=self.device,
+                    do_classifier_free_guidance=False,
+                    num_images_per_prompt=1,
+                )
             else:
                 raise NotImplementedError(
                     "Caption dropout is only implemented for 'pixart-sigma' model_type currently."
@@ -352,6 +366,15 @@ class DiffusionModelTrainer:
             params_to_train = [p for p in self.model.parameters() if p.requires_grad]
         else:
             raise ValueError(f"Unknown training mode: {self.config.training_mode}")
+        
+        if self.config.hook_warmup_steps > 0:
+            for hook in HookManager.get_all_hooks().values():
+                if isinstance(hook, DiffCRDitBlockHook):
+                    if hasattr(hook, "diff_ratio"):
+                        hook.diff_ratio.requires_grad = False
+                        print(f"Froze diff_ratio (value={hook.diff_ratio.item()}) for hook: {hook.__class__.__name__}")
+                    else:
+                        print(f"WARNING: Found DiffCRDitBlockHook without 'diff_ratio' param: {hook.__class__.__name__}")
 
         print(f"Total trainable parameters: {sum(p.numel() for p in params_to_train)}")
 
@@ -622,7 +645,7 @@ class DiffusionModelTrainer:
             prompt_embed2, pooled_prompt_embed2 = _clip_encode(
                 self.text_encoders[1],
                 input_ids_tuple[1],
-                clip_skip=self.config.clip_skip,
+                clip_skip=None,
             )
             clip_prompt_embeds = torch.cat([prompt_embed, prompt_embed2], dim=-1)
 
@@ -641,7 +664,28 @@ class DiffusionModelTrainer:
             model_kwargs["encoder_hidden_states"] = prompt_embeds
             model_kwargs["pooled_projections"] = pooled_prompt_embeds
 
-            # TODO: add noise
+            if torch.rand(1).item() < self.config.caption_dropout_rate:
+                prompt_embeds = self.empty_prompt_embeds
+                pooled_prompt_embeds = self.empty_pooled_prompt_embeds
+
+                model_kwargs["encoder_hidden_states"] = prompt_embeds
+                model_kwargs["pooled_projections"] = pooled_prompt_embeds
+
+            # add noise
+            noise = torch.randn_like(img_latents)
+            indices = torch.randint(
+                0,
+                self.scheduler.config.num_train_timesteps,
+                (batch_size,),
+                device=self.device,
+            )
+            schedule_timesteps_gpu = self.scheduler.timesteps.to(self.device)
+            timesteps = schedule_timesteps_gpu[indices]
+            noisy_latents = self.scheduler.scale_noise(
+                sample=img_latents,
+                timestep=timesteps,
+                noise=noise,
+            )
         elif self.model_type == "qwen-image":
             model_kwargs["return_dict"] = False
             model_kwargs["attention_kwargs"] = self.pipe.attention_kwargs
@@ -1187,6 +1231,20 @@ class DiffusionModelTrainer:
                                         param.requires_grad_(True)
                                         unfrozen += param.numel()
                                 print(f"  Unfroze {unfrozen} parameters.")
+                    
+                    if self.config.hook_warmup_steps > 0:
+                        scaled_hook_warmup_steps = max(1, self.config.hook_warmup_steps // self.accelerator.num_processes)
+                        if self.global_step == scaled_hook_warmup_steps:
+                            print(
+                                f"\n[Step {self.global_step}]: Hook-warmup phase complete. Enabling hooks' ratio ..."
+                            )
+                            for hook in HookManager.get_all_hooks().values():
+                                if isinstance(hook, DiffCRDitBlockHook):
+                                    if hasattr(hook, "diff_ratio"):
+                                        hook.diff_ratio.requires_grad = True
+                                        print(f"Unfroze diff_ratio (value={hook.diff_ratio.item()}) for hook: {hook.__class__.__name__}")
+                                    else:
+                                        print(f"WARNING: Found DiffCRDitBlockHook without 'diff_ratio' param: {hook.__class__.__name__}")
 
                     gathered_total_loss = self.accelerator.gather(total_loss).mean()
                     gathered_main_loss = self.accelerator.gather(main_loss).mean()

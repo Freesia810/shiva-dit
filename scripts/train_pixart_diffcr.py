@@ -17,7 +17,7 @@ lora_config = {
 trainer_config = {
     "metadata_file": "../dataset/MJHQ-30K/train.jsonl",
     "image_dir": "../dataset/MJHQ-30K/",
-    "model_type": "pixart-sigma",  # "pixart-sigma", "flux-dev"
+    "model_type": "sd3",  # "pixart-sigma", "flux-dev"
     "model_path": None,
     "output_dir": "./checkpoints/",
     "training_mode": "lora",  # "hook_only" "finetune" "auto-finetune" "lora" "auto-lora"
@@ -29,7 +29,7 @@ trainer_config = {
     "num_epochs": 1000,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16,
-    "learning_rate": 1e-4,
+    "learning_rate": 1e-6,
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
     "lr_scheduler": "cosine", # "linear", "cosine", "constant"
@@ -38,14 +38,14 @@ trainer_config = {
     "hook_loss_weight": 1.0,
     "seed": 42,
     "logging_steps": 5,
-    "save_steps": 3500,
+    "save_steps": 3500, # 2 epoch
     "run_validation": True,
-    "validation_steps": 875,
+    "validation_steps": 875, # 0.5 epoch
     "val_batch_size": None,
     "val_metadata_file": "../dataset/MJHQ-30K/val.jsonl",
     "val_image_dir": "../dataset/MJHQ-30K/",
     "run_inference_validation": True,
-    "inference_steps": 3500,
+    "inference_steps": 1750, # 1 epoch
     "inference_metadata_file": "../dataset/MJHQ-30K/test.jsonl",
     "inference_seed": 42,
     "inference_num_inference_steps": 20,
