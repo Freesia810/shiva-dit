@@ -132,6 +132,7 @@ class DiffusionModelTrainer:
             print("model (DiT):", self.model.__class__.__name__)
 
         # inject
+        self.hook_type = None
         if config.trainable_hook_config:
             hook_class, hook_kwargs = config.trainable_hook_config
 
@@ -640,6 +641,7 @@ class DiffusionModelTrainer:
             model_kwargs["encoder_hidden_states"] = prompt_embeds
             model_kwargs["pooled_projections"] = pooled_prompt_embeds
 
+            # TODO: add noise
         elif self.model_type == "qwen-image":
             model_kwargs["return_dict"] = False
             model_kwargs["attention_kwargs"] = self.pipe.attention_kwargs
@@ -744,12 +746,8 @@ class DiffusionModelTrainer:
             self._prepare_model_inputs(batch)
         )
 
-        noisy_latents = (
-            noisy_latents.clone().to(self.dtype).detach().requires_grad_(True)
-        )
-
+        noisy_latents = noisy_latents.to(self.dtype).detach()
         distill_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
-
         with torch.amp.autocast(
             device_type="cuda",
             enabled=(self.config.mixed_precision != "no"),
@@ -767,11 +765,13 @@ class DiffusionModelTrainer:
                     model_kwargs["output_hidden_states_step"] = self.config.distillation_layer_skip
                 else:
                     model_kwargs["output_hidden_states"] = False
+                
+                teacher_kwargs = copy.deepcopy(model_kwargs)
                 with torch.no_grad():
                     teacher_output = self.teacher_model(
                         hidden_states=noisy_latents,
                         timestep=timesteps,
-                        **model_kwargs,
+                        **teacher_kwargs,
                     )
                     Y_s = teacher_output[0]   
 
@@ -831,7 +831,7 @@ class DiffusionModelTrainer:
         elif self.hook_type == 'diffcr':
             hook_loss = calculate_ratio_loss(self.config.extra_config, device=self.device)
         else:
-            raise NotImplementedError(f"hook_type {self.hook_type} not implemented")
+            hook_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
         
         current_hook_loss_weight = self.config.hook_loss_weight
         if self.config.hook_warmup_steps > 0:
