@@ -1219,16 +1219,19 @@ class DiffusionModelTrainer:
                     if self.config.hook_warmup_steps > 0:
                         scaled_hook_warmup_steps = max(1, self.config.hook_warmup_steps // self.accelerator.num_processes)
                         if self.global_step == scaled_hook_warmup_steps:
-                            print(
-                                f"\n[Step {self.global_step}]: Hook-warmup phase complete. Enabling hooks' ratio ..."
-                            )
+                            if self.accelerator.is_main_process:
+                                print(
+                                    f"\n[Step {self.global_step}]: Hook-warmup phase complete. Enabling hooks' ratio ..."
+                                )
                             for hook in HookManager.get_all_hooks().values():
                                 if isinstance(hook, DiffCRDitBlockHook):
                                     if hasattr(hook, "diff_ratio"):
                                         hook.diff_ratio.requires_grad = True
-                                        print(f"Unfroze diff_ratio (value={hook.diff_ratio.item()}) for hook: {hook.__class__.__name__}")
+                                        if self.accelerator.is_main_process:
+                                            print(f"Unfroze diff_ratio (value={hook.diff_ratio.item()}) for hook: {hook.__class__.__name__}")
                                     else:
-                                        print(f"WARNING: Found DiffCRDitBlockHook without 'diff_ratio' param: {hook.__class__.__name__}")
+                                        if self.accelerator.is_main_process:
+                                            print(f"WARNING: Found DiffCRDitBlockHook without 'diff_ratio' param: {hook.__class__.__name__}")
 
                     gathered_total_loss = self.accelerator.gather(total_loss).mean()
                     gathered_main_loss = self.accelerator.gather(main_loss).mean()
