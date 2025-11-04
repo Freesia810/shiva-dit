@@ -1229,6 +1229,15 @@ class DiffusionModelTrainer:
                     val_metric = None
                     if validate_trigger and self.global_step % validate_trigger == 0:
                         val_metric = self.validate(self.global_step)
+                    
+                    if self.config.save_best and val_metric is not None:
+                        self.auto_save_best(
+                            val_metric,
+                            higher_is_better=self.config.best_metric_higher_is_better,
+                        )
+
+                    if save_trigger and self.global_step % save_trigger == 0:
+                        self.maybe_save_periodically()
 
                     if self.accelerator.is_main_process:
                         # lora metrics
@@ -1377,20 +1386,11 @@ class DiffusionModelTrainer:
 
                             progress_bar.set_postfix(postfix_dict)
 
-                        if self.config.save_best and val_metric is not None:
-                            self.auto_save_best(
-                                val_metric,
-                                higher_is_better=self.config.best_metric_higher_is_better,
-                            )
-
                         if (
                             inference_trigger
                             and self.global_step % inference_trigger == 0
                         ):
                             self.run_inference_validation(self.global_step)
-
-                        if save_trigger and self.global_step % save_trigger == 0:
-                            self.maybe_save_periodically()
 
             if self.accelerator.is_main_process:
                 print(f"Epoch {epoch+1} completed.")
@@ -1402,58 +1402,53 @@ class DiffusionModelTrainer:
             print(f"Final model saved to {final_path}")
 
     def save_checkpoint(self, save_path: str, save_optimizer: bool = True):
+        if self.accelerator.is_main_process:
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            model_state = {}
+            unwrapped_model = self.accelerator.unwrap_model(self.model)
+            state_dict = unwrapped_model.state_dict()
+            mode = self.config.training_mode
+            if mode == "lora":
+                for k, v in state_dict.items():
+                    if "lora" in k or "hook" in k:
+                        model_state[k] = v
+
+            elif mode == "hook_only":
+                model_state = {k: v for k, v in state_dict.items() if "hook" in k}
+
+            elif mode == "finetune":
+                model_state = state_dict
+
+            else:
+                raise ValueError(f"Unknown training_mode: {mode}")
+
+            optimizer_state = None
+            if save_optimizer and self.optimizer is not None:
+                optimizer_state = self.optimizer.state_dict()
+
+            lr_scheduler_state = None
+            if save_optimizer and self.lr_scheduler is not None:
+                lr_scheduler_state = self.lr_scheduler.state_dict()
+
+            checkpoint = {
+                "model": model_state,
+                "optimizer": optimizer_state,
+                "lr_scheduler": lr_scheduler_state,
+                "epoch": getattr(self, "epoch", 0),
+                "global_step": getattr(self, "global_step", 0),
+                "training_mode": mode,
+                "mixed_precision": self.config.mixed_precision,
+                "extra_config": getattr(self.config, "extra_config", {}),
+                "best_val_metric": getattr(self, "best_val_metric", None),
+            }
+
+            torch.save(checkpoint, save_path)
+            print(
+                f"Saved checkpoint to {save_path} "
+                f"(mode={mode}, step={checkpoint['global_step']})"
+            )
+
         self.accelerator.wait_for_everyone()
-        if not self.accelerator.is_main_process:
-            return
-
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-
-        model_state = {}
-
-        unwrapped_model = self.accelerator.unwrap_model(self.model)
-        state_dict = unwrapped_model.state_dict()
-
-        mode = self.config.training_mode
-
-        if mode == "lora":
-            for k, v in state_dict.items():
-                if "lora" in k or "hook" in k:
-                    model_state[k] = v
-
-        elif mode == "hook_only":
-            model_state = {k: v for k, v in state_dict.items() if "hook" in k}
-
-        elif mode == "finetune":
-            model_state = state_dict
-
-        else:
-            raise ValueError(f"Unknown training_mode: {mode}")
-
-        optimizer_state = None
-        if save_optimizer and self.optimizer is not None:
-            optimizer_state = self.optimizer.state_dict()
-
-        lr_scheduler_state = None
-        if save_optimizer and self.lr_scheduler is not None:
-            lr_scheduler_state = self.lr_scheduler.state_dict()
-
-        checkpoint = {
-            "model": model_state,
-            "optimizer": optimizer_state,
-            "lr_scheduler": lr_scheduler_state,
-            "epoch": getattr(self, "epoch", 0),
-            "global_step": getattr(self, "global_step", 0),
-            "training_mode": mode,
-            "mixed_precision": self.config.mixed_precision,
-            "extra_config": getattr(self.config, "extra_config", {}),
-            "best_val_metric": getattr(self, "best_val_metric", None),
-        }
-
-        torch.save(checkpoint, save_path)
-        print(
-            f"Saved checkpoint to {save_path} "
-            f"(mode={mode}, step={checkpoint['global_step']})"
-        )
 
     def load_checkpoint(
         self,
@@ -1568,11 +1563,9 @@ class DiffusionModelTrainer:
         return resumed
 
     def auto_save_best(self, val_metric: float, higher_is_better: bool = False):
-        if not self.accelerator.is_main_process:
-            return
-
         if val_metric is None:
-            print(f"Validation metric is None, skipping best model save.")
+            if self.accelerator.is_main_process:
+                print(f"Validation metric is None, skipping best model save.")
             return
 
         is_best = False
@@ -1583,21 +1576,22 @@ class DiffusionModelTrainer:
                 is_best = val_metric > self.best_val_metric
             else:
                 is_best = val_metric < self.best_val_metric
-
+        
         if is_best:
             self.best_val_metric = val_metric
             save_path = os.path.join(self.config.output_dir, "best.pt")
+
             self.save_checkpoint(save_path, save_optimizer=False)
-            print(f"New best model saved at {save_path} (metric={val_metric:.4f})")
+            
+            if self.accelerator.is_main_process:
+                print(f"New best model saved at {save_path} (metric={val_metric:.4f})")
         else:
-            print(
-                f"Validation metric {val_metric:.4f} not improved (best={self.best_val_metric:.4f})"
-            )
+            if self.accelerator.is_main_process:
+                print(
+                    f"Validation metric {val_metric:.4f} not improved (best={self.best_val_metric:.4f})"
+                )
 
     def maybe_save_periodically(self):
-        if not self.accelerator.is_main_process:
-            return
-
         save_path = os.path.join(
             self.config.output_dir, f"checkpoint_step_{self.global_step:06d}.pt"
         )

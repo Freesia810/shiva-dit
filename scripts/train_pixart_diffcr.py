@@ -20,13 +20,13 @@ trainer_config = {
     "model_type": "pixart-sigma",  # "pixart-sigma", "flux-dev"
     "model_path": None,
     "output_dir": "./checkpoints/",
-    "training_mode": "hook_only",  # "hook_only" "finetune" "auto-finetune" "lora" "auto-lora"
-    "hook_warmup_steps": 3060,
+    "training_mode": "lora",  # "hook_only" "finetune" "auto-finetune" "lora" "auto-lora"
+    "hook_warmup_steps": 0,
     "hook_only_steps": 0,
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
     "caption_dropout_rate": 0.25,
-    "num_epochs": 100,
+    "num_epochs": 1000,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16,
     "learning_rate": 1e-4,
@@ -52,7 +52,7 @@ trainer_config = {
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
     "extra_config": {
-        "ratio_loss_weight": 0.3,
+        "ratio_loss_weight": 0,
         "target_ratio": 0.8,
     },
 }
