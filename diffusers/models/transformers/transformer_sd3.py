@@ -316,6 +316,8 @@ class SD3Transformer2DModel(
         joint_attention_kwargs: Optional[Dict[str, Any]] = None,
         return_dict: bool = True,
         skip_layers: Optional[List[int]] = None,
+        output_hidden_states: bool = False,
+        output_hidden_states_step: int = None,
     ) -> Union[torch.Tensor, Transformer2DModelOutput]:
         """
         The [`SD3Transformer2DModel`] forward method.
@@ -371,6 +373,9 @@ class SD3Transformer2DModel(
             ip_hidden_states, ip_temb = self.image_proj(ip_adapter_image_embeds, timestep)
 
             joint_attention_kwargs.update(ip_hidden_states=ip_hidden_states, temb=ip_temb)
+        
+        if output_hidden_states:
+            all_hidden_states = ()
 
         for index_block, block in enumerate(self.transformer_blocks):
             # Skip specified layers
@@ -396,6 +401,9 @@ class SD3Transformer2DModel(
             if block_controlnet_hidden_states is not None and block.context_pre_only is False:
                 interval_control = len(self.transformer_blocks) / len(block_controlnet_hidden_states)
                 hidden_states = hidden_states + block_controlnet_hidden_states[int(index_block / interval_control)]
+            
+            if output_hidden_states and (index_block + len(self.transformer_blocks)) % output_hidden_states_step == 0:
+                all_hidden_states = all_hidden_states + (hidden_states, ) if output_hidden_states else all_hidden_states
 
         hidden_states = self.norm_out(hidden_states, temb)
         hidden_states = self.proj_out(hidden_states)
@@ -418,6 +426,8 @@ class SD3Transformer2DModel(
             unscale_lora_layers(self, lora_scale)
 
         if not return_dict:
+            if output_hidden_states:
+                return (output, all_hidden_states)
             return (output,)
 
         return Transformer2DModelOutput(sample=output)
