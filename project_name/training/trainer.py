@@ -822,7 +822,7 @@ class DiffusionModelTrainer:
 
         main_loss = F.mse_loss(
             noise_pred.float(), noise_target.float(), reduction="mean"
-        )
+        ) * self.config.main_loss_weight
 
         if self.hook_type == 'dydit':
             hook_loss = calculate_flops_loss(
@@ -830,16 +830,17 @@ class DiffusionModelTrainer:
             )
         elif self.hook_type == 'diffcr':
             hook_loss = calculate_ratio_loss(self.config.extra_config, device=self.device)
-
+        else:
+            raise NotImplementedError(f"hook_type {self.hook_type} not implemented")
+        
         current_hook_loss_weight = self.config.hook_loss_weight
-        if global_step < self.config.hook_warmup_steps:
-            current_hook_loss_weight = 0.0
+        if self.config.hook_warmup_steps > 0:
+            scaled_hook_warmup_steps = max(1, self.config.hook_warmup_steps // self.accelerator.num_processes)
+            if global_step < scaled_hook_warmup_steps:
+                current_hook_loss_weight = 0.0
+        hook_loss = hook_loss * current_hook_loss_weight
 
-        total_loss = (
-            self.config.main_loss_weight * main_loss
-            + current_hook_loss_weight * hook_loss
-            + distill_loss
-        )
+        total_loss = main_loss + hook_loss + distill_loss
 
         return total_loss, main_loss, hook_loss, distill_loss
 
@@ -1054,48 +1055,75 @@ class DiffusionModelTrainer:
         print("Starting training...")
         global_context.update(encoder_flag=True)
 
+        self.global_step = 0
+        self.epoch = 0
+        self.best_val_metric = None
+        resumed = False
         if hasattr(self, "resume_if_available"):
             resumed = self.resume_if_available()
-            if resumed:
-                print(
-                    f"Resumed training from step={self.global_step}, epoch={self.epoch}"
-                )
-            else:
-                self.global_step = 0
-                self.epoch = 0
-                self.best_val_metric = None
-        else:
-            self.global_step = 0
-            self.epoch = 0
-            self.best_val_metric = None
+        if resumed:
+            state_data = [
+                float(self.global_step),
+                float(self.epoch),
+                float(self.best_val_metric if self.best_val_metric is not None else -1.0)
+            ]
+            state_tensor = torch.tensor(state_data, dtype=torch.float64, device=self.device)
+            torch.distributed.broadcast(state_tensor, src=0)
+            state_list = state_tensor.tolist()
+            self.global_step = int(state_list[0])
+            self.epoch = int(state_list[1])
+            self.best_val_metric = float(state_list[2]) if state_list[2] != -1.0 else None
+        
+        if resumed and self.accelerator.is_main_process:
+            print(f"Resumed training from step={self.global_step}, epoch={self.epoch}")
 
         if self.config.training_mode == "auto-lora" and self.config.hook_only_steps > 0:
-            print("Training in 'auto-lora' mode with hook_only_steps > 0.")
-            print(
-                f"  Freezing LoRA parameters for the first {self.config.hook_only_steps} steps..."
-            )
-            frozen_params = 0
-            unwrapped_model = self.accelerator.unwrap_model(self.model)
-            for name, param in unwrapped_model.named_parameters():
-                if "lora_" in name:
-                    param.requires_grad_(False)
-                    frozen_params += param.numel()
-            print(f"  Froze {frozen_params} LoRA parameters.")
+            scaled_hook_only_steps = max(1, self.config.hook_only_steps // self.accelerator.num_processes)
+
+            if self.accelerator.is_main_process:
+                print("Training in 'auto-lora' mode with hook_only_steps > 0.")
+                print(f"  Config hook_only_steps: {self.config.hook_only_steps} (equivalent single-GPU steps)")
+                print(f"  Scaled hook_only_steps: {scaled_hook_only_steps} (actual optimizer steps with {self.accelerator.num_processes} GPUs)")
+
+            if self.global_step < scaled_hook_only_steps:
+                if self.accelerator.is_main_process:
+                    print(f"  Resumed step ({self.global_step}) is less than scaled_hook_only_steps ({scaled_hook_only_steps}). Freezing LoRA parameters.")
+                frozen_params = 0
+                unwrapped_model = self.accelerator.unwrap_model(self.model)
+                for name, param in unwrapped_model.named_parameters():
+                    if 'lora_' in name:
+                        param.requires_grad_(False)
+                        frozen_params += param.numel()
+                if self.accelerator.is_main_process:
+                    print(f"  Froze {frozen_params} LoRA parameters.")
+            else:
+                 if self.accelerator.is_main_process:
+                    print(f"  Resumed step ({self.global_step}) has passed scaled_hook_only_steps ({scaled_hook_only_steps}). LoRA parameters are trainable.")
         elif (
             self.config.training_mode == "auto-finetune"
             and self.config.hook_only_steps == 0
         ):
-            print("Training in 'auto-finetune' mode with hook_only_steps == 0.")
-            print(
-                f"  Training all parameters for the first {self.config.hook_only_steps} steps..."
-            )
-            frozen_params = 0
-            unwrapped_model = self.accelerator.unwrap_model(self.model)
-            for name, param in unwrapped_model.named_parameters():
-                if "hook" not in name:
-                    param.requires_grad_(False)
-                    frozen_params += param.numel()
-            print(f"  Froze {frozen_params} parameters.")
+            scaled_hook_only_steps = max(1, self.config.hook_only_steps // self.accelerator.num_processes)
+
+            if self.accelerator.is_main_process:
+                print("Training in 'auto-finetune' mode with hook_only_steps > 0.")
+                print(f"  Config hook_only_steps: {self.config.hook_only_steps} (equivalent single-GPU steps)")
+                print(f"  Scaled hook_only_steps: {scaled_hook_only_steps} (actual optimizer steps with {self.accelerator.num_processes} GPUs)")
+
+            if self.global_step < scaled_hook_only_steps:
+                if self.accelerator.is_main_process:
+                    print(f"  Resumed step ({self.global_step}) is less than scaled_hook_only_steps ({scaled_hook_only_steps}). Freezing LoRA parameters.")
+                frozen_params = 0
+                unwrapped_model = self.accelerator.unwrap_model(self.model)
+                for name, param in unwrapped_model.named_parameters():
+                    if "hook" not in name:
+                        param.requires_grad_(False)
+                        frozen_params += param.numel()
+                if self.accelerator.is_main_process:
+                    print(f"  Froze {frozen_params} parameters.")
+            else:
+                 if self.accelerator.is_main_process:
+                    print(f"  Resumed step ({self.global_step}) has passed scaled_hook_only_steps ({scaled_hook_only_steps}). Finetune parameters are trainable.")
 
         prev_lora_state = None
         prev_finetune_state = None
@@ -1136,19 +1164,29 @@ class DiffusionModelTrainer:
                     self.lr_scheduler.step()
                     self.global_step += 1
 
-                    if (
-                        self.config.training_mode == "auto-lora"
-                        and self.global_step == self.config.hook_only_steps
-                    ):
-                        print(
-                            f"\n[Step {self.global_step}]: Hook-only phase complete. Unfreezing LoRA parameters..."
-                        )
-                        unfrozen = 0
-                        for name, param in self.model.named_parameters():
-                            if "lora_" in name:
-                                param.requires_grad_(True)
-                                unfrozen += param.numel()
-                        print(f"  Unfroze {unfrozen} LoRA parameters.")
+                    if self.config.hook_only_steps > 0:
+                        scaled_hook_only_steps = max(1, self.config.hook_only_steps // self.accelerator.num_processes)
+                        if self.global_step == scaled_hook_only_steps:
+                            if self.config.training_mode == "auto-lora":
+                                print(
+                                    f"\n[Step {self.global_step}]: Hook-only phase complete. Unfreezing LoRA parameters..."
+                                )
+                                unfrozen = 0
+                                for name, param in self.model.named_parameters():
+                                    if "lora_" in name:
+                                        param.requires_grad_(True)
+                                        unfrozen += param.numel()
+                                print(f"  Unfroze {unfrozen} LoRA parameters.")
+                            elif self.config.training_mode == "auto-finetune":
+                                print(
+                                    f"\n[Step {self.global_step}]: Hook-only phase complete. Unfreezing finetune parameters..."
+                                )
+                                unfrozen = 0
+                                for name, param in self.model.named_parameters():
+                                    if "hook" not in name:
+                                        param.requires_grad_(True)
+                                        unfrozen += param.numel()
+                                print(f"  Unfroze {unfrozen} parameters.")
 
                     gathered_total_loss = self.accelerator.gather(total_loss).mean()
                     gathered_main_loss = self.accelerator.gather(main_loss).mean()
@@ -1391,21 +1429,18 @@ class DiffusionModelTrainer:
         else:
             raise ValueError(f"Unknown training_mode: {mode}")
 
-        unwrapped_optimizer_state = self.optimizer.state_dict()
-        unwrapped_lr_scheduler_state = self.lr_scheduler.state_dict()
+        optimizer_state = None
+        if save_optimizer and self.optimizer is not None:
+            optimizer_state = self.optimizer.state_dict()
+
+        lr_scheduler_state = None
+        if save_optimizer and self.lr_scheduler is not None:
+            lr_scheduler_state = self.lr_scheduler.state_dict()
 
         checkpoint = {
             "model": model_state,
-            "optimizer": (
-                self.optimizer.state_dict()
-                if save_optimizer and self.optimizer is not None
-                else None
-            ),
-            "lr_scheduler": (
-                self.lr_scheduler.state_dict()
-                if save_optimizer and self.lr_scheduler is not None
-                else None
-            ),
+            "optimizer": optimizer_state,
+            "lr_scheduler": lr_scheduler_state,
             "epoch": getattr(self, "epoch", 0),
             "global_step": getattr(self, "global_step", 0),
             "training_mode": mode,

@@ -172,6 +172,7 @@ class DiffCRDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
 def calculate_ratio_loss(config: dict, device: torch.device):
     target_ratio = config["target_ratio"]
+    ratio_loss_weight = config["ratio_loss_weight"]
     ratios = []
     custom_losses = []
     for hook in HookManager.get_all_hooks().values():
@@ -184,7 +185,7 @@ def calculate_ratio_loss(config: dict, device: torch.device):
         custom_losses.append(diffcr_loss)
 
     if custom_losses:
-        return torch.stack(custom_losses).mean()
+        return torch.stack(custom_losses).mean() * ratio_loss_weight
     else:
         return torch.tensor(0.0, device)
 

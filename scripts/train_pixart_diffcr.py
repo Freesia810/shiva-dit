@@ -20,8 +20,8 @@ trainer_config = {
     "model_type": "pixart-sigma",  # "pixart-sigma", "flux-dev"
     "model_path": None,
     "output_dir": "./checkpoints/",
-    "training_mode": "lora",  # "hook_only" "finetune" "auto-finetune" "lora" "auto-lora"
-    "hook_warmup_steps": 0,
+    "training_mode": "hook_only",  # "hook_only" "finetune" "auto-finetune" "lora" "auto-lora"
+    "hook_warmup_steps": 3060,
     "hook_only_steps": 0,
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
@@ -35,7 +35,7 @@ trainer_config = {
     "lr_scheduler": "cosine", # "linear", "cosine", "constant"
     "num_warmup_steps": 0,
     "main_loss_weight": 1.0,
-    "hook_loss_weight": 0.3,
+    "hook_loss_weight": 1.0,
     "seed": 42,
     "logging_steps": 5,
     "save_steps": 612,
@@ -48,10 +48,11 @@ trainer_config = {
     "inference_steps": 612,
     "inference_metadata_file": "../dataset/MJHQ-5K/test_meta.jsonl",
     "inference_seed": 42,
-    "inference_num_inference_steps": 50,
+    "inference_num_inference_steps": 20,
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
     "extra_config": {
+        "ratio_loss_weight": 0.3,
         "target_ratio": 0.8,
     },
 }
