@@ -122,6 +122,7 @@ class DiffusionModelTrainer:
         self.vae.eval()
         for text_encoder in self.text_encoders:
             text_encoder.requires_grad_(False)
+            text_encoder.to(dtype=torch.float32)
             text_encoder.eval()
 
         # inject
