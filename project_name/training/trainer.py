@@ -122,14 +122,16 @@ class DiffusionModelTrainer:
         self.vae.eval()
         for text_encoder in self.text_encoders:
             text_encoder.requires_grad_(False)
+            text_encoder.to(dtype=torch.float32)
             text_encoder.eval()
 
         if self.accelerator.is_main_process:
             print("model_type:", config.model_type)
             print("image_processor:", self.image_processor.__class__.__name__)
-            print("vae:", self.vae.__class__.__name__)
+            print("vae:", self.vae.__class__.__name__, "dtype:", self.vae.dtype)
             print("scheduler:", self.scheduler.__class__.__name__)
-            print("model (DiT):", self.model.__class__.__name__)
+            print("model (DiT):", self.model.__class__.__name__, "dtype:", self.model.dtype)
+            print("text_encoder:", self.text_encoders[0].__class__.__name__, "dtype:", self.text_encoders[0].dtype)
 
         # inject
         self.hook_type = None

@@ -17,7 +17,7 @@ lora_config = {
 trainer_config = {
     "metadata_file": "../dataset/MJHQ-30K/train.jsonl",
     "image_dir": "../dataset/MJHQ-30K/",
-    "model_type": "sd3",  # "pixart-sigma", "flux-dev"
+    "model_type": "pixart-sigma",  # "pixart-sigma", "flux-dev"
     "model_path": None,
     "output_dir": "./checkpoints/",
     "training_mode": "lora",  # "hook_only" "finetune" "auto-finetune" "lora" "auto-lora"
@@ -29,7 +29,7 @@ trainer_config = {
     "num_epochs": 1000,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16,
-    "learning_rate": 1e-6,
+    "learning_rate": 1e-4,
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
     "lr_scheduler": "cosine", # "linear", "cosine", "constant"
