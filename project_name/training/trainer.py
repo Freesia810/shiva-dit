@@ -15,10 +15,10 @@ from accelerate.utils import set_seed
 
 from baselines.diffcr import DiffCRDitBlockHook, calculate_ratio_loss
 from baselines.dy_dit import DynamicDiTBlockHook, calculate_flops_loss
-from diffusers.pipelines.flux.pipeline_flux_kontext import retrieve_latents
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from project_name.hook import HookManager
 from project_name.utils import get_pipeline
+from project_name.training.input_preparers import get_input_preparer
 from project_name.training.config import TrainerConfig
 from project_name.training.dataset import ImageTextDataset, collate_fn
 from project_name.utils import global_context
@@ -29,6 +29,9 @@ class DiffusionModelTrainer:
         self.config = config
         self.model_type = config.model_type
 
+        self.input_preparer_fn = get_input_preparer(self.model_type)
+
+        ## Initialize accelerator, device, seed and generator
         self.accelerator = Accelerator(
             mixed_precision=config.mixed_precision,
             gradient_accumulation_steps=config.gradient_accumulation_steps,
@@ -41,27 +44,54 @@ class DiffusionModelTrainer:
             config.seed
         )
 
-        if self.config.mixed_precision == "bf16":
+        self._setup_models_and_components()
+
+        self._setup_hooks()
+
+        self.optimizer = self._setup_model_and_optimizer()
+
+        self._setup_dataloaders()
+
+        num_update_steps_per_epoch = max(
+            1, len(self.train_dataloader) // config.gradient_accumulation_steps
+        )
+        self.num_training_steps = num_update_steps_per_epoch * config.num_epochs
+        self.lr_scheduler = self._setup_scheduler()
+
+        self._prepare_with_accelerator()
+
+        self.logger = self._setup_logging()
+
+        self._setup_caption_dropout_embeds()
+
+        self._print_setup_summary()
+
+    @staticmethod
+    def _get_dtype(self, mixed_precision: str):
+        if mixed_precision == "bf16":
             dtype = torch.bfloat16
-        elif self.config.mixed_precision == "fp16":
+        elif mixed_precision == "fp16":
             dtype = torch.float16
         else:
             dtype = torch.float32
+        return dtype
 
+    def _setup_models_and_components(self):
+        config = self.config
+        # get pipeline and components
         self.pipe, self.model_attrs = get_pipeline(
             self.model_type,
             model_path=config.model_path,
-            dtype=dtype,
+            dtype=DiffusionModelTrainer._get_dtype(self, config.mixed_precision),
         )
 
-        # we only to get the ref of this modules, no need to move them to device again
         self.image_processor = self.pipe.image_processor
         self.vae = self.pipe.vae
         self.scheduler = self.pipe.scheduler
         self.model = tuple(
             getattr(self.pipe, model) for model in self.model_attrs
         )  # DiT
-        # TODO: support dual DiT like Wan
+        assert len(self.model) == 1, "Currently only single DiT model is supported."
         self.model = self.model[0]
 
         # distillation setup
@@ -73,26 +103,23 @@ class DiffusionModelTrainer:
             teacher_pipe, teacher_attrs = get_pipeline(
                 self.model_type,
                 model_path=config.model_path,
-                dtype=dtype,
+                dtype=DiffusionModelTrainer._get_dtype(self, config.mixed_precision),
             )
-            self.teacher_model = getattr(teacher_pipe, teacher_attrs[0]) # TODO: support dual DiT like Wan
+            self.teacher_model = getattr(teacher_pipe, teacher_attrs[0])
+            assert len(teacher_attrs) == 1, "Currently only single DiT model is supported."
             self.teacher_model.requires_grad_(False)
             self.teacher_model.eval()
             self.teacher_model = self.teacher_model.to(self.device)
-            del teacher_pipe
+            del teacher_pipe # only need DiT model
             if self.accelerator.is_main_process:
                 print("Teacher model loaded.")
 
-        if self.model_type == "flux-dev" or self.model_type == "flux-kontext":
+        # get tokenizers and text encoders
+        if self.model_type in ["flux-dev", "flux-kontext"]:
             self.tokenizers = (self.pipe.tokenizer, self.pipe.tokenizer_2)
             self.text_encoders = (self.pipe.text_encoder, self.pipe.text_encoder_2)
             self.text_encoder_names = ("text_encoder", "text_encoder_2")
-        elif (
-            self.model_type == "pixart-sigma"
-            or self.model_type == "qwen-image"
-            or self.model_type == "qwen-image-edit"
-            or self.model_type == "wan"
-        ):
+        elif self.model_type in ["pixart-sigma", "qwen-image", "qwen-image-edit", "wan"]:
             self.tokenizers = (self.pipe.tokenizer,)
             self.text_encoders = (self.pipe.text_encoder,)
             self.text_encoder_names = ("text_encoder",)
@@ -118,22 +145,26 @@ class DiffusionModelTrainer:
         if self.image_processor is None or self.vae is None or self.model is None:
             raise ValueError("NoneType found in image_processor, vae or model.")
 
+        # freeze vae and text encoder(s)
         self.vae.requires_grad_(False)
         self.vae.eval()
         for text_encoder in self.text_encoders:
             text_encoder.requires_grad_(False)
-            text_encoder.to(dtype=torch.float32)
+            text_encoder.to(dtype=torch.float32) # keep text encoder in fp32 for stability
             text_encoder.eval()
 
-        # inject
+    def _setup_hooks(self):
+        config = self.config
         self.hook_type = None
         if config.trainable_hook_config:
             hook_class, hook_kwargs = config.trainable_hook_config
 
             if hook_class == DynamicDiTBlockHook:
-                self.hook_type = 'dydit'
+                self.hook_type = "dydit"
             elif hook_class == DiffCRDitBlockHook:
-                self.hook_type = 'diffcr'
+                self.hook_type = "diffcr"
+            else:
+                raise ValueError(f"Unknown hook class: {hook_class.__name__}")
 
             HookManager.configure_hooks(
                 model_type=config.model_type,
@@ -146,8 +177,8 @@ class DiffusionModelTrainer:
                 model_attrs=self.model_attrs,
             )
 
-        self.optimizer = self._setup_model_and_optimizer()
-
+    def _setup_dataloaders(self):
+        config = self.config
         self.train_dataset = ImageTextDataset(
             model_type=self.model_type,
             metadata_file=config.metadata_file,
@@ -163,15 +194,8 @@ class DiffusionModelTrainer:
             collate_fn=collate_fn,
         )
 
-        num_update_steps_per_epoch = max(
-            1, len(self.train_dataloader) // config.gradient_accumulation_steps
-        )
-        self.num_training_steps = num_update_steps_per_epoch * config.num_epochs
-        self.lr_scheduler = self._setup_scheduler()
-
         self.val_dataloader = None
         if config.val_metadata_file and config.val_image_dir:
-            print("Setting up validation dataloader...")
             try:
                 val_dataset = ImageTextDataset(
                     model_type=self.model_type,
@@ -192,18 +216,14 @@ class DiffusionModelTrainer:
                     shuffle=False,
                     collate_fn=collate_fn,
                 )
-                print(f"  Validation dataset size: {len(val_dataset)}")
             except Exception as e:
                 print(
                     f"Warning: Failed to load validation dataset. Validation will be skipped. Error: {e}"
                 )
                 self.val_dataloader = None
-        else:
-            print(
-                "Validation data not provided (val_metadata_file or val_image_dir is None), skipping validation setup."
-            )
 
-        # ===== prepare accelerator =====
+    def _prepare_with_accelerator(self):
+        config = self.config
         prepare_list = [
             self.model,
             self.optimizer,
@@ -226,9 +246,8 @@ class DiffusionModelTrainer:
         if self.val_dataloader is not None:
             self.val_dataloader = self.accelerator.prepare(self.val_dataloader)
 
-        # ==========================================================
         unwrapped_model = self.accelerator.unwrap_model(self.model)
-        self.dtype = unwrapped_model.dtype
+        self.dtype = unwrapped_model.dtype # final model dtype after accelerator prepare
 
         if self.accelerator.is_main_process:
             print("model_type:", config.model_type)
@@ -238,77 +257,49 @@ class DiffusionModelTrainer:
             print("text_encoder:", self.text_encoders[0].__class__.__name__, "dtype:", self.text_encoders[0].dtype)
             print("model (DiT):", self.model.__class__.__name__, "dtype:", self.dtype)
 
-        if self.config.caption_dropout_rate > 0:
-            print(
-                f"Caption dropout enabled with rate: {self.config.caption_dropout_rate}"
+    def _setup_logging(self):
+        if not self.accelerator.is_main_process:
+            return NoOpLogger()
+        config = self.config
+        try:
+            from project_name.training.logging import (
+                TensorBoardLogger, WandbLogger, NoOpLogger, LoggerCollection
             )
-            if self.model_type == "pixart-sigma":
-                self.empty_prompt_embeds, self.empty_prompt_attention_mask, _, _ = (
-                    self.pipe.encode_prompt(
-                        "",
-                        do_classifier_free_guidance=False,
-                        device=self.device,
-                        clean_caption=True,
+        except ImportError as e:
+            print(f"Not able to import logging modules: {e}. Logging will be disabled.")
+            return NoOpLogger()
+
+        loggers = []
+
+        if config.log_with_tensorboard:
+            try:
+                tb_log_path = os.path.join(config.output_dir, config.tensorboard_log_dir)
+                loggers.append(TensorBoardLogger(log_dir=tb_log_path))
+            except ImportError:
+                print("Warning: Unable to import TensorBoard, skipping TensorBoard logging.")
+
+        if getattr(config, "log_with_wandb", False):
+            try:
+                loggers.append(
+                    WandbLogger(
+                        project=getattr(config, "wandb_project", "diffusion_trainer"),
+                        name=getattr(
+                            config,
+                            "wandb_run_name",
+                            os.path.basename(config.output_dir),
+                        ),
+                        config_dict=config.to_dict(),
+                        entity=getattr(config, "wandb_entity", None),
                     )
                 )
-                self.empty_prompt_embeds = self.empty_prompt_embeds.to(self.dtype)
-                self.empty_prompt_attention_mask = self.empty_prompt_attention_mask.to(self.dtype)
-            elif self.model_type == "flux-dev" or self.model_type == "flux-kontext":
-                (
-                    self.empty_prompt_embeds,
-                    self.empty_pooled_prompt_embeds,
-                    self.empty_text_ids,
-                ) = self.pipe.encode_prompt(
-                    prompt="",
-                    device=self.device,
-                    num_images_per_prompt=1,
-                )
-                self.empty_prompt_embeds = self.empty_prompt_embeds.to(self.dtype)
-                self.empty_pooled_prompt_embeds = self.empty_pooled_prompt_embeds.to(self.dtype)
-                self.empty_text_ids = self.empty_text_ids.to(self.dtype)
-            elif self.model_type == "sd3":
-                (
-                    self.empty_prompt_embeds,
-                    _,
-                    self.empty_pooled_prompt_embeds,
-                    _,
-                ) = self.pipe.encode_prompt(
-                    prompt="",
-                    prompt_2=None,
-                    prompt_3=None,
-                    device=self.device,
-                    do_classifier_free_guidance=False,
-                    num_images_per_prompt=1,
-                )
-                self.empty_prompt_embeds = self.empty_prompt_embeds.to(self.dtype)
-                self.empty_pooled_prompt_embeds = self.empty_pooled_prompt_embeds.to(self.dtype)
-            else:
-                raise NotImplementedError(
-                    "Caption dropout is only implemented for 'pixart-sigma' model_type currently."
-                )
+            except ImportError:
+                print("Warning: Unable to import wandb, skipping Wandb logging.")
 
-        self.writer = None
-        self.pil_to_tensor_transform = None
-        if self.accelerator.is_main_process and config.log_with_tensorboard:
-            from torch.utils.tensorboard import SummaryWriter
-            import torchvision.transforms as T
+        if not loggers:
+            print("No logging backends available, logging will be disabled.")
+            return NoOpLogger()
 
-            tb_log_path = os.path.join(config.output_dir, config.tensorboard_log_dir)
-            os.makedirs(tb_log_path, exist_ok=True)
-            self.writer = SummaryWriter(log_dir=tb_log_path)
-            self.pil_to_tensor_transform = T.ToTensor()
-            print(f"TensorBoard logging enabled. Logs will be saved to: {tb_log_path}")
-
-        if self.accelerator.is_main_process:
-            print(f"--- Training Config ---")
-            print(f"  Mode: {config.training_mode}")
-            print(f"  Micro Batch Size: {config.train_batch_size}")
-            print(f"  Grad Acc Step: {config.gradient_accumulation_steps}")
-            print(
-                f"  Actual Batch Size: {config.train_batch_size * config.gradient_accumulation_steps}"
-            )
-            print(f"  Total training steps: {self.num_training_steps}")
-            print(f"------------------")
+        return LoggerCollection(loggers)
 
     def _setup_model_and_optimizer(self):
         # freeze VAE and Text Encoder(s)
@@ -338,10 +329,7 @@ class DiffusionModelTrainer:
                 if isinstance(hook, nn.Module):
                     hook.requires_grad_(True)
                     params_to_train.extend(hook.parameters())
-        elif (
-            self.config.training_mode == "lora"
-            or self.config.training_mode == "auto-lora"
-        ):
+        elif self.config.training_mode == "lora":
             print("Training mode: lora (applying LoRA to DiT model)")
             if not self.config.lora_config.enable:
                 raise ValueError(
@@ -369,8 +357,9 @@ class DiffusionModelTrainer:
             params_to_train = [p for p in self.model.parameters() if p.requires_grad]
         else:
             raise ValueError(f"Unknown training mode: {self.config.training_mode}")
-        
+
         if self.config.hook_warmup_steps > 0:
+            # enable hook warm up, we need to froze all ratio
             for hook in HookManager.get_all_hooks().values():
                 if isinstance(hook, DiffCRDitBlockHook):
                     if hasattr(hook, "diff_ratio"):
@@ -402,360 +391,80 @@ class DiffusionModelTrainer:
         )
         return scheduler
 
-    def _prepare_model_inputs(self, batch):
-        batch_size = batch["pixel_values"].shape[0]
-        model_kwargs = {}
-
-        # vae encode
-        pixel_values = batch["pixel_values"].to(dtype=self.vae.dtype)
-        if self.model_type == "flux-dev" or self.model_type == "flux-kontext":
-            img_latents = retrieve_latents(
-                self.vae.encode(pixel_values),
-                generator=self.generator,
-                sample_mode="argmax",
-            )
-            img_latents = (
-                img_latents - self.vae.config.shift_factor
-            ) * self.vae.config.scaling_factor
-
-            height, width = img_latents.shape[2], img_latents.shape[3]
-
-            img_ids = self.pipe._prepare_latent_image_ids(
-                batch_size, height // 2, width // 2, self.device, self.dtype
-            )
-            model_kwargs["img_ids"] = img_ids
-        elif self.model_type == "sd3":
-            img_latents = retrieve_latents(
-                self.vae.encode(pixel_values),
-                generator=self.generator,
-                sample_mode="argmax",
-            )
-            img_latents = (
-                img_latents - self.vae.config.shift_factor
-            ) * self.vae.config.scaling_factor
-
-        elif self.model_type == "pixart-sigma":
-            img_latents = retrieve_latents(
-                self.vae.encode(pixel_values),
-                generator=self.generator,
-                sample_mode="argmax",
-            )
-            img_latents = img_latents * self.vae.config.scaling_factor
-        elif self.model_type == "qwen-image":
-            img_latents = retrieve_latents(
-                self.vae.encode(pixel_values),
-                generator=self.generator,
-                sample_mode="argmax",
-            )
-            latents_mean = (
-                torch.tensor(self.vae.config.latents_mean)
-                .view(1, self.pipe.latent_channels, 1, 1, 1)
-                .to(img_latents.device, img_latents.dtype)
-            )
-            latents_std = (
-                torch.tensor(self.vae.config.latents_std)
-                .view(1, self.pipe.latent_channels, 1, 1, 1)
-                .to(img_latents.device, img_latents.dtype)
-            )
-            img_latents = (img_latents - latents_mean) / latents_std
-            height = self.pipe.default_sample_size * self.pipe.vae_scale_factor
-            width = self.pipe.default_sample_size * self.pipe.vae_scale_factor
-
-            img_shapes = [
-                [
-                    (
-                        1,
-                        height // self.pipe.vae_scale_factor // 2,
-                        width // self.pipe.vae_scale_factor // 2,
+    def _setup_caption_dropout_embeds(self):
+        if self.config.caption_dropout_rate > 0:
+            if self.accelerator.is_main_process:
+                print(
+                    f"Caption dropout enabled with rate: {self.config.caption_dropout_rate}"
+                )
+            if self.model_type == "pixart-sigma":
+                self.empty_prompt_embeds, self.empty_prompt_attention_mask, _, _ = (
+                    self.pipe.encode_prompt(
+                        "",
+                        do_classifier_free_guidance=False,
+                        device=self.device,
+                        clean_caption=True,
                     )
-                ]
-            ] * batch_size
-
-            model_kwargs["img_shapes"] = img_shapes
-        else:
-            raise NotImplementedError(
-                f"_prepare_model_inputs not implemented for model_type: {self.model_type}"
-            )
-
-        # text encode
-        input_ids_tuple = batch["input_ids"]
-        if self.model_type == "flux-dev" or self.model_type == "flux-kontext":
-            model_kwargs["return_dict"] = False
-            model_kwargs["joint_attention_kwargs"] = {}
-
-            num_images_per_prompt = 1
-            guidance_scale = 3.5
-            # clip -> pooled_prompt_embeds
-            input_ids_clip = input_ids_tuple[0]
-            pooled_prompt_embeds = self.text_encoders[0](
-                input_ids_clip, output_hidden_states=False
-            )
-            pooled_prompt_embeds = pooled_prompt_embeds.pooler_output
-            pooled_prompt_embeds = pooled_prompt_embeds.to(
-                dtype=self.dtype, device=self.device
-            )
-            pooled_prompt_embeds = pooled_prompt_embeds.repeat(1, num_images_per_prompt)
-            pooled_prompt_embeds = pooled_prompt_embeds.view(
-                batch_size * num_images_per_prompt, -1
-            )
-
-            # t5 -> prompt_embeds
-            input_ids_t5 = input_ids_tuple[1]
-            prompt_embeds = self.text_encoders[1](
-                input_ids_t5, output_hidden_states=False
-            )[0]
-            prompt_embeds = prompt_embeds.to(dtype=self.dtype, device=self.device)
-            _, seq_len, _ = prompt_embeds.shape
-            prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-            prompt_embeds = prompt_embeds.view(
-                batch_size * num_images_per_prompt, seq_len, -1
-            )
-
-            text_ids = torch.zeros(prompt_embeds.shape[1], 3).to(
-                dtype=self.dtype, device=self.device
-            )
-
-            model_kwargs["encoder_hidden_states"] = prompt_embeds
-            model_kwargs["pooled_projections"] = pooled_prompt_embeds
-            model_kwargs["txt_ids"] = text_ids
-
-            if torch.rand(1).item() < self.config.caption_dropout_rate:
-                prompt_embeds = self.empty_prompt_embeds
-                pooled_prompt_embeds = self.empty_pooled_prompt_embeds
-                text_ids = self.empty_text_ids
-
-                model_kwargs["encoder_hidden_states"] = prompt_embeds
-                model_kwargs["pooled_projections"] = pooled_prompt_embeds
-                model_kwargs["txt_ids"] = text_ids
-
-            # add noise
-            noise = torch.randn_like(img_latents)
-            indices = torch.randint(
-                0,
-                self.scheduler.config.num_train_timesteps,
-                (batch_size,),
-                device=self.device,
-            )
-            schedule_timesteps_gpu = self.scheduler.timesteps.to(self.device)
-            timesteps = schedule_timesteps_gpu[indices]
-            noisy_latents = self.scheduler.scale_noise(
-                sample=img_latents,
-                timestep=timesteps,
-                noise=noise,
-            )
-
-            guidance = torch.full(
-                [1], guidance_scale, device=self.device, dtype=torch.float32
-            )
-            guidance = guidance.expand(batch_size)
-            model_kwargs["guidance"] = guidance
-        elif self.model_type == "pixart-sigma":
-            model_kwargs["return_dict"] = False
-            added_cond_kwargs = {"resolution": None, "aspect_ratio": None}
-            model_kwargs["added_cond_kwargs"] = added_cond_kwargs
-            num_images_per_prompt = 1
-
-            input_ids = input_ids_tuple[0]
-            prompt_attention_mask = batch["attention_mask"][0]
-            prompt_embeds = self.text_encoders[0](
-                input_ids, attention_mask=prompt_attention_mask
-            )[0].to(dtype=self.dtype, device=self.device)
-
-            bs_embed, seq_len, _ = prompt_embeds.shape
-            prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-            prompt_embeds = prompt_embeds.view(
-                bs_embed * num_images_per_prompt, seq_len, -1
-            )
-            prompt_attention_mask = prompt_attention_mask.repeat(
-                1, num_images_per_prompt
-            )
-            prompt_attention_mask = prompt_attention_mask.view(
-                bs_embed * num_images_per_prompt, -1
-            )
-
-            if torch.rand(1).item() < self.config.caption_dropout_rate:
-                prompt_embeds = self.empty_prompt_embeds
-                prompt_attention_mask = self.empty_prompt_attention_mask
-
-            model_kwargs["encoder_hidden_states"] = prompt_embeds
-            model_kwargs["encoder_attention_mask"] = prompt_attention_mask
-
-            # add noise
-            noise = torch.randn_like(img_latents)
-            indices = torch.randint(
-                0,
-                self.scheduler.config.num_train_timesteps,
-                (batch_size,),
-                device=self.device,
-            )
-            schedule_timesteps_gpu = self.scheduler.timesteps.to(self.device)
-            timesteps = schedule_timesteps_gpu[indices]
-            noisy_latents = self.scheduler.add_noise(
-                original_samples=img_latents,
-                timesteps=timesteps,
-                noise=noise,
-            )
-
-        elif self.model_type == "sd3":
-            model_kwargs["return_dict"] = False
-            model_kwargs["joint_attention_kwargs"] = {}
-            num_images_per_prompt = 1
-
-            def _clip_encode(text_encoder, text_input_ids, clip_skip=None):
-                prompt_embeds = text_encoder(text_input_ids, output_hidden_states=True)
-                pooled_prompt_embeds = prompt_embeds[0]
-
-                if clip_skip is None:
-                    prompt_embeds = prompt_embeds.hidden_states[-2]
-                else:
-                    prompt_embeds = prompt_embeds.hidden_states[-(clip_skip + 2)]
-
-                prompt_embeds = prompt_embeds.to(dtype=self.dtype, device=self.device)
-
-                _, seq_len, _ = prompt_embeds.shape
-                # duplicate text embeddings for each generation per prompt, using mps friendly method
-                prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-                prompt_embeds = prompt_embeds.view(
-                    batch_size * num_images_per_prompt, seq_len, -1
+                )
+                self.empty_prompt_embeds = self.empty_prompt_embeds.to(self.dtype)
+                self.empty_prompt_attention_mask = self.empty_prompt_attention_mask.to(
+                    self.dtype
+                )
+            elif self.model_type in ["flux-dev", "flux-kontext"]:
+                (
+                    self.empty_prompt_embeds,
+                    self.empty_pooled_prompt_embeds,
+                    self.empty_text_ids,
+                ) = self.pipe.encode_prompt(
+                    prompt="",
+                    device=self.device,
+                    num_images_per_prompt=1,
+                )
+                self.empty_prompt_embeds = self.empty_prompt_embeds.to(self.dtype)
+                self.empty_pooled_prompt_embeds = self.empty_pooled_prompt_embeds.to(
+                    self.dtype
+                )
+                self.empty_text_ids = self.empty_text_ids.to(self.dtype)
+            elif self.model_type == "sd3":
+                (
+                    self.empty_prompt_embeds,
+                    _,
+                    self.empty_pooled_prompt_embeds,
+                    _,
+                ) = self.pipe.encode_prompt(
+                    prompt="",
+                    prompt_2=None,
+                    prompt_3=None,
+                    device=self.device,
+                    do_classifier_free_guidance=False,
+                    num_images_per_prompt=1,
+                )
+                self.empty_prompt_embeds = self.empty_prompt_embeds.to(self.dtype)
+                self.empty_pooled_prompt_embeds = self.empty_pooled_prompt_embeds.to(
+                    self.dtype
+                )
+            else:
+                raise NotImplementedError(
+                    "Caption dropout is not implemented for model_type: " + self.model_type
                 )
 
-                pooled_prompt_embeds = pooled_prompt_embeds.repeat(
-                    1, num_images_per_prompt, 1
-                )
-                pooled_prompt_embeds = pooled_prompt_embeds.view(
-                    batch_size * num_images_per_prompt, -1
-                )
-
-                return prompt_embeds, pooled_prompt_embeds
-
-            def _t5_encode(text_encoder, text_input_ids):
-                prompt_embeds = text_encoder(text_input_ids)[0]
-                prompt_embeds = prompt_embeds.to(dtype=self.dtype, device=self.device)
-
-                _, seq_len, _ = prompt_embeds.shape
-
-                # duplicate text embeddings and attention mask for each generation per prompt, using mps friendly method
-                prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
-                prompt_embeds = prompt_embeds.view(
-                    batch_size * num_images_per_prompt, seq_len, -1
-                )
-
-                return prompt_embeds
-
-            prompt_embed, pooled_prompt_embed = _clip_encode(
-                self.text_encoders[0], input_ids_tuple[0]
+    def _print_setup_summary(self):
+        if self.accelerator.is_main_process:
+            config = self.config
+            print(f"--- Training Config ---")
+            print(f"  Mode: {config.training_mode}")
+            print(f"  Micro Batch Size: {config.train_batch_size}")
+            print(f"  Grad Acc Step: {config.gradient_accumulation_steps}")
+            print(
+                f"  Actual Batch Size: {config.train_batch_size * config.gradient_accumulation_steps}"
             )
-            prompt_embed2, pooled_prompt_embed2 = _clip_encode(
-                self.text_encoders[1],
-                input_ids_tuple[1],
-                clip_skip=None,
-            )
-            clip_prompt_embeds = torch.cat([prompt_embed, prompt_embed2], dim=-1)
+            print(f"  Total training steps: {self.num_training_steps}")
+            print(f"------------------")
 
-            t5_prompt_embed = _t5_encode(self.text_encoders[2], input_ids_tuple[2])
-
-            clip_prompt_embeds = torch.nn.functional.pad(
-                clip_prompt_embeds,
-                (0, t5_prompt_embed.shape[-1] - clip_prompt_embeds.shape[-1]),
-            )
-
-            prompt_embeds = torch.cat([clip_prompt_embeds, t5_prompt_embed], dim=-2)
-            pooled_prompt_embeds = torch.cat(
-                [pooled_prompt_embed, pooled_prompt_embed2], dim=-1
-            )
-
-            model_kwargs["encoder_hidden_states"] = prompt_embeds
-            model_kwargs["pooled_projections"] = pooled_prompt_embeds
-
-            if torch.rand(1).item() < self.config.caption_dropout_rate:
-                prompt_embeds = self.empty_prompt_embeds
-                pooled_prompt_embeds = self.empty_pooled_prompt_embeds
-
-                model_kwargs["encoder_hidden_states"] = prompt_embeds
-                model_kwargs["pooled_projections"] = pooled_prompt_embeds
-
-            # add noise
-            noise = torch.randn_like(img_latents)
-            indices = torch.randint(
-                0,
-                self.scheduler.config.num_train_timesteps,
-                (batch_size,),
-                device=self.device,
-            )
-            schedule_timesteps_gpu = self.scheduler.timesteps.to(self.device)
-            timesteps = schedule_timesteps_gpu[indices]
-            noisy_latents = self.scheduler.scale_noise(
-                sample=img_latents,
-                timestep=timesteps,
-                noise=noise,
-            )
-        elif self.model_type == "qwen-image":
-            model_kwargs["return_dict"] = False
-            model_kwargs["attention_kwargs"] = self.pipe.attention_kwargs
-
-            def _extract_masked_hidden(hidden_states: torch.Tensor, mask: torch.Tensor):
-                bool_mask = mask.bool()
-                valid_lengths = bool_mask.sum(dim=1)
-                selected = hidden_states[bool_mask]
-                split_result = torch.split(selected, valid_lengths.tolist(), dim=0)
-
-                return split_result
-
-            attention_masks_tuple = batch["attention_mask"]
-            drop_idx = self.pipe.prompt_template_encode_start_idx
-
-            encoder_hidden_states = self.text_encoders[0](
-                input_ids=input_ids_tuple[0],
-                attention_mask=attention_masks_tuple[0],
-                output_hidden_states=True,
-            )
-            hidden_states = encoder_hidden_states.hidden_states[-1]
-            split_hidden_states = _extract_masked_hidden(
-                hidden_states, attention_masks_tuple[0]
-            )
-            split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
-            attn_mask_list = [
-                torch.ones(e.size(0), dtype=torch.long, device=e.device)
-                for e in split_hidden_states
-            ]
-            max_seq_len = max([e.size(0) for e in split_hidden_states])
-            prompt_embeds = torch.stack(
-                [
-                    torch.cat([u, u.new_zeros(max_seq_len - u.size(0), u.size(1))])
-                    for u in split_hidden_states
-                ]
-            )
-            prompt_embeds_mask = torch.stack(
-                [
-                    torch.cat([u, u.new_zeros(max_seq_len - u.size(0))])
-                    for u in attn_mask_list
-                ]
-            )
-
-            prompt_embeds = prompt_embeds.to(dtype=self.dtype, device=self.device)
-
-            model_kwargs["encoder_hidden_states"] = prompt_embeds
-            model_kwargs["encoder_hidden_states_mask"] = prompt_embeds_mask
-
-            # add noise
-            noise = torch.randn_like(img_latents)
-            indices = torch.randint(
-                0,
-                self.scheduler.config.num_train_timesteps,
-                (batch_size,),
-                device=self.device,
-            )
-            schedule_timesteps_gpu = self.scheduler.timesteps.to(self.device)
-            timesteps = schedule_timesteps_gpu[indices]
-            noisy_latents = self.scheduler.scale_noise(
-                sample=img_latents,
-                timestep=timesteps,
-                noise=noise,
-            )
-        else:
-            raise NotImplementedError(
-                f"_prepare_model_inputs not implemented for model_type: {self.model_type}"
-            )
+    def _prepare_model_inputs(self, batch):
+        img_latents, noise, noisy_latents, timesteps, model_kwargs = (
+            self.input_preparer_fn(self, batch)
+        )
 
         # update global context
         # TODO: support all attr in global_context
@@ -773,6 +482,7 @@ class DiffusionModelTrainer:
 
         if self.model_type == "flux-dev" or self.model_type == "flux-kontext":
             # pack for hidden state
+            batch_size = batch["pixel_values"].shape[0]
             height, width = noisy_latents.shape[-2:]
             num_channels_latents = self.pipe.transformer.config.in_channels // 4
             img_latents = self.pipe._pack_latents(
@@ -788,13 +498,9 @@ class DiffusionModelTrainer:
 
         return img_latents, noise, noisy_latents, timesteps, model_kwargs
 
-    def _compute_loss(self, batch, global_step: int):
-        img_latents, noise, noisy_latents, timesteps, model_kwargs = (
-            self._prepare_model_inputs(batch)
-        )
-
-        noisy_latents = noisy_latents.to(self.dtype).detach()
+    def _forward_pass_with_distillation(self, noisy_latents, timesteps, model_kwargs):
         distill_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
+
         with torch.amp.autocast(
             device_type="cuda",
             enabled=(self.config.mixed_precision != "no"),
@@ -804,23 +510,29 @@ class DiffusionModelTrainer:
                 else (torch.float16 if self.config.mixed_precision == "fp16" else None)
             ),
         ):
-            if self.teacher_model is not None and (
-                self.config.distillation_final_weight > 0 or self.config.distillation_middle_weight > 0
-            ):
+            distillation_enabled = self.teacher_model is not None and (
+                self.config.distillation_final_weight > 0
+                or self.config.distillation_middle_weight > 0
+            )
+
+            if distillation_enabled:
                 if self.config.distillation_middle_weight > 0:
                     model_kwargs["output_hidden_states"] = True
-                    model_kwargs["output_hidden_states_step"] = self.config.distillation_layer_skip
+                    model_kwargs["output_hidden_states_step"] = (
+                        self.config.distillation_layer_skip
+                    )
                 else:
                     model_kwargs["output_hidden_states"] = False
-                
+
                 teacher_kwargs = copy.deepcopy(model_kwargs)
+
                 with torch.no_grad():
                     teacher_output = self.teacher_model(
                         hidden_states=noisy_latents,
                         timestep=timesteps,
                         **teacher_kwargs,
                     )
-                    Y_s = teacher_output[0]   
+                    Y_s = teacher_output[0]
 
                 student_output = self.model(
                     hidden_states=noisy_latents,
@@ -828,7 +540,6 @@ class DiffusionModelTrainer:
                     **model_kwargs,
                 )
                 Y_d = student_output[0]
-
                 noise_pred = Y_d
 
                 loss_v = F.mse_loss(Y_d.float(), Y_s.float(), reduction="mean")
@@ -837,13 +548,17 @@ class DiffusionModelTrainer:
                 if self.config.distillation_middle_weight > 0:
                     X_s_all = teacher_output[1]
                     X_d_all = student_output[1]
-                    loss_u_total = torch.tensor(0.0, device=self.device, dtype=self.dtype)
+                    loss_u_total = torch.tensor(
+                        0.0, device=self.device, dtype=self.dtype
+                    )
                     num_layers_compared = 0
 
                     layer_indices = range(0, len(X_s_all))
 
                     for l in layer_indices:
-                        loss_u_total += F.mse_loss(X_d_all[l].float(), X_s_all[l].float(), reduction="mean")
+                        loss_u_total += F.mse_loss(
+                            X_d_all[l].float(), X_s_all[l].float(), reduction="mean"
+                        )
                         num_layers_compared += 1
 
                     if num_layers_compared > 0:
@@ -858,6 +573,9 @@ class DiffusionModelTrainer:
                     **model_kwargs,
                 )[0]
 
+        return noise_pred, distill_loss
+
+    def _calculate_main_loss(self, noise_pred, noise, img_latents):
         if self.model_type == "pixart-sigma":
             noise_pred = noise_pred.chunk(2, dim=1)[0]
 
@@ -871,25 +589,243 @@ class DiffusionModelTrainer:
             noise_pred.float(), noise_target.float(), reduction="mean"
         ) * self.config.main_loss_weight
 
-        if self.hook_type == 'dydit':
+        return main_loss
+
+    def _calculate_hook_loss(self, global_step: int):
+        if self.hook_type == "dydit":
             hook_loss = calculate_flops_loss(
                 self.config.extra_config, device=self.device
             )
-        elif self.hook_type == 'diffcr':
-            hook_loss = calculate_ratio_loss(self.config.extra_config, device=self.device)
+        elif self.hook_type == "diffcr":
+            hook_loss = calculate_ratio_loss(
+                self.config.extra_config, device=self.device
+            )
         else:
             hook_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
-        
+
         current_hook_loss_weight = self.config.hook_loss_weight
+
         if self.config.hook_warmup_steps > 0:
-            scaled_hook_warmup_steps = max(1, self.config.hook_warmup_steps // self.accelerator.num_processes)
+            scaled_hook_warmup_steps = max(
+                1, self.config.hook_warmup_steps // self.accelerator.num_processes
+            )
             if global_step < scaled_hook_warmup_steps:
                 current_hook_loss_weight = 0.0
-        hook_loss = hook_loss * current_hook_loss_weight
 
+        return hook_loss * current_hook_loss_weight
+
+    def _compute_loss(self, batch, global_step: int):
+        img_latents, noise, noisy_latents, timesteps, model_kwargs = (
+            self._prepare_model_inputs(batch)
+        )
+
+        noisy_latents = noisy_latents.to(self.dtype).detach()
+
+        noise_pred, distill_loss = self._forward_pass_with_distillation(
+            noisy_latents, timesteps, model_kwargs
+        )
+
+        main_loss = self._calculate_main_loss(noise_pred, noise, img_latents)
+        hook_loss = self._calculate_hook_loss(global_step)
         total_loss = main_loss + hook_loss + distill_loss
 
         return total_loss, main_loss, hook_loss, distill_loss
+
+    def _train_step(self, batch):
+        total_loss, main_loss, hook_loss, distill_loss = self._compute_loss(
+            batch, self.global_step
+        )
+        self.accelerator.backward(total_loss)
+        return total_loss.detach(), main_loss.detach(), hook_loss.detach(), distill_loss.detach()
+
+    def _on_update_step_end(self, gathered_losses, progress_bar):
+        self._check_and_update_training_phase()
+
+        log_trigger = max(
+            1, self.config.logging_steps // self.accelerator.num_processes
+        )
+
+        validate_trigger = (
+            max(
+                1,
+                self.config.validation_steps
+                // self.accelerator.num_processes,
+            )
+            if hasattr(self.config, "validation_steps")
+            and self.config.validation_steps > 0
+            else None
+        )
+
+        inference_trigger = (
+            max(
+                1,
+                self.config.inference_steps
+                // self.accelerator.num_processes,
+            )
+            if hasattr(self.config, "inference_steps")
+            and self.config.inference_steps > 0
+            else None
+        )
+
+        save_trigger = (
+            max(1, self.config.save_steps // self.accelerator.num_processes)
+            if hasattr(self.config, "save_steps")
+            and self.config.save_steps > 0
+            else None
+        )
+
+        val_metric = None
+        if validate_trigger and self.global_step % validate_trigger == 0:
+            val_metric = self.validate(self.global_step)
+
+        if self.config.save_best and val_metric is not None:
+            self.auto_save_best(
+                val_metric,
+                higher_is_better=self.config.best_metric_higher_is_better,
+            )
+
+        if save_trigger and self.global_step % save_trigger == 0:
+            self.maybe_save_periodically()
+
+        if self.accelerator.is_main_process:
+            metrics_to_log = {}
+            if self.config.training_mode == 'lora':
+                lora_params = [
+                    p for n, p in self.model.named_parameters() if "lora_" in n
+                ]
+
+                lora_norm = torch.norm(
+                    torch.stack([torch.norm(p.detach()) for p in lora_params])
+                ).item()
+
+                lora_grads = [
+                    torch.norm(p.grad.detach())
+                    for p in lora_params
+                    if p.grad is not None
+                ]
+
+                if len(lora_grads) > 0:
+                    lora_grad_norm = torch.norm(torch.stack(lora_grads)).item()
+                else:
+                    lora_grad_norm = 0.0
+
+                if prev_lora_state is not None:
+                    deltas = [
+                        torch.norm(p.detach().cpu() - prev_lora_state[i])
+                        for i, p in enumerate(lora_params)
+                    ]
+                    lora_delta = torch.mean(torch.stack(deltas)).item()
+                else:
+                    lora_delta = 0.0
+                prev_lora_state = [p.detach().cpu().clone() for p in lora_params]
+                metrics_to_log.update({
+                    "lora/param_norm": lora_norm, 
+                    "lora/grad_norm": lora_grad_norm, 
+                    "lora/param_delta": lora_delta
+                })
+            elif self.config.training_mode == "finetune":
+                all_trainable_params = [
+                    p for p in self.model.parameters() if p.requires_grad
+                ]
+                param_norm = torch.norm(
+                    torch.stack([torch.norm(p.detach()) for p in all_trainable_params])
+                ).item()
+                param_grads = [
+                    torch.norm(p.grad.detach())
+                    for p in all_trainable_params
+                    if p.grad is not None
+                ]
+                grad_norm = (
+                    torch.norm(torch.stack(param_grads)).item() if param_grads else 0.0
+                )
+                if prev_finetune_state is not None:
+                    deltas = [
+                        torch.norm(p.detach().cpu() - prev_finetune_state[i])
+                        for i, p in enumerate(all_trainable_params)
+                    ]
+                    param_delta = torch.mean(torch.stack(deltas)).item()
+                else:
+                    param_delta = 0.0
+
+                prev_finetune_state = [
+                    p.detach().cpu().clone() for p in all_trainable_params
+                ]
+                metrics_to_log.update({
+                    "finetune/param_norm": param_norm, 
+                    "finetune/grad_norm": grad_norm, 
+                    "finetune/param_delta": param_delta
+                })
+
+            metrics_to_log.update({
+                "train/total_loss": gathered_losses["total"].item(),
+                "train/main_loss": gathered_losses["main"].item(),
+                "train/hook_loss": gathered_losses["hook"].item(),
+                "train/distill_loss": gathered_losses["distill"].item(),
+                "train/lr": self.lr_scheduler.get_last_lr()[0],
+            })
+            self.logger.log_scalars(metrics_to_log, step=self.global_step)
+
+            if self.global_step % log_trigger == 0:
+                postfix_dict = {
+                    "loss": f"{gathered_losses['total'].item():.4f}",
+                    "main_loss": f"{gathered_losses['main'].item():.4f}",
+                    "hook_loss": f"{gathered_losses['hook'].item():.4f}",
+                    "distill_loss": f"{gathered_losses['distill'].item():.4f}",
+                    "lr": f"{self.lr_scheduler.get_last_lr()[0]:.2e}",
+                    "step": self.global_step,
+                }
+                if self.config.training_mode == "lora":
+                    postfix_dict["lora_norm"] = f"{lora_norm:.4f}"
+                    postfix_dict["lora_grad_norm"] = f"{lora_grad_norm:.4e}"
+                    postfix_dict["lora_delta"] = f"{lora_delta:.4e}"
+                elif self.config.training_mode == "finetune":
+                    postfix_dict["param_norm"] = f"{param_norm:.4f}"
+                    postfix_dict["grad_norm"] = f"{grad_norm:.4e}"
+                    postfix_dict["param_delta"] = f"{param_delta:.4e}"
+
+                progress_bar.set_postfix(postfix_dict)
+
+            if inference_trigger and self.global_step % inference_trigger == 0:
+                self.run_inference_validation(self.global_step)
+
+    def _check_and_update_training_phase(self):
+        if self.config.hook_only_steps > 0:
+            scaled_hook_only_steps = max(1, self.config.hook_only_steps // self.accelerator.num_processes)
+            if self.global_step == scaled_hook_only_steps:
+                if self.accelerator.is_main_process:
+                    print(
+                        f"\n[Step {self.global_step}]: Hook-only phase complete. Unfreezing parameters ..."
+                    )
+                unfrozen = 0
+                if self.config.training_mode == "lora":
+                    for name, param in self.model.named_parameters():
+                        if "lora_" in name:
+                            param.requires_grad_(True)
+                            unfrozen += param.numel()
+                elif self.config.training_mode == "finetune":
+                    for name, param in self.model.named_parameters():
+                        if "hook" not in name:
+                            param.requires_grad_(True)
+                            unfrozen += param.numel()
+                if self.accelerator.is_main_process:
+                    print(f"  Unfroze {unfrozen} parameters.")
+
+        if self.config.hook_warmup_steps > 0:
+            scaled_hook_warmup_steps = max(1, self.config.hook_warmup_steps // self.accelerator.num_processes)
+            if self.global_step == scaled_hook_warmup_steps:
+                if self.accelerator.is_main_process:
+                    print(
+                        f"\n[Step {self.global_step}]: Hook-warmup phase complete. Enabling hooks' ratio ..."
+                    )
+                for hook in HookManager.get_all_hooks().values():
+                    if isinstance(hook, DiffCRDitBlockHook):
+                        if hasattr(hook, "diff_ratio"):
+                            hook.diff_ratio.requires_grad = True
+                            if self.accelerator.is_main_process:
+                                print(f"Unfroze diff_ratio (value={hook.diff_ratio.item()}) for hook: {hook.__class__.__name__}")
+                        else:
+                            if self.accelerator.is_main_process:
+                                print(f"WARNING: Found DiffCRDitBlockHook without 'diff_ratio' param: {hook.__class__.__name__}")
 
     @torch.no_grad()
     def validate(self, global_step):
@@ -965,27 +901,21 @@ class DiffusionModelTrainer:
                         block_ratios_for_tb[clean_name] = ratio_val
                 print(f"--------------------------------------")
 
-                if self.writer:
-                    self.writer.add_scalar(
-                        "validation/total_loss", avg_val_loss, global_step
+                self.logger.log_scalars(
+                    {
+                        "validation/total_loss": avg_val_loss,
+                        "validation/main_loss": avg_main_loss,
+                        "validation/hook_loss": avg_hook_loss,
+                        "validation/distill_loss": avg_distill_loss,
+                    },
+                    step=global_step
+                )
+                if block_ratios_for_tb:
+                    self.logger.add_scalars(
+                        "validation/block_ratios", block_ratios_for_tb, global_step
                     )
-                    self.writer.add_scalar(
-                        "validation/main_loss", avg_main_loss, global_step
-                    )
-                    self.writer.add_scalar(
-                        "validation/hook_loss", avg_hook_loss, global_step
-                    )
-                    self.writer.add_scalar(
-                        "validation/distill_loss", avg_distill_loss, global_step
-                    )
-                    if block_ratios_for_tb:
-                        self.writer.add_scalars(
-                            "validation/block_ratios", block_ratios_for_tb, global_step
-                        )
-                        avg_ratio = sum(hook_ratios) / len(hook_ratios)
-                        self.writer.add_scalar(
-                            "validation/avg_ratio", avg_ratio, global_step
-                        )
+                    avg_ratio = sum(hook_ratios) / len(hook_ratios)
+                    self.logger.log_scalars({"validation/avg_ratio": avg_ratio}, step=global_step)
         elif self.accelerator.is_main_process:
             print(
                 f"Validation dataloader is empty or validation failed, skipping logging."
@@ -1065,10 +995,8 @@ class DiffusionModelTrainer:
                 image.save(
                     os.path.join(sample_dir, f"sample_{i+1:03d}_{safe_prompt}.png")
                 )
-                if self.writer and self.pil_to_tensor_transform:
-                    tag = f"inference_sample/{i+1:03d}_{safe_prompt}"
-                    image_tensor = self.pil_to_tensor_transform(image)
-                    self.writer.add_image(tag, image_tensor, global_step)
+                tag = f"inference_sample/{i+1:03d}_{safe_prompt}"
+                self.logger.log_image(tag, image, global_step)
             except Exception as e:
                 print(f"  Failed to generate image for prompt: '{prompt}'. Error: {e}")
 
@@ -1079,10 +1007,7 @@ class DiffusionModelTrainer:
 
         self.model.train()
 
-    def train(self):
-        print("Starting training...")
-        global_context.update(encoder_flag=True)
-
+    def _try_resume(self):
         self.global_step = 0
         self.epoch = 0
         self.best_val_metric = None
@@ -1101,60 +1026,133 @@ class DiffusionModelTrainer:
             self.global_step = int(state_list[0])
             self.epoch = int(state_list[1])
             self.best_val_metric = float(state_list[2]) if state_list[2] != -1.0 else None
-        
+
         if resumed and self.accelerator.is_main_process:
             print(f"Resumed training from step={self.global_step}, epoch={self.epoch}")
 
-        if self.config.training_mode == "auto-lora" and self.config.hook_only_steps > 0:
-            scaled_hook_only_steps = max(1, self.config.hook_only_steps // self.accelerator.num_processes)
+    def _initial_phase(self):
+        ## resume hook warmup state
+        if self.config.hook_warmup_steps > 0:
+            scaled_hook_warmup_steps = max(
+                1, self.config.hook_warmup_steps // self.accelerator.num_processes
+            )
+            if self.global_step >= scaled_hook_warmup_steps:
+                if self.accelerator.is_main_process:
+                    print(
+                        f"\n[Step {self.global_step}]: Hook-warmup phase complete. Enabling hooks' ratio ..."
+                    )
+                for hook in HookManager.get_all_hooks().values():
+                    if isinstance(hook, DiffCRDitBlockHook):
+                        if hasattr(hook, "diff_ratio"):
+                            hook.diff_ratio.requires_grad = True
+                            if self.accelerator.is_main_process:
+                                print(
+                                    f"Unfroze diff_ratio (value={hook.diff_ratio.item()}) for hook: {hook.__class__.__name__}"
+                                )
+                        else:
+                            if self.accelerator.is_main_process:
+                                print(
+                                    f"WARNING: Found DiffCRDitBlockHook without 'diff_ratio' param: {hook.__class__.__name__}"
+                                )
 
+        ## resume hook-only state
+        if self.config.hook_only_steps > 0:
+            scaled_hook_only_steps = max(
+                1, self.config.hook_only_steps // self.accelerator.num_processes
+            )
             if self.accelerator.is_main_process:
-                print("Training in 'auto-lora' mode with hook_only_steps > 0.")
-                print(f"  Config hook_only_steps: {self.config.hook_only_steps} (equivalent single-GPU steps)")
-                print(f"  Scaled hook_only_steps: {scaled_hook_only_steps} (actual optimizer steps with {self.accelerator.num_processes} GPUs)")
+                print(
+                    f"Training in '{self.config.training_mode}' mode with hook_only_steps > 0."
+                )
+                print(
+                    f"  Config hook_only_steps: {self.config.hook_only_steps} (equivalent single-GPU steps)"
+                )
+                print(
+                    f"  Scaled hook_only_steps: {scaled_hook_only_steps} (actual optimizer steps with {self.accelerator.num_processes} GPUs)"
+                )
 
             if self.global_step < scaled_hook_only_steps:
                 if self.accelerator.is_main_process:
-                    print(f"  Resumed step ({self.global_step}) is less than scaled_hook_only_steps ({scaled_hook_only_steps}). Freezing LoRA parameters.")
+                    print(
+                        f"  Resumed step ({self.global_step}) is less than scaled_hook_only_steps ({scaled_hook_only_steps}). Freezing parameters."
+                    )
                 frozen_params = 0
                 unwrapped_model = self.accelerator.unwrap_model(self.model)
-                for name, param in unwrapped_model.named_parameters():
-                    if 'lora_' in name:
-                        param.requires_grad_(False)
-                        frozen_params += param.numel()
+                if self.config.training_mode == "lora":
+                    for name, param in unwrapped_model.named_parameters():
+                        if "lora_" not in name:
+                            param.requires_grad_(False)
+                            frozen_params += param.numel()
+                elif self.config.training_mode == "finetune":
+                    for name, param in unwrapped_model.named_parameters():
+                        if "hook" not in name:
+                            param.requires_grad_(False)
+                            frozen_params += param.numel()
+                else:
+                    if self.accelerator.is_main_process:
+                        print(
+                            f"  Warning: Unknown training_mode '{self.config.training_mode}' during resume. No parameters were frozen."
+                        )
                 if self.accelerator.is_main_process:
                     print(f"  Froze {frozen_params} LoRA parameters.")
             else:
-                 if self.accelerator.is_main_process:
-                    print(f"  Resumed step ({self.global_step}) has passed scaled_hook_only_steps ({scaled_hook_only_steps}). LoRA parameters are trainable.")
-        elif (
-            self.config.training_mode == "auto-finetune"
-            and self.config.hook_only_steps == 0
-        ):
+                if self.accelerator.is_main_process:
+                    print(
+                        f"  Resumed step ({self.global_step}) has passed scaled_hook_only_steps ({scaled_hook_only_steps}). Parameters are trainable."
+                    )
+
+    def _trigger_phase(self):
+        # trigger hook warmup completion
+        if self.config.hook_warmup_steps > 0:
+            scaled_hook_warmup_steps = max(1, self.config.hook_warmup_steps // self.accelerator.num_processes)
+            if self.global_step == scaled_hook_warmup_steps:
+                if self.accelerator.is_main_process:
+                    print(
+                        f"\n[Step {self.global_step}]: Hook-warmup phase complete. Enabling hooks' ratio ..."
+                    )
+                for hook in HookManager.get_all_hooks().values():
+                    if isinstance(hook, DiffCRDitBlockHook):
+                        if hasattr(hook, "diff_ratio"):
+                            hook.diff_ratio.requires_grad = True
+                            if self.accelerator.is_main_process:
+                                print(f"Unfroze diff_ratio (value={hook.diff_ratio.item()}) for hook: {hook.__class__.__name__}")
+                        else:
+                            if self.accelerator.is_main_process:
+                                print(f"WARNING: Found DiffCRDitBlockHook without 'diff_ratio' param: {hook.__class__.__name__}")
+
+        # trigger hook-only completion
+        if self.config.hook_only_steps > 0:
             scaled_hook_only_steps = max(1, self.config.hook_only_steps // self.accelerator.num_processes)
-
-            if self.accelerator.is_main_process:
-                print("Training in 'auto-finetune' mode with hook_only_steps > 0.")
-                print(f"  Config hook_only_steps: {self.config.hook_only_steps} (equivalent single-GPU steps)")
-                print(f"  Scaled hook_only_steps: {scaled_hook_only_steps} (actual optimizer steps with {self.accelerator.num_processes} GPUs)")
-
-            if self.global_step < scaled_hook_only_steps:
+            if self.global_step == scaled_hook_only_steps:
                 if self.accelerator.is_main_process:
-                    print(f"  Resumed step ({self.global_step}) is less than scaled_hook_only_steps ({scaled_hook_only_steps}). Freezing LoRA parameters.")
-                frozen_params = 0
-                unwrapped_model = self.accelerator.unwrap_model(self.model)
-                for name, param in unwrapped_model.named_parameters():
-                    if "hook" not in name:
-                        param.requires_grad_(False)
-                        frozen_params += param.numel()
-                if self.accelerator.is_main_process:
-                    print(f"  Froze {frozen_params} parameters.")
-            else:
-                 if self.accelerator.is_main_process:
-                    print(f"  Resumed step ({self.global_step}) has passed scaled_hook_only_steps ({scaled_hook_only_steps}). Finetune parameters are trainable.")
+                    print(
+                        f"\n[Step {self.global_step}]: Hook-only phase complete. Unfreezing parameters ..."
+                    )
 
-        prev_lora_state = None
-        prev_finetune_state = None
+                unfrozen = 0
+                if self.config.training_mode == "lora":
+                    for name, param in self.model.named_parameters():
+                        if "lora_" in name:
+                            param.requires_grad_(True)
+                            unfrozen += param.numel()
+                elif self.config.training_mode == "finetune":
+                    for name, param in self.model.named_parameters():
+                        if "hook" not in name:
+                            param.requires_grad_(True)
+                            unfrozen += param.numel()
+                print(f"  Unfroze {unfrozen} parameters.")
+
+    def train(self):
+        print("Starting training...")
+        global_context.update(encoder_flag=True)
+
+        self._try_resume()
+
+        self.prev_lora_state = None
+        self.prev_finetune_state = None
+
+        self._initial_phase()
+
         unwrapped_model = self.accelerator.unwrap_model(self.model)
         if hasattr(unwrapped_model, "enable_adapter_layers"):
             unwrapped_model.enable_adapter_layers()
@@ -1174,11 +1172,7 @@ class DiffusionModelTrainer:
                 if step % self.config.gradient_accumulation_steps == 0:
                     self.optimizer.zero_grad(set_to_none=True)
 
-                total_loss, main_loss, hook_loss, distill_loss = self._compute_loss(
-                    batch, self.global_step
-                )
-                self.accelerator.backward(total_loss)
-
+                total_loss, main_loss, hook_loss, distill_loss = self._train_step(batch)
                 is_update_step = (
                     step + 1
                 ) % self.config.gradient_accumulation_steps == 0
@@ -1192,250 +1186,15 @@ class DiffusionModelTrainer:
                     self.lr_scheduler.step()
                     self.global_step += 1
 
-                    if self.config.hook_only_steps > 0:
-                        scaled_hook_only_steps = max(1, self.config.hook_only_steps // self.accelerator.num_processes)
-                        if self.global_step == scaled_hook_only_steps:
-                            if self.config.training_mode == "auto-lora":
-                                print(
-                                    f"\n[Step {self.global_step}]: Hook-only phase complete. Unfreezing LoRA parameters..."
-                                )
-                                unfrozen = 0
-                                for name, param in self.model.named_parameters():
-                                    if "lora_" in name:
-                                        param.requires_grad_(True)
-                                        unfrozen += param.numel()
-                                print(f"  Unfroze {unfrozen} LoRA parameters.")
-                            elif self.config.training_mode == "auto-finetune":
-                                print(
-                                    f"\n[Step {self.global_step}]: Hook-only phase complete. Unfreezing finetune parameters..."
-                                )
-                                unfrozen = 0
-                                for name, param in self.model.named_parameters():
-                                    if "hook" not in name:
-                                        param.requires_grad_(True)
-                                        unfrozen += param.numel()
-                                print(f"  Unfroze {unfrozen} parameters.")
-                    
-                    if self.config.hook_warmup_steps > 0:
-                        scaled_hook_warmup_steps = max(1, self.config.hook_warmup_steps // self.accelerator.num_processes)
-                        if self.global_step == scaled_hook_warmup_steps:
-                            if self.accelerator.is_main_process:
-                                print(
-                                    f"\n[Step {self.global_step}]: Hook-warmup phase complete. Enabling hooks' ratio ..."
-                                )
-                            for hook in HookManager.get_all_hooks().values():
-                                if isinstance(hook, DiffCRDitBlockHook):
-                                    if hasattr(hook, "diff_ratio"):
-                                        hook.diff_ratio.requires_grad = True
-                                        if self.accelerator.is_main_process:
-                                            print(f"Unfroze diff_ratio (value={hook.diff_ratio.item()}) for hook: {hook.__class__.__name__}")
-                                    else:
-                                        if self.accelerator.is_main_process:
-                                            print(f"WARNING: Found DiffCRDitBlockHook without 'diff_ratio' param: {hook.__class__.__name__}")
+                    self._trigger_phase()
 
-                    gathered_total_loss = self.accelerator.gather(total_loss).mean()
-                    gathered_main_loss = self.accelerator.gather(main_loss).mean()
-                    gathered_hook_loss = self.accelerator.gather(hook_loss).mean()
-                    gathered_distill_loss = self.accelerator.gather(distill_loss).mean()
-
-                    log_trigger = max(
-                        1, self.config.logging_steps // self.accelerator.num_processes
-                    )
-
-                    validate_trigger = (
-                        max(
-                            1,
-                            self.config.validation_steps
-                            // self.accelerator.num_processes,
-                        )
-                        if hasattr(self.config, "validation_steps")
-                        and self.config.validation_steps > 0
-                        else None
-                    )
-
-                    inference_trigger = (
-                        max(
-                            1,
-                            self.config.inference_steps
-                            // self.accelerator.num_processes,
-                        )
-                        if hasattr(self.config, "inference_steps")
-                        and self.config.inference_steps > 0
-                        else None
-                    )
-
-                    save_trigger = (
-                        max(1, self.config.save_steps // self.accelerator.num_processes)
-                        if hasattr(self.config, "save_steps")
-                        and self.config.save_steps > 0
-                        else None
-                    )
-
-                    val_metric = None
-                    if validate_trigger and self.global_step % validate_trigger == 0:
-                        val_metric = self.validate(self.global_step)
-                    
-                    if self.config.save_best and val_metric is not None:
-                        self.auto_save_best(
-                            val_metric,
-                            higher_is_better=self.config.best_metric_higher_is_better,
-                        )
-
-                    if save_trigger and self.global_step % save_trigger == 0:
-                        self.maybe_save_periodically()
-
-                    if self.accelerator.is_main_process:
-                        # lora metrics
-                        if self.config.training_mode in ["lora", "auto-lora"]:
-                            lora_params = [
-                                p
-                                for n, p in self.model.named_parameters()
-                                if "lora_" in n
-                            ]
-
-                            lora_norm = torch.norm(
-                                torch.stack(
-                                    [torch.norm(p.detach()) for p in lora_params]
-                                )
-                            ).item()
-
-                            lora_grads = [
-                                torch.norm(p.grad.detach())
-                                for p in lora_params
-                                if p.grad is not None
-                            ]
-
-                            if len(lora_grads) > 0:
-                                lora_grad_norm = torch.norm(
-                                    torch.stack(lora_grads)
-                                ).item()
-                            else:
-                                lora_grad_norm = 0.0
-
-                            if prev_lora_state is not None:
-                                deltas = [
-                                    torch.norm(p.detach().cpu() - prev_lora_state[i])
-                                    for i, p in enumerate(lora_params)
-                                ]
-                                lora_delta = torch.mean(torch.stack(deltas)).item()
-                            else:
-                                lora_delta = 0.0
-                            prev_lora_state = [
-                                p.detach().cpu().clone() for p in lora_params
-                            ]
-
-                            if self.writer:
-                                self.writer.add_scalar(
-                                    "lora/param_norm", lora_norm, self.global_step
-                                )
-                                self.writer.add_scalar(
-                                    "lora/grad_norm", lora_grad_norm, self.global_step
-                                )
-                                self.writer.add_scalar(
-                                    "lora/param_delta", lora_delta, self.global_step
-                                )
-                        elif self.config.training_mode == "finetune":
-                            all_trainable_params = [
-                                p for p in self.model.parameters() if p.requires_grad
-                            ]
-                            param_norm = torch.norm(
-                                torch.stack(
-                                    [
-                                        torch.norm(p.detach())
-                                        for p in all_trainable_params
-                                    ]
-                                )
-                            ).item()
-                            param_grads = [
-                                torch.norm(p.grad.detach())
-                                for p in all_trainable_params
-                                if p.grad is not None
-                            ]
-                            grad_norm = (
-                                torch.norm(torch.stack(param_grads)).item()
-                                if param_grads
-                                else 0.0
-                            )
-                            if prev_finetune_state is not None:
-                                deltas = [
-                                    torch.norm(
-                                        p.detach().cpu() - prev_finetune_state[i]
-                                    )
-                                    for i, p in enumerate(all_trainable_params)
-                                ]
-                                param_delta = torch.mean(torch.stack(deltas)).item()
-                            else:
-                                param_delta = 0.0
-
-                            prev_finetune_state = [
-                                p.detach().cpu().clone() for p in all_trainable_params
-                            ]
-
-                            if self.writer:
-                                self.writer.add_scalar(
-                                    "finetune/param_norm", param_norm, self.global_step
-                                )
-                                self.writer.add_scalar(
-                                    "finetune/grad_norm", grad_norm, self.global_step
-                                )
-                                self.writer.add_scalar(
-                                    "finetune/param_delta",
-                                    param_delta,
-                                    self.global_step,
-                                )
-
-                        if self.writer:
-                            self.writer.add_scalar(
-                                "train/total_loss",
-                                gathered_total_loss.item(),
-                                self.global_step,
-                            )
-                            self.writer.add_scalar(
-                                "train/main_loss",
-                                gathered_main_loss.item(),
-                                self.global_step,
-                            )
-                            self.writer.add_scalar(
-                                "train/hook_loss",
-                                gathered_hook_loss.item(),
-                                self.global_step,
-                            )
-                            self.writer.add_scalar(
-                                "train/distill_loss",
-                                gathered_distill_loss.item(),
-                                self.global_step,
-                            )
-                            self.writer.add_scalar(
-                                "train/lr",
-                                self.lr_scheduler.get_last_lr()[0],
-                                self.global_step,
-                            )
-
-                        if self.global_step % log_trigger == 0:
-                            postfix_dict = {
-                                "loss": f"{gathered_total_loss.item():.4f}",
-                                "main_loss": f"{gathered_main_loss.item():.4f}",
-                                "hook_loss": f"{gathered_hook_loss.item():.4f}",
-                                "distill_loss": f"{gathered_distill_loss.item():.4f}",
-                                "lr": f"{self.lr_scheduler.get_last_lr()[0]:.2e}",
-                                "step": self.global_step,
-                            }
-                            if self.config.training_mode in ["lora", "auto-lora"]:
-                                postfix_dict["lora_norm"] = f"{lora_norm:.4f}"
-                                postfix_dict["lora_grad_norm"] = f"{lora_grad_norm:.4e}"
-                                postfix_dict["lora_delta"] = f"{lora_delta:.4e}"
-                            elif self.config.training_mode == "finetune":
-                                postfix_dict["param_norm"] = f"{param_norm:.4f}"
-                                postfix_dict["grad_norm"] = f"{grad_norm:.4e}"
-                                postfix_dict["param_delta"] = f"{param_delta:.4e}"
-
-                            progress_bar.set_postfix(postfix_dict)
-
-                        if (
-                            inference_trigger
-                            and self.global_step % inference_trigger == 0
-                        ):
-                            self.run_inference_validation(self.global_step)
+                    gathered_losses = {
+                        "total": self.accelerator.gather(total_loss).mean(),
+                        "main": self.accelerator.gather(main_loss).mean(),
+                        "hook": self.accelerator.gather(hook_loss).mean(),
+                        "distill": self.accelerator.gather(distill_loss).mean()
+                    }
+                    self._on_update_step_end(gathered_losses, progress_bar)
 
             if self.accelerator.is_main_process:
                 print(f"Epoch {epoch+1} completed.")
@@ -1621,13 +1380,13 @@ class DiffusionModelTrainer:
                 is_best = val_metric > self.best_val_metric
             else:
                 is_best = val_metric < self.best_val_metric
-        
+
         if is_best:
             self.best_val_metric = val_metric
             save_path = os.path.join(self.config.output_dir, "best.pt")
 
             self.save_checkpoint(save_path, save_optimizer=False)
-            
+
             if self.accelerator.is_main_process:
                 print(f"New best model saved at {save_path} (metric={val_metric:.4f})")
         else:

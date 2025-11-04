@@ -22,7 +22,12 @@ class TrainerConfig:
     log_with_tensorboard: bool = True
     tensorboard_log_dir: str = "logs"
 
-    training_mode: TrainingMode = "hook_only" # "hook_only" "finetune" "auto-finetune" "lora" "auto-lora"
+    log_with_wandb: bool = False
+    wandb_entity: str = None
+    wandb_project: str = "generative-model-boost"
+    wandb_run_name: str = None
+
+    training_mode: TrainingMode = "hook_only" # "hook_only" "finetune" "lora"
     lora_config: LoraConfig = field(default_factory=LoraConfig)
     trainable_hook_config: Tuple[type, Dict[str, Any]] = None 
 
