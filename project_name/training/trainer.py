@@ -11,7 +11,7 @@ from transformers import get_scheduler
 from peft import LoraConfig as PeftLoraConfig, get_peft_model
 from tqdm import tqdm
 from accelerate import Accelerator
-from accelerate.utils import set_seed, DistributedDataParallelKwargs
+from accelerate.utils import set_seed, DistributedDataParallelKwargs, broadcast_object_list
 from dataclasses import asdict
 
 from baselines.diffcr import DiffCRDitBlockHook, calculate_ratio_loss
@@ -1057,24 +1057,64 @@ class DiffusionModelTrainer:
         self.global_step = 0
         self.epoch = 0
         self.best_val_metric = None
-        resumed = False
-        if hasattr(self, "resume_if_available"):
-            resumed = self.resume_if_available()
-        if resumed:
-            state_data = [
-                float(self.global_step),
-                float(self.epoch),
-                float(self.best_val_metric if self.best_val_metric is not None else -1.0)
-            ]
-            state_tensor = torch.tensor(state_data, dtype=torch.float64, device=self.device)
-            torch.distributed.broadcast(state_tensor, src=0)
-            state_list = state_tensor.tolist()
-            self.global_step = int(state_list[0])
-            self.epoch = int(state_list[1])
-            self.best_val_metric = float(state_list[2]) if state_list[2] != -1.0 else None
 
-        if resumed and self.accelerator.is_main_process:
-            print(f"Resumed training from step={self.global_step}, epoch={self.epoch}")
+        ckpt_dir = self.config.output_dir
+        latest_ckpt_dir = None
+        resumed = False
+
+        if self.accelerator.is_main_process:
+            if os.path.isdir(ckpt_dir):
+                ckpt_dirs = [d for d in glob.glob(os.path.join(ckpt_dir, "checkpoint_step_*")) if os.path.isdir(d)]
+                if ckpt_dirs:
+                    def extract_step_dir(path):
+                        match_step = re.search(r"step_(\d+)$", os.path.basename(path))
+                        if match_step:
+                            if os.path.exists(os.path.join(path, "trainer_state.json")):
+                                return int(match_step.group(1))
+                        return -1
+                    
+                    valid_ckpt_dirs = [d for d in ckpt_dirs if extract_step_dir(d) != -1]
+                    if valid_ckpt_dirs:
+                        latest_ckpt_dir = max(valid_ckpt_dirs, key=extract_step_dir)
+                        print(f"Found latest valid accelerator checkpoint: {latest_ckpt_dir}")
+                    else:
+                        print("No valid accelerator checkpoints found (missing trainer_state.json). Starting fresh.")
+                else:
+                    print("No accelerator checkpoint directories found. Starting fresh.")
+            else:
+                print(f"No checkpoint directory found at {ckpt_dir}. Starting fresh.")
+        
+        path_broadcast_list = [latest_ckpt_dir]
+        broadcast_object_list(path_broadcast_list, from_process=0)
+        latest_ckpt_dir = path_broadcast_list[0]
+        self.accelerator.wait_for_everyone()
+
+        if latest_ckpt_dir is not None:
+            try:
+                if self.accelerator.is_main_process:
+                    print(f"[{self.accelerator.process_index}] Attempting to resume from {latest_ckpt_dir}...")
+                
+                self.accelerator.load_state(latest_ckpt_dir)
+                custom_state_path = os.path.join(latest_ckpt_dir, "trainer_state.json")
+                with open(custom_state_path, "r") as f:
+                    custom_state = json.load(f)
+                
+                self.global_step = custom_state.get("global_step", 0)
+                self.epoch = custom_state.get("epoch", 0)
+                self.best_val_metric = custom_state.get("best_val_metric", None)
+                
+                resumed = True
+                if self.accelerator.is_main_process:
+                    print(f"Resumed successfully from step={self.global_step}, epoch={self.epoch}")
+
+            except Exception as e:
+                resumed = False
+                if self.accelerator.is_main_process:
+                    print(f"Failed to load checkpoint {latest_ckpt_dir}. Error: {e}. Starting fresh.")
+        
+        self.accelerator.wait_for_everyone()
+        if not resumed and self.accelerator.is_main_process:
+            print("No checkpoint found or resume failed. Starting fresh.")
 
     def _initial_phase(self):
         ## resume hook warmup state
@@ -1180,7 +1220,7 @@ class DiffusionModelTrainer:
             self.save_checkpoint(final_path)
             print(f"Final model saved to {final_path}")
 
-    def save_checkpoint(self, save_path: str, save_optimizer: bool = True):
+    def save_checkpoint(self, save_path: str):
         if self.accelerator.is_main_process:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             model_state = {}
@@ -1200,148 +1240,37 @@ class DiffusionModelTrainer:
 
             else:
                 raise ValueError(f"Unknown training_mode: {mode}")
+            
+            hook_info = None
+            if self.config.trainable_hook_config:
+                hook_class, hook_kwargs = self.config.trainable_hook_config
+                hook_info = {
+                    "class_name": hook_class.__name__,
+                    "config": hook_kwargs
+                }
+            
+            lora_info = None
+            if self.config.lora_config and self.config.lora_config.enable:
+                lora_info = asdict(self.config.lora_config)
 
-            optimizer_state = None
-            if save_optimizer and self.optimizer is not None:
-                optimizer_state = self.optimizer.state_dict()
-
-            lr_scheduler_state = None
-            if save_optimizer and self.lr_scheduler is not None:
-                lr_scheduler_state = self.lr_scheduler.state_dict()
+            global_step = getattr(self, "global_step", 0)
 
             checkpoint = {
                 "model": model_state,
-                "optimizer": optimizer_state,
-                "lr_scheduler": lr_scheduler_state,
-                "epoch": getattr(self, "epoch", 0),
-                "global_step": getattr(self, "global_step", 0),
                 "training_mode": mode,
-                "mixed_precision": self.config.mixed_precision,
-                "extra_config": getattr(self.config, "extra_config", {}),
-                "best_val_metric": getattr(self, "best_val_metric", None),
+                "model_type": self.model_type,
+                "hook_info": hook_info,
+                "lora_info": lora_info,
+                "global_step": global_step,
             }
 
             torch.save(checkpoint, save_path)
             print(
-                f"Saved checkpoint to {save_path} "
-                f"(mode={mode}, step={checkpoint['global_step']})"
+                f"Saved inference checkpoint to {save_path} "
+                f"(mode={mode}, step={global_step})"
             )
 
         self.accelerator.wait_for_everyone()
-
-    def load_checkpoint(
-        self,
-        ckpt_path: str,
-        strict: bool = True,
-        load_optimizer: bool = True,
-        for_inference: bool = False,
-    ):
-        if not os.path.exists(ckpt_path):
-            raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
-
-        checkpoint = torch.load(ckpt_path, map_location="cpu")
-        ckpt_mode = checkpoint.get("training_mode", "unknown")
-
-        if self.accelerator.is_main_process:
-            print(
-                f"Loading checkpoint from {ckpt_path} "
-                f"(saved_mode={ckpt_mode}, current_mode={self.config.training_mode})"
-            )
-
-        model_state = checkpoint["model"]
-
-        unwrapped_model = self.accelerator.unwrap_model(self.model)
-
-        mode = self.config.training_mode
-        if mode == "lora":
-            load_dict = {
-                k: v for k, v in model_state.items() if "lora" in k or "hook" in k
-            }
-            missing, unexpected = unwrapped_model.load_state_dict(
-                load_dict, strict=False
-            )
-        elif mode == "hook_only":
-            load_dict = {k: v for k, v in model_state.items() if "hook" in k}
-            missing, unexpected = unwrapped_model.load_state_dict(
-                load_dict, strict=False
-            )
-        elif mode == "finetune":
-            missing, unexpected = unwrapped_model.load_state_dict(
-                model_state, strict=strict
-            )
-        else:
-            raise ValueError(f"Unknown training_mode: {mode}")
-
-        if self.accelerator.is_main_process:
-            print(
-                f"Loaded model params (missing={len(missing)}, unexpected={len(unexpected)})"
-            )
-
-        if (not for_inference) and load_optimizer:
-            if checkpoint.get("optimizer") and self.optimizer is not None:
-                self.optimizer.load_state_dict(checkpoint["optimizer"])
-            if checkpoint.get("lr_scheduler") and self.lr_scheduler is not None:
-                self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
-            self.global_step = checkpoint.get("global_step", 0)
-            self.epoch = checkpoint.get("epoch", 0)
-            self.best_val_metric = checkpoint.get("best_val_metric", None)
-            if self.accelerator.is_main_process:
-                print(f"Resumed training from step {self.global_step}, epoch {self.epoch}")
-
-        if self.accelerator.is_main_process:
-            print(f"Loaded checkpoint successfully (mode={self.config.training_mode})")
-
-    def resume_if_available(self, resume_dir: str = None):
-        ckpt_dir = resume_dir or self.config.output_dir
-
-        if not self.accelerator.is_main_process:
-            self.accelerator.wait_for_everyone()
-            return (
-                os.path.isdir(ckpt_dir)
-                and len(glob.glob(os.path.join(ckpt_dir, "*.pt"))) > 0
-            )
-
-        if not os.path.isdir(ckpt_dir):
-            print(f"No checkpoint directory found at {ckpt_dir}, starting fresh.")
-            self.accelerator.wait_for_everyone()
-            return False
-
-        ckpts = glob.glob(os.path.join(ckpt_dir, "*.pt"))
-        if not ckpts:
-            print(f"No checkpoints found in {ckpt_dir}, starting fresh.")
-            self.accelerator.wait_for_everyone()
-            return False
-
-        def extract_step(path):
-            match_step = re.search(r"step_(\d+)\.pt$", os.path.basename(path))
-            if match_step:
-                return int(match_step.group(1))
-            if "best.pt" in path:
-                return -1
-            if "final.pt" in path:
-                return -2
-            return -3
-
-        latest_ckpt = max(ckpts, key=extract_step)
-
-        step_ckpts = [p for p in ckpts if "step_" in os.path.basename(p)]
-        if step_ckpts:
-            latest_step_ckpt = max(step_ckpts, key=extract_step)
-            if extract_step(latest_step_ckpt) > extract_step(latest_ckpt):
-                latest_ckpt = latest_step_ckpt
-
-        print(f"Found latest checkpoint: {latest_ckpt}")
-        try:
-            self.load_checkpoint(latest_ckpt)
-            resumed = True
-        except Exception as e:
-            print(
-                f"Failed to load checkpoint {latest_ckpt}. Error: {e}. Starting fresh."
-            )
-            resumed = False
-
-        self.accelerator.wait_for_everyone()
-        return resumed
 
     def auto_save_best(self, val_metric: float, higher_is_better: bool = False):
         if val_metric is None:
@@ -1362,7 +1291,7 @@ class DiffusionModelTrainer:
             self.best_val_metric = val_metric
             save_path = os.path.join(self.config.output_dir, "best.pt")
 
-            self.save_checkpoint(save_path, save_optimizer=False)
+            self.save_checkpoint(save_path)
 
             if self.accelerator.is_main_process:
                 print(f"New best model saved at {save_path} (metric={val_metric:.4f})")
@@ -1373,7 +1302,23 @@ class DiffusionModelTrainer:
                 )
 
     def maybe_save_periodically(self):
-        save_path = os.path.join(
-            self.config.output_dir, f"checkpoint_step_{self.global_step:06d}.pt"
+        save_path_dir = os.path.join(
+            self.config.output_dir, f"checkpoint_step_{self.global_step:06d}"
         )
-        self.save_checkpoint(save_path)
+        
+        self.accelerator.save_state(save_path_dir)
+        if self.accelerator.is_main_process:
+            custom_state = {
+                "global_step": self.global_step,
+                "epoch": self.epoch,
+                "best_val_metric": self.best_val_metric
+            }
+            try:
+                with open(os.path.join(save_path_dir, "trainer_state.json"), "w") as f:
+                    json.dump(custom_state, f)
+            except Exception as e:
+                print(f"Warning: Failed to save trainer_state.json: {e}")
+
+        self.accelerator.wait_for_everyone()
+        if self.accelerator.is_main_process:
+            print(f"Saved accelerator state to {save_path_dir} (step {self.global_step})")
