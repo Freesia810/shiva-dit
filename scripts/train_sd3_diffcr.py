@@ -59,6 +59,10 @@ trainer_config = {
     "log_with_wandb": True,
     "wandb_project": "generative-model-boost",
     "wandb_run_name": "sd3-diffcr",
+    "log_with_mlflow": True,
+    "mlflow_experiment_name": "generative-model-boost",
+    "mlflow_run_name": "sd3-diffcr",
+    "mlflow_tracking_uri": None,
 }
 
 config = TrainerConfig(**trainer_config)

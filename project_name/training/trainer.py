@@ -11,7 +11,7 @@ from transformers import get_scheduler
 from peft import LoraConfig as PeftLoraConfig, get_peft_model
 from tqdm import tqdm
 from accelerate import Accelerator
-from accelerate.utils import set_seed
+from accelerate.utils import set_seed, DistributedDataParallelKwargs
 from dataclasses import asdict
 
 from baselines.diffcr import DiffCRDitBlockHook, calculate_ratio_loss
@@ -22,7 +22,9 @@ from project_name.utils import get_pipeline
 from project_name.training.input_preparers import get_input_preparer
 from project_name.training.config import TrainerConfig
 from project_name.training.dataset import ImageTextDataset, collate_fn
+from project_name.training.logging import NoOpLogger
 from project_name.utils import global_context
+
 
 
 class DiffusionModelTrainer:
@@ -33,11 +35,13 @@ class DiffusionModelTrainer:
         self.input_preparer_fn = get_input_preparer(self.model_type)
 
         ## Initialize accelerator, device, seed and generator
+        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
         self.accelerator = Accelerator(
             mixed_precision=config.mixed_precision,
             gradient_accumulation_steps=config.gradient_accumulation_steps,
             log_with="tensorboard" if config.log_with_tensorboard else None,
             project_dir=os.path.join(config.output_dir, config.tensorboard_log_dir),
+            kwargs_handlers=[ddp_kwargs],
         )
         self.device = self.accelerator.device
         set_seed(config.seed)
@@ -264,7 +268,7 @@ class DiffusionModelTrainer:
         config = self.config
         try:
             from project_name.training.logging import (
-                TensorBoardLogger, WandbLogger, MLflowLogger, NoOpLogger, LoggerCollection
+                TensorBoardLogger, WandbLogger, MLflowLogger, LoggerCollection
             )
         except ImportError as e:
             print(f"Not able to import logging modules: {e}. Logging will be disabled.")
@@ -367,6 +371,7 @@ class DiffusionModelTrainer:
                 bias="none",
             )
             self.model = get_peft_model(self.model, peft_config)
+            self.model.print_trainable_parameters()
             for hook in HookManager.get_all_hooks().values():
                 if isinstance(hook, nn.Module):
                     hook.requires_grad_(True)
@@ -838,6 +843,8 @@ class DiffusionModelTrainer:
             return
         
         trainable_params = 0
+        hook_params = 0
+        lora_params = 0
         all_params = 0
         trainable_param_names = []
 
@@ -846,10 +853,16 @@ class DiffusionModelTrainer:
             if param.requires_grad:
                 trainable_params += param.numel()
                 trainable_param_names.append(name)
+                if "hook" in name:
+                    hook_params += param.numel()
+                if "lora_" in name:
+                    lora_params += param.numel()
 
         print(f"\n--- Trainable Parameters ({description}) ---")
         print(f"  Currently trainable parameters: {trainable_params:,}")
         print(f"  Total parameters:   {all_params:,}")
+        print(f"  Hook parameters:   {hook_params:,}")
+        print(f"  LoRA parameters:   {lora_params:,}")
         print(f"  Trainable ratio:   {100 * trainable_params / all_params:.4f}%")
         
         if len(trainable_param_names) > 0 and len(trainable_param_names) < 15:

@@ -10,7 +10,7 @@ imageio-ffmpeg==0.6.0
 lpips>=0.1.4,<0.2
 matplotlib>=3.10,<3.11
 mlflow==3.5.1
-numpy>=1.26,<2.0
+numpy==2.2.6
 opencv-python>=4.11.0.86,<5.0
 peft==0.17.1
 pillow>=10.3,<11.0
