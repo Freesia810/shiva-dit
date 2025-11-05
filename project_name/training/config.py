@@ -27,6 +27,11 @@ class TrainerConfig:
     wandb_project: str = "generative-model-boost"
     wandb_run_name: str = None
 
+    log_with_mlflow: bool = False
+    mlflow_experiment_name: str = "generative-model-boost"
+    mlflow_run_name: str = None
+    mlflow_tracking_uri: str = None
+
     training_mode: TrainingMode = "hook_only" # "hook_only" "finetune" "lora"
     lora_config: LoraConfig = field(default_factory=LoraConfig)
     trainable_hook_config: Tuple[type, Dict[str, Any]] = None 

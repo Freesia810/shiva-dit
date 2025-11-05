@@ -70,11 +70,63 @@ class WandbLogger(AbstractLogger):
         self.wandb.log({f"{prefix}{tag}": self.wandb.Image(image)}, step=step)
 
     def add_scalars(self, main_tag, tag_scalar_dict, step, prefix=""):
-        log_data = {f"{prefix}{main_tag}/{k}": v for k, v in tag_scalar_dict.items()}
+        chart_name = f"{prefix}{main_tag}"
+        log_data = { chart_name: tag_scalar_dict }
         self.wandb.log(log_data, step=step)
 
     def close(self):
         self.wandb.finish()
+
+class MLflowLogger(AbstractLogger):
+    def __init__(self, experiment_name: str, run_name: str = None, config_dict: dict = None, tracking_uri: str = None):
+        try:
+            import mlflow
+        except ImportError:
+            print("MLflowLogger Error: Install mlflow (pip install mlflow)")
+            raise
+        self.mlflow = mlflow
+        if tracking_uri:
+            self.mlflow.set_tracking_uri(tracking_uri)
+        self.mlflow.set_experiment(experiment_name)
+        self.run = self.mlflow.start_run(run_name=run_name)
+        print(f"MLflow logging enabled. Run ID: {self.run.info.run_id}")
+        if config_dict:
+            flat_config = self._flatten_dict(config_dict)
+            for i in range(0, len(flat_config), 100):
+                batch = dict(list(flat_config.items())[i:i+100])
+                self.mlflow.log_params(batch)
+
+    def _flatten_dict(self, d, parent_key='', sep='.'):
+        items = {}
+        for k, v in d.items():
+            new_key = f"{parent_key}{sep}{k}" if parent_key else k
+            if isinstance(v, dict):
+                items.update(self._flatten_dict(v, new_key, sep=sep))
+            elif isinstance(v, (list, tuple)):
+                items[new_key] = str(v)
+            else:
+                items[new_key] = v
+        return items
+
+    def log_scalars(self, data_dict, step, prefix=""):
+        for k, v in data_dict.items():
+            self.mlflow.log_metric(f"{prefix}{k}", v, step=step)
+
+    def log_image(self, tag, image, step, prefix=""):
+        try:
+            full_tag_path = f"{prefix}{tag}"
+            filename = f"step_{step:06d}.png"
+            self.mlflow.log_image(image, artifact_file=os.path.join(full_tag_path, filename))
+        except Exception as e:
+            print(f"MLflow log_image Error: {e}")
+
+    def add_scalars(self, main_tag, tag_scalar_dict, step, prefix=""):
+        for k, v in tag_scalar_dict.items():
+            self.mlflow.log_metric(f"{prefix}{main_tag}/{k}", v, step=step)
+
+    def close(self):
+        self.mlflow.end_run()
+        print("MLflow run finished.")
 
 
 class NoOpLogger(AbstractLogger):

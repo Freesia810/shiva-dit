@@ -1,0 +1,1 @@
+nohup tensorboard --logdir=checkpoints/logs/ --port=6006 > tb.log 2>&1 &

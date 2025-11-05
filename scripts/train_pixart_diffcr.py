@@ -29,7 +29,7 @@ trainer_config = {
     "num_epochs": 1000,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16,
-    "learning_rate": 5e-5,
+    "learning_rate": 1e-6,
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
     "lr_scheduler": "cosine", # "linear", "cosine", "constant"
@@ -55,10 +55,14 @@ trainer_config = {
         "ratio_loss_weight": 0.3,
         "target_ratio": 0.8,
     },
-    "log_with_tensorboard": False,
+    "log_with_tensorboard": True,
     "log_with_wandb": True,
     "wandb_project": "generative-model-boost",
     "wandb_run_name": "pixart-diffcr",
+    "log_with_mlflow": True,
+    "mlflow_experiment_name": "generative-model-boost",
+    "mlflow_run_name": "pixart-diffcr",
+    "mlflow_tracking_uri": None,
 }
 
 config = TrainerConfig(**trainer_config)

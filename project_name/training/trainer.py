@@ -264,7 +264,7 @@ class DiffusionModelTrainer:
         config = self.config
         try:
             from project_name.training.logging import (
-                TensorBoardLogger, WandbLogger, NoOpLogger, LoggerCollection
+                TensorBoardLogger, WandbLogger, MLflowLogger, NoOpLogger, LoggerCollection
             )
         except ImportError as e:
             print(f"Not able to import logging modules: {e}. Logging will be disabled.")
@@ -295,6 +295,19 @@ class DiffusionModelTrainer:
                 )
             except ImportError:
                 print("Warning: Unable to import wandb, skipping Wandb logging.")
+
+        if getattr(config, "log_with_mlflow", False):
+            try:
+                run_name = config.mlflow_run_name or config.wandb_run_name or os.path.basename(config.output_dir)
+
+                loggers.append(MLflowLogger(
+                    experiment_name=config.mlflow_experiment_name,
+                    run_name=run_name,
+                    config_dict=asdict(config),
+                    tracking_uri=config.mlflow_tracking_uri
+                ))
+            except ImportError:
+                print("Warning: Unable to import mlflow, skipping MLflow logging.")
 
         if not loggers:
             print("No logging backends available, logging will be disabled.")
