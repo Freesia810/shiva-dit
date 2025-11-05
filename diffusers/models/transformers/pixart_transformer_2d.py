@@ -370,7 +370,7 @@ class PixArtTransformer2DModel(ModelMixin, ConfigMixin):
         )
 
         # register temb
-        from project_name.utils.context import global_context
+        from shiva_dit.utils.context import global_context
         global_context.update(
             embedded_timestep=embedded_timestep,
         )

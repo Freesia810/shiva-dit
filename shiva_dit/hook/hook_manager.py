@@ -4,7 +4,7 @@ import fnmatch
 from typing import Dict, Type, Optional, Union, Any
 from contextlib import contextmanager
 from copy import deepcopy
-from project_name.hook.block_hook import BaseDiTBlockHook
+from shiva_dit.hook.block_hook import BaseDiTBlockHook
 
 
 # SD3 -> JointTransformerBlock
@@ -128,30 +128,67 @@ class HookManager:
             print("[HookManager] Disabled, skipping hook injection.")
             return
 
-        injected = 0
-        
-        for model_attr in model_attrs:
-            m = getattr(pipe, model_attr)
-            if not isinstance(m, nn.Module):
-                raise TypeError(f"Expected nn.Module, got {type(m)}")
-            for name, module in m.named_modules():
-                if isinstance(module, cls.get_block_type(model_type)):
-                    hook_cls, kwargs = cls._resolve_hook_config(name)
-                    hook = hook_cls(**deepcopy(kwargs))
-                    hook_name = f"{model_attr}.{name}"
-                    hook.register_name(model_type, hook_name)
-                    if hasattr(module, "register_hook"):
-                        module.register_hook(hook_name, hook)
-                    else:
-                        raise RuntimeError(f"Module '{hook_name}' does not support hook registration.")
-                    if isinstance(hook, nn.Module):
-                        module.add_module(f"hook", hook)
-                    cls._hook_map[hook_name] = hook
-                    cls._weak_blocks[hook_name] = module
-                    injected += 1
-                    print(f"[HookManager] Injected hook for layer '{hook_name}', hook class: {hook_cls.__name__}")
+        if "__default__" not in cls._hook_config:
+            raise RuntimeError(
+                "No default hook configured. Please call configure_hooks() first."
+            )
 
-        print(f"[HookManager] Injected {injected} hooks for model '{model_type}'.")
+        default_hook_cls, default_kwargs = cls._hook_config["__default__"]
+
+        if hasattr(default_hook_cls, "setup_shared_hooks"):
+            print(
+                f"[HookManager] Detected 'setup_shared_hooks' method on {default_hook_cls.__name__}."
+            )
+            print("[HookManager] Delegating injection logic to Hook...")
+
+            assert len(cls._hook_config) == 1, (
+                "[HookManager] When using shared hook injection, only the default hook config is supported."
+            )
+
+            default_hook_cls.setup_shared_hooks(
+                cls,
+                model_type,
+                pipe,
+                model_attrs,
+                **default_kwargs,
+            )
+
+            print("[HookManager] Shared hook injection complete.")
+        else:
+            print(
+                f"[HookManager] Using standard per-block injection logic (e.g., DiffCR)."
+            )
+            injected = 0
+
+            for model_attr in model_attrs:
+                m = getattr(pipe, model_attr)
+                if not isinstance(m, nn.Module):
+                    raise TypeError(f"Expected nn.Module, got {type(m)}")
+
+                for name, module in m.named_modules():
+                    if isinstance(module, cls.get_block_type(model_type)):
+                        hook_cls, kwargs = cls._resolve_hook_config(name)
+                        hook = hook_cls(**deepcopy(kwargs))  # 关键: deepcopy
+                        hook_name = f"{model_attr}.{name}"
+
+                        hook.register_name(model_type, hook_name)
+                        if hasattr(module, "register_hook"):
+                            module.register_hook(hook_name, hook)
+                        else:
+                            raise RuntimeError(
+                                f"Module '{hook_name}' does not support hook registration."
+                            )
+                        if isinstance(hook, nn.Module):
+                            module.add_module(f"hook", hook)
+
+                        cls._hook_map[hook_name] = hook
+                        cls._weak_blocks[hook_name] = module
+                        injected += 1
+                        print(
+                            f"[HookManager] Injected hook for layer '{hook_name}', hook class: {hook_cls.__name__}"
+                        )
+
+            print(f"[HookManager] Injected {injected} independent hooks.")
 
     @classmethod
     def _resolve_hook_config(cls, name: str):
@@ -169,11 +206,11 @@ class HookManager:
         for name, hook in cls._hook_map.items():
             print(f"  {name}: {hook.__class__.__name__}")
         print(f"[HookManager] Shared Buffer Keys: {list(cls._shared_buffer.keys())}")
-    
+
     @classmethod
     def get_all_hooks(cls) -> Dict[Union[int, str], "BaseDiTBlockHook"]:
         return cls._hook_map
-    
+
     @classmethod
     def set_global(cls, key: str, value: Any):
         if not cls._enabled:

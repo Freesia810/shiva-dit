@@ -214,7 +214,7 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         self.prompt_template_encode_start_idx = 64
         self.default_sample_size = 128
 
-        from project_name.utils.context import global_context
+        from shiva_dit.utils.context import global_context
         global_context.update(
             model_name="qwen-image-edit",
             num_layers=self.transformer.config.num_layers,
@@ -806,7 +806,7 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
             negative_prompt_embeds_mask.sum(dim=1).tolist() if negative_prompt_embeds_mask is not None else None
         )
 
-        from project_name.utils.context import global_context
+        from shiva_dit.utils.context import global_context
         global_context.update(
             num_inference_steps=num_inference_steps,
             hidden_seq_height=img_shapes[0][0][1],
@@ -827,7 +827,7 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                     continue
 
                 self._current_timestep = t
-                from project_name.utils.context import global_context
+                from shiva_dit.utils.context import global_context
                 global_context.update(
                     current_timestep=self._current_timestep, current_iteration=i
                 )
@@ -839,7 +839,7 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
                 with self.transformer.cache_context("cond"):
-                    from project_name.utils.context import global_context
+                    from shiva_dit.utils.context import global_context
                     global_context.update(encoder_flag=True)
                     noise_pred = self.transformer(
                         hidden_states=latent_model_input,
@@ -856,7 +856,7 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
 
                 if do_true_cfg:
                     with self.transformer.cache_context("uncond"):
-                        from project_name.utils.context import global_context
+                        from shiva_dit.utils.context import global_context
                         global_context.update(encoder_flag=False)
                         neg_noise_pred = self.transformer(
                             hidden_states=latent_model_input,
@@ -870,7 +870,7 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                             return_dict=False,
                         )[0]
                     neg_noise_pred = neg_noise_pred[:, : latents.size(1)]
-                    from project_name.utils.context import global_context
+                    from shiva_dit.utils.context import global_context
                     global_context.update(
                         last_cfg_hidden_state=(noise_pred - neg_noise_pred).abs(),
                     )

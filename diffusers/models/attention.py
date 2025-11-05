@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from project_name.hook.delegate import delegated_forward
+from shiva_dit.hook.delegate import delegated_forward
 
 from ..utils import deprecate, logging
 from ..utils.import_utils import is_torch_npu_available, is_torch_xla_available, is_xformers_available

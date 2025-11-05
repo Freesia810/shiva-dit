@@ -1,4 +1,4 @@
-from project_name.training import DiffusionModelTrainer, LoraConfig, TrainerConfig
+from shiva_dit.training import DiffusionModelTrainer, LoraConfig, TrainerConfig
 from baselines.dy_dit import DynamicDiTBlockHook
 
 HookType = DynamicDiTBlockHook

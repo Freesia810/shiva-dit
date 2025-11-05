@@ -3,8 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Literal
-from project_name.hook import BaseDiTBlockHook, BaseDelegator, HookManager
-from project_name.utils import (
+from shiva_dit.hook import BaseDiTBlockHook, BaseDelegator, HookManager
+from shiva_dit.utils import (
     ceil_ste,
     global_context,
     get_pipeline,
@@ -170,24 +170,30 @@ class DiffCRDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             hidden_output = hidden_output * (self.token_scores.gather(dim=1, index=self.index).unsqueeze(2).to(hidden_output.dtype))
         return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
 
-def calculate_ratio_loss(config: dict, device: torch.device):
-    target_ratio = config["target_ratio"]
-    ratio_loss_weight = config["ratio_loss_weight"]
-    ratios = []
-    custom_losses = []
-    for hook in HookManager.get_all_hooks().values():
-        if isinstance(hook, DiffCRDitBlockHook):
-            ratios.append(hook.diff_ratio)
-    if ratios:
-        avg_ratio = torch.mean(torch.stack(ratios))
-        target_ratio_tensor = torch.tensor(target_ratio, device=avg_ratio.device)
-        diffcr_loss = F.mse_loss(avg_ratio, target_ratio_tensor)
-        custom_losses.append(diffcr_loss)
+    @staticmethod
+    def calculate_ratio_loss(config: dict, device: torch.device):
+        target_ratio = config["target_ratio"]
+        ratio_loss_weight = config["ratio_loss_weight"]
+        ratios = []
+        custom_losses = []
+        for hook in HookManager.get_all_hooks().values():
+            if isinstance(hook, DiffCRDitBlockHook):
+                ratios.append(hook.diff_ratio)
+        if ratios:
+            avg_ratio = torch.mean(torch.stack(ratios))
+            target_ratio_tensor = torch.tensor(target_ratio, device=avg_ratio.device)
+            diffcr_loss = F.mse_loss(avg_ratio, target_ratio_tensor)
+            custom_losses.append(diffcr_loss)
 
-    if custom_losses:
-        return torch.stack(custom_losses).mean() * ratio_loss_weight
-    else:
-        return torch.tensor(0.0, device)
+        if custom_losses:
+            return torch.stack(custom_losses).mean() * ratio_loss_weight
+        else:
+            return torch.tensor(0.0, device)
+
+    @staticmethod
+    def calculate_extra_loss(config: dict, device: torch.device) -> torch.Tensor:
+        ratio_loss = DiffCRDitBlockHook.calculate_ratio_loss(config, device)
+        return ratio_loss
 
 if __name__ == "__main__":
     model_type = "pixart-sigma"

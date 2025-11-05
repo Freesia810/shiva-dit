@@ -1,0 +1,625 @@
+import inspect
+from typing import Literal, Type
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from shiva_dit.hook.block_hook import BaseDiTBlockHook
+from shiva_dit.hook.delegate import BaseDelegator
+from shiva_dit.hook.hook_manager import HookManager
+from shiva_dit.utils import ceil_ste, global_context
+from shiva_dit.utils.utils import join_image_rotary_emb, parse_image_rotary_emb
+
+
+class ShivaRouter(nn.Module):
+    def __init__(
+        self,
+        hidden_dim: int,
+        prompt_embed_dim: int,
+        layer_embed_dim: int,
+        bottleneck_dim: int = 64,
+        time_embed_dim: int = None,
+    ):
+        super().__init__()
+
+        if time_embed_dim is None:
+            time_embed_dim = hidden_dim
+
+        self.token_proj = nn.Linear(hidden_dim, bottleneck_dim)
+        self.prompt_proj = nn.Linear(prompt_embed_dim, bottleneck_dim, bias=False)
+        self.temb_proj = nn.Linear(time_embed_dim, bottleneck_dim, bias=False)
+        self.layer_proj = nn.Linear(layer_embed_dim, bottleneck_dim, bias=False)
+        self.router_head = nn.Linear(bottleneck_dim, 1, bias=True)
+
+    def forward(
+        self,
+        hidden_states,
+        pooled_encoder_states,
+        temb,
+        layer_emb,
+    ):
+        """
+        hidden_states: (B, seq_len, D_h)
+        temb: (B, D_t)
+        pooled_encoder_states: (B, D_p)
+        layer_emb: (B, D_l)
+        """
+
+        time_feat = self.temb_proj(temb).unsqueeze(1)
+        prompt_feat = self.prompt_proj(pooled_encoder_states).unsqueeze(1)
+        layer_feat = self.layer_proj(layer_emb).unsqueeze(1)
+        context_feat = time_feat + prompt_feat + layer_feat
+
+        token_feat = self.token_proj(hidden_states)  # (B, N, c)
+        fused_hidden = F.silu(token_feat + context_feat)
+        token_scores = self.router_head(fused_hidden)  # (B, N, 1)
+        return token_scores.squeeze(-1)  # (B, N)
+
+
+class ShivaContextPruner(nn.Module):
+    def __init__(self, threshold: int = None, ratio: float = None):
+        super().__init__()
+        if ratio is not None and not 0.0 < ratio <= 1.0:
+            raise ValueError(f"Pruning ratio must be between (0, 1], but got {ratio}")
+
+        self.threshold = threshold
+        self.ratio = ratio
+
+    @torch.no_grad()
+    def forward(self, encoder_hidden_states: torch.Tensor):
+        """
+        :param encoder_hidden_states: (B, C, D)
+        :return: (pruned_states, pooled_vector)
+                 pruned_states: (B, c_pruned, D) 或 (B, C, D)
+                 pooled_vector: (B, D)
+        """
+        B, C, D = encoder_hidden_states.shape
+
+        if self.threshold is None:
+            # default: mean pooling
+            pooled_vector = torch.mean(encoder_hidden_states, dim=1)
+            return encoder_hidden_states, pooled_vector
+
+        if C <= self.threshold or self.ratio == 1.0:
+            # default: mean pooling
+            pooled_vector = torch.mean(encoder_hidden_states, dim=1)
+            return encoder_hidden_states, pooled_vector
+
+        c_pruned = int(C * self.ratio)
+        c_pruned = max(c_pruned, 1)
+        if c_pruned == C:
+            pooled_vector = torch.mean(encoder_hidden_states, dim=1)
+            return encoder_hidden_states, pooled_vector
+
+        token_scores = torch.norm(
+            encoder_hidden_states.to(torch.float32), p=2, dim=-1
+        ).detach()
+        topk_indices = torch.topk(token_scores, k=c_pruned, dim=-1).indices
+        topk_indices_expanded = topk_indices.unsqueeze(-1).expand(-1, -1, D)
+        pruned_states = torch.gather(encoder_hidden_states, 1, topk_indices_expanded)
+        pooled_vector = torch.mean(pruned_states, dim=1)
+
+        return pruned_states, pooled_vector
+
+
+class ShivaGater(nn.Module):
+    """
+    During training, we use this module to gating the experts.
+    During inference, we can obtain the layer id and the timesteps offline, so we can directly use the gating logits.
+    """
+    def __init__(
+        self,
+        time_embed_dim: int,
+        layer_embed_dim: int,
+    ):
+        super().__init__()
+        fused_dim = time_embed_dim + layer_embed_dim
+        self.net = nn.Sequential(
+            nn.Linear(fused_dim, 64),
+            nn.SiLU(),
+            nn.Linear(64, 2),  # Prune, Fuse
+        )
+
+    def forward(self, temb: torch.Tensor, layer_emb: torch.Tensor):
+        """
+        :param temb: (B, time_embed_dim)
+        :param layer_emb: (B, layer_embed_dim)
+        :return: (B, 2)
+        """
+        fused_input = torch.cat([temb, layer_emb], dim=-1)
+        return self.net(fused_input)  # [B, 2]
+
+
+ShivaPrunerExpert = nn.Identity
+
+
+class ShivaFuserExpert(nn.Module):
+    def __init__(self, hidden_dim: int, ffn_mult: int = 2):
+        super().__init__()
+        self.fusion_ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * ffn_mult),
+            nn.SiLU(),
+            nn.Linear(hidden_dim * ffn_mult, hidden_dim)
+        )
+
+    def forward(self, survivors, discarded):
+        """
+        survivors: (B, k, D)
+        discarded: (B, N-k, D)
+        """
+        if discarded.shape[1] > 0:
+            global_info = torch.mean(discarded, dim=1, keepdim=True) # (B, 1, D)
+            projected_info = self.fusion_ffn(global_info) # (B, 1, D)
+            fused_survivors = survivors + projected_info # (B, k, D)
+        else:
+            fused_survivors = survivors
+
+        return fused_survivors
+
+
+class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
+    """
+    multiple shivahooks will share the same experts and modules, so we use dependency injection to pass them in.
+    """
+    @classmethod
+    def setup_shared_hooks(
+        cls,
+        hook_manager_cls: Type["HookManager"],
+        model_type: str,
+        pipe,
+        model_attrs: list[str],
+        **kwargs,
+    ):
+        bottleneck_dim = kwargs.pop("bottleneck_dim", 64)
+        num_router_groups = kwargs.pop("num_router_groups", 4)
+        layer_embed_dim = kwargs.pop("layer_embed_dim", 256)
+        fuse_expert_ffn_mult = kwargs.pop("fuse_expert_ffn_mult", 2)
+        context_pruning_threshold = kwargs.pop("context_pruning_threshold", None)
+        context_pruning_ratio = kwargs.pop("context_pruning_ratio", None)
+        if 'initial_kept_ratio' not in kwargs:
+            kwargs['initial_kept_ratio'] = 1.0
+
+        model_dim = global_context.hidden_dim
+        prompt_embed_dim = global_context.encoder_hidden_dim
+        if model_dim is None:
+            raise ValueError(
+                "[ShivaDitBlockHook] 'hidden_dim' not found in global_context."
+            )
+        if prompt_embed_dim is None:
+            raise ValueError(
+                "[ShivaDitBlockHook] 'encoder_hidden_dim' not found in global_context."
+            )
+
+        time_embed_dim = model_dim
+
+        all_blocks = []
+        for model_attr in model_attrs:
+            m = getattr(pipe, model_attr)
+            for name, module in m.named_modules():
+                if isinstance(module, hook_manager_cls.get_block_type(model_type)):
+                    full_name = f"{model_attr}.{name}"
+                    all_blocks.append((full_name, module))
+
+        num_layers = len(all_blocks)
+        if num_layers == 0:
+            print("[ShivaDitBlockHook] Warning: Found 0 matching blocks.")
+            return
+
+        try:
+            first_block_param = next(all_blocks[0][1].parameters())
+            device = first_block_param.device
+            dtype = first_block_param.dtype
+        except StopIteration:
+            raise RuntimeError(
+                "Cannot infer device/dtype: First block has no parameters."
+            )
+
+        print(
+            f"[ShivaDitBlockHook] Found {num_layers} blocks. Instantiating shared modules..."
+        )
+        print(
+            f"  > model_dim: {model_dim}, prompt_embed_dim: {prompt_embed_dim}, layer_embed_dim: {layer_embed_dim}"
+        )
+
+        shared_layer_embedder = nn.Embedding(num_layers, layer_embed_dim).to(
+            device, dtype
+        )
+        shared_gater = ShivaGater(
+            time_embed_dim=time_embed_dim, layer_embed_dim=layer_embed_dim
+        ).to(device, dtype)
+        shared_pruner = ShivaContextPruner(
+            threshold=context_pruning_threshold, ratio=context_pruning_ratio
+        )
+        shared_fuse_expert = ShivaFuserExpert(
+            hidden_dim=model_dim, ffn_mult=fuse_expert_ffn_mult
+        ).to(device, dtype)
+        grouped_routers = nn.ModuleList(
+            [
+                ShivaRouter(
+                    hidden_dim=model_dim,
+                    time_embed_dim=time_embed_dim,
+                    prompt_embed_dim=prompt_embed_dim,
+                    layer_embed_dim=layer_embed_dim,
+                    bottleneck_dim=bottleneck_dim,
+                )
+                for _ in range(num_router_groups)
+            ]
+        ).to(device, dtype)
+
+        ## initialization: keep parameters to reasonable values
+        nn.init.constant_(shared_gater.net[-1].bias, 0.0)
+        shared_gater.net[-1].bias.data[0] = 5.0
+        shared_gater.net[-1].bias.data[1] = -5.0
+        nn.init.zeros_(shared_fuse_expert.fusion_ffn[-1].weight)
+        for router in grouped_routers:
+            nn.init.zeros_(router.router_head.weight)
+            nn.init.constant_(router.router_head.bias, 5.0)
+
+        layers_per_group = num_layers // num_router_groups
+
+        injected = 0
+        for i, (hook_name, module) in enumerate(all_blocks):
+            router_group_id = min(i // layers_per_group, num_router_groups - 1)
+            injected_router = grouped_routers[router_group_id]
+
+            hook_kwargs = {
+                "shared_layer_embedder": shared_layer_embedder,
+                "shared_router": injected_router,
+                "shared_gater": shared_gater,
+                "shared_pruner": shared_pruner,
+                "shared_fuse_expert": shared_fuse_expert,
+                **kwargs,
+            }
+
+            hook = cls(**hook_kwargs)
+            hook.register_name(model_type, hook_name)
+            if hasattr(module, "register_hook"):
+                module.register_hook(hook_name, hook)
+            else:
+                raise RuntimeError(
+                    f"Module '{hook_name}' does not support hook registration."
+                )
+
+            module.add_module(f"hook", hook)
+            hook_manager_cls._hook_map[hook_name] = hook
+            hook_manager_cls._weak_blocks[hook_name] = module
+            injected += 1
+
+        print(
+            f"[ShivaDitBlockHook] Injected {injected} shared hooks (using {num_router_groups} router groups)."
+        )
+
+    def __init__(
+        self,
+        shared_layer_embedder: nn.Embedding,
+        shared_router: ShivaRouter,
+        shared_gater: ShivaGater,
+        shared_pruner: ShivaContextPruner,
+        shared_fuse_expert: ShivaFuserExpert,
+        initial_kept_ratio: float = 0.5,
+        use_gater_lut: bool = False,
+        shared_gater_cache: torch.Tensor = None,
+        **kwargs,
+    ):
+
+        super().__init__(**kwargs)
+
+        self.shiva_ratio = nn.Parameter(torch.tensor(float(initial_kept_ratio)))
+
+        self.layer_embedder = shared_layer_embedder
+        self.router = shared_router
+        self.gater = shared_gater
+        self.context_pruner = shared_pruner
+        self.prune_expert = ShivaPrunerExpert()
+        self.fuse_expert = shared_fuse_expert
+
+        self.use_gater_lut = use_gater_lut
+        self.gater_cache = shared_gater_cache
+
+        if self.use_gater_lut and self.gater_cache is None:
+            raise ValueError(
+                f"ShivaDitBlockHook(layer_idx={self.layer_idx}): 'use_gater_lut' is True, "
+                "but 'shared_gater_cache' was not provided."
+            )
+
+        self.ratio_sq_loss_accumulator = []
+        self.gate_loss_accumulator = []
+        self.prune_output_accumulator = []
+        self.fuse_output_accumulator = []
+
+        self.token_scores = None
+
+        self.eval()
+
+    def delegated_call(self, func, module_self, *args, **kwargs):
+        sig = inspect.signature(func)
+        bound = sig.bind_partial(module_self, *args, **kwargs)
+        bound.apply_defaults()
+
+        hidden_states = bound.arguments.get("hidden_states")
+        encoder_hidden_states = bound.arguments.get("encoder_hidden_states")
+        image_rotary_emb = bound.arguments.get("image_rotary_emb")
+
+        dtype = hidden_states.dtype
+        B, N, D = hidden_states.shape
+
+        pure_temb = global_context.pure_temb
+
+        pruned_encoder_states, pooled_encoder_vector = self.context_pruner(
+            encoder_hidden_states.to(dtype)
+        )
+
+        layer_id_tensor = torch.tensor(
+            [self.layer_idx], device=pure_temb.device, dtype=torch.long
+        ).expand(B)
+        layer_emb_vector = self.layer_embedder(layer_id_tensor).to(dtype)
+
+        token_scores = self.router(
+            hidden_states.to(dtype), pure_temb, pooled_encoder_vector, layer_emb_vector
+        )
+
+        kept_ratio = torch.clamp(self.shiva_ratio, 0.1, 1.0)
+        k = ceil_ste(kept_ratio * N).to(torch.int32)
+        k = torch.min(k, torch.tensor(N, device=hidden_states.device))
+
+        (
+            self.token_scores,  # (B, k)
+            survivors,  # (B, k, D)
+            remaining_x,  # (B, N, D)
+            survivors_indices,  # (B, k)
+        ) = self._select_topk_and_remaining_tokens(hidden_states, token_scores, k, D)
+
+        discarded_mask = torch.ones_like(hidden_states, dtype=torch.bool)
+        discarded_mask.scatter_(
+            1, survivors_indices.unsqueeze(-1).expand(-1, -1, D), False
+        )
+        discarded = hidden_states[discarded_mask].view(B, N - k, D)
+
+        survivor_rope = self._gather_rope(image_rotary_emb, survivors_indices)
+
+        if self.training:
+            ratio_sq_loss = self.shiva_ratio**2
+            self.ratio_sq_loss_accumulator.append(ratio_sq_loss)
+
+            gater_logits = self.gater(pure_temb, layer_emb_vector)  # (B, 2)
+            gating_weights = F.softmax(gater_logits, dim=-1)
+
+            entropy = -(gating_weights * torch.log(gating_weights + 1e-10)).sum(dim=-1)
+            self.gate_loss_accumulator.append(entropy.mean())
+
+            g_prune = gating_weights[:, 0].unsqueeze(-1).unsqueeze(-1)
+            g_fuse = gating_weights[:, 1].unsqueeze(-1).unsqueeze(-1)
+
+            output_prune = self.prune_expert(survivors)
+            output_fuse = self.fuse_expert(survivors.to(dtype), discarded.to(dtype))
+
+            self.prune_output_accumulator.append(output_prune)
+            self.fuse_output_accumulator.append(output_fuse)
+
+            final_topk_states = (g_prune * output_prune) + (g_fuse * output_fuse)
+        else:
+            self.ratio_sq_loss_accumulator.clear()
+            self.gate_loss_accumulator.clear()
+            self.prune_output_accumulator.clear()
+            self.fuse_output_accumulator.clear()
+
+            if self.use_gater_lut:
+                current_t_index = global_context.current_iteration # TODO: LUT Logic
+                decision = self.gater_cache[self.layer_idx, current_t_index].item()
+            else:
+                # we can use the first batch's decision safely because all samples share the same layer_idx and timestep
+                gater_logits = self.gater(pure_temb, layer_emb_vector)
+                decision = torch.argmax(gater_logits[0], dim=-1).item()
+
+            if decision == 0:
+                final_topk_states = self.prune_expert(survivors)
+            else:
+                final_topk_states = self.fuse_expert(
+                    survivors.to(dtype), discarded.to(dtype)
+                )
+
+        bound.arguments["hidden_states"] = final_topk_states
+        bound.arguments["image_rotary_emb"] = survivor_rope
+        bound.arguments["encoder_hidden_states"] = pruned_encoder_states
+
+        processed_output = func(*bound.args, **bound.kwargs)
+
+        if isinstance(processed_output, tuple):
+            processed_encoder_states, processed_hidden_states = processed_output
+        else:
+            processed_hidden_states = processed_output
+
+        final_hidden_states = self._scatter_add(
+            processed_hidden_states, remaining_x, survivors_indices
+        )
+
+        if isinstance(processed_output, tuple):
+            return processed_encoder_states, final_hidden_states
+        else:
+            return final_hidden_states
+
+    def _select_topk_and_remaining_tokens(self, x, token_scores, k, C):
+        B, N, _ = x.shape
+        token_scores, topk_indices = torch.topk(
+            torch.sigmoid(token_scores), k=k, sorted=False
+        )
+
+        # ===== Top-k tokens =====
+        gather_index = topk_indices.unsqueeze(-1).expand(-1, -1, C)  # (B, k, C)
+        topk_x = torch.gather(x, dim=1, index=gather_index)  # (B, k, C)
+        # ===== Remaining tokens =====
+        remaining_x = x.clone()
+        remaining_x.scatter_(1, gather_index, 0.0)
+
+        return token_scores, topk_x, remaining_x, topk_indices
+
+    def _gather_rope(self, image_rotary_emb, survivors_indices):
+        if image_rotary_emb is not None:
+            assert (
+                survivors_indices.shape[0] == 1
+            ), "image_rotary_emb only supports batch size 1"
+            hidden_emb, encoder_emb, _ = parse_image_rotary_emb(
+                self.model_type,
+                image_rotary_emb,
+                global_context.hidden_seq_len,
+                global_context.encoder_hidden_seq_len_gen(),
+                split_extra=False, # we do not need extra here
+            )
+
+            hidden_emb = tuple(
+                torch.gather(
+                    x,
+                    dim=0,
+                    index=survivors_indices[0].unsqueeze(-1).expand(-1, x.shape[-1]),
+                )
+                for x in hidden_emb
+            )
+
+            image_rotary_emb = join_image_rotary_emb(
+                self.model_type, hidden_emb, encoder_emb
+            )
+
+        return image_rotary_emb
+
+    def _scatter_add(self, processed_hidden_states, remaining_x, survivors_indices):
+        B, k, D = processed_hidden_states.shape
+        final_states = remaining_x.scatter_add(
+            1,
+            survivors_indices.unsqueeze(-1).expand(-1, -1, D),
+            processed_hidden_states,
+        )
+        return final_states
+
+    def hook_after_module(
+        self,
+        module_name: Literal["self-attn", "cross-attn", "ffn"],
+        hidden_output: torch.Tensor,
+        encoder_hidden_output: torch.Tensor = None,
+    ):
+        if module_name == "ffn":
+            # gate with topk scores, to maintain the grad
+            hidden_output = hidden_output * (
+                self.token_scores.unsqueeze(2).to(hidden_output.dtype)
+            )
+            self.token_scores = None
+        return super().hook_after_module(
+            module_name, hidden_output, encoder_hidden_output
+        )
+
+    @staticmethod
+    def calculate_consistency_loss(config: dict, device: torch.device) -> torch.Tensor:
+        consistency_loss = []
+        loss_weight = config.get("consistency_loss_weight", 0.0)
+
+        for hook in HookManager.get_all_hooks().values():
+            if isinstance(hook, ShivaDitBlockHook):
+                prune_list = hook.prune_output_accumulator
+                fuse_list = hook.fuse_output_accumulator
+
+                if prune_list and fuse_list:
+                    assert len(prune_list) == len(
+                        fuse_list
+                    ), "Prune/Fuse accumulator length mismatch"
+
+                    micro_batch_losses = []
+                    for prune_out, fuse_out in zip(prune_list, fuse_list):
+                        loss = F.mse_loss(prune_out.detach(), fuse_out)
+                        micro_batch_losses.append(loss)
+
+                    if micro_batch_losses:
+                        avg_loss_for_hook = torch.stack(micro_batch_losses).mean()
+                        consistency_loss.append(avg_loss_for_hook)
+                        device = avg_loss_for_hook.device
+
+                hook.prune_output_accumulator.clear()
+                hook.fuse_output_accumulator.clear()
+
+        if consistency_loss:
+            return torch.stack(consistency_loss).mean() * loss_weight
+        else:
+            return torch.tensor(0.0, device=device)
+
+    @staticmethod
+    def calculate_gate_loss(config: dict, device: torch.device) -> torch.Tensor:
+        gate_losses = []
+        loss_weight = config.get("gate_loss_weight", 0.0)
+
+        for hook in HookManager.get_all_hooks().values():
+            if isinstance(hook, ShivaDitBlockHook):
+                accumulator = hook.gate_loss_accumulator
+
+                if accumulator:
+                    avg_loss_for_hook = torch.stack(accumulator).mean()
+                    gate_losses.append(avg_loss_for_hook)
+                    device = avg_loss_for_hook.device
+
+                hook.gate_loss_accumulator.clear()
+
+        if gate_losses:
+            return torch.stack(gate_losses).mean() * loss_weight
+        else:
+            return torch.tensor(0.0, device=device)
+
+    @staticmethod
+    def calculate_ratio_loss(config: dict, device: torch.device) -> torch.Tensor:
+        ratio_sq_losses_per_hook = []
+        loss_weight = config.get("ratio_loss_weight", 0.0)
+
+        for hook in HookManager.get_all_hooks().values():
+            if isinstance(hook, ShivaDitBlockHook):
+                accumulator = hook.ratio_sq_loss_accumulator
+
+                if accumulator:
+                    avg_loss_for_hook = torch.stack(accumulator).mean()
+                    ratio_sq_losses_per_hook.append(avg_loss_for_hook)
+                    device = avg_loss_for_hook.device
+
+                hook.ratio_sq_loss_accumulator.clear()
+
+        if ratio_sq_losses_per_hook:
+            mean_ratio_sq_loss = torch.stack(ratio_sq_losses_per_hook).mean()
+            return mean_ratio_sq_loss * loss_weight
+        else:
+            return torch.tensor(0.0, device=device)
+
+    @staticmethod
+    def calculate_extra_loss(config: dict, device: torch.device) -> torch.Tensor:
+        extra_loss = torch.tensor(0.0, device=device)
+
+        consistency_loss = ShivaDitBlockHook.calculate_consistency_loss(config, device)
+        gate_loss = ShivaDitBlockHook.calculate_gate_loss(config, device)
+        ratio_loss = ShivaDitBlockHook.calculate_ratio_loss(config, device)
+
+        extra_loss += consistency_loss + gate_loss + ratio_loss
+
+        return extra_loss, consistency_loss, gate_loss, ratio_loss
+
+if __name__ == "__main__":
+    from shiva_dit.utils import get_pipeline, process_quick_start
+    model_type = "sd3"
+    pipe, model_attrs = get_pipeline(model_type)
+
+    shiva_config = {
+        "bottleneck_dim": 2,
+        "layer_embed_dim": 4,
+        "num_router_groups": 1,
+        "fuse_expert_ffn_mult": 2,
+        "context_pruning_threshold": None,
+        "context_pruning_ratio": None,
+        "initial_kept_ratio": 1.0,
+        "use_gater_lut": False,
+    }
+
+    HookManager.configure_hooks(
+        model_type=model_type,
+        default=(ShivaDitBlockHook, shiva_config),
+    )
+
+    with HookManager.enabled():
+        HookManager.inject_hooks(
+            model_type=model_type, pipe=pipe, model_attrs=model_attrs
+        )
+        res = process_quick_start(pipe)
+        res.save(f"{model_type}_shiva.png")
+
+    print(global_context)

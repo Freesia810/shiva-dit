@@ -1,6 +1,6 @@
 import torch
 from PIL import Image
-from project_name.utils.context import global_context
+from shiva_dit.utils.context import global_context
 from diffusers.utils import load_image
 from diffusers.models.autoencoders import AutoencoderKLWan
 from diffusers.pipelines import (

@@ -1,6 +1,6 @@
 import torch
 from typing import Literal, Optional, Tuple
-from project_name.hook import BaseDiTBlockHook,HookManager
+from shiva_dit.hook import BaseDiTBlockHook,HookManager
 
 
 class PrintDiTBlockHook(BaseDiTBlockHook):

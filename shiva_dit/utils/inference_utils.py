@@ -3,8 +3,8 @@ import os
 from peft import LoraConfig as PeftLoraConfig, get_peft_model
 from dataclasses import asdict
 
-from project_name.utils import get_pipeline
-from project_name.hook import HookManager
+from shiva_dit.utils import get_pipeline
+from shiva_dit.hook import HookManager
 
 from baselines.diffcr import DiffCRDitBlockHook
 from baselines.dy_dit import DynamicDiTBlockHook

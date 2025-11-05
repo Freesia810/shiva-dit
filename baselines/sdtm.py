@@ -2,8 +2,8 @@ import math
 import torch
 import torch.nn.functional as F
 from typing import Union, Tuple, Literal, Optional
-from project_name.hook import BaseDiTBlockHook, HookManager, BaseDelegator
-from project_name.utils import (
+from shiva_dit.hook import BaseDiTBlockHook, HookManager, BaseDelegator
+from shiva_dit.utils import (
     global_context,
     merge_dst_src_tokens,
     get_dst_src_tokens,

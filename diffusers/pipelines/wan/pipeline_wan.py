@@ -154,7 +154,7 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
         self.vae_scale_factor_spatial = self.vae.config.scale_factor_spatial if getattr(self, "vae", None) else 8
         self.video_processor = VideoProcessor(vae_scale_factor=self.vae_scale_factor_spatial)
 
-        from project_name.utils.context import global_context
+        from shiva_dit.utils.context import global_context
         global_context.update(
             model_name="wan",
             num_layers=self.transformer.config.num_layers,
@@ -563,7 +563,7 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
 
         mask = torch.ones(latents.shape, dtype=torch.float32, device=device)
 
-        from project_name.utils.context import global_context
+        from shiva_dit.utils.context import global_context
         global_context.update(
             num_inference_steps=num_inference_steps,
             hidden_seq_height=(latents.shape[-2] // self.transformer.config.patch_size[1]),
@@ -589,7 +589,7 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                     continue
 
                 self._current_timestep = t
-                from project_name.utils.context import global_context
+                from shiva_dit.utils.context import global_context
                 global_context.update(
                     current_timestep=self._current_timestep, current_iteration=i
                 )
@@ -631,7 +631,7 @@ class WanPipeline(DiffusionPipeline, WanLoraLoaderMixin):
                             return_dict=False,
                         )[0]
 
-                    from project_name.utils.context import global_context
+                    from shiva_dit.utils.context import global_context
                     global_context.update(
                         last_cfg_hidden_state=(noise_pred - noise_uncond).abs(),
                     )

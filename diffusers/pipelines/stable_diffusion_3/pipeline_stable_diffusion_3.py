@@ -230,7 +230,7 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
             self.transformer.config.patch_size if hasattr(self, "transformer") and self.transformer is not None else 2
         )
 
-        from project_name.utils.context import global_context
+        from shiva_dit.utils.context import global_context
         global_context.update(
             model_name="sd3",
             hidden_dim=self.transformer.inner_dim,
@@ -1016,7 +1016,7 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
             latents,
         )
 
-        from project_name.utils.context import global_context
+        from shiva_dit.utils.context import global_context
         global_context.update(
             encoder_hidden_seq_len=prompt_embeds.shape[1], # cfg enable, prompt_embeds batch = 2
             negative_encoder_hidden_seq_len=prompt_embeds.shape[1] if self.do_classifier_free_guidance else None, # cfg enable, prompt_embeds batch = 2
@@ -1052,7 +1052,7 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self._num_timesteps = len(timesteps)
 
-        from project_name.utils.context import global_context
+        from shiva_dit.utils.context import global_context
         global_context.update(
             num_inference_steps=num_inference_steps,
         )
@@ -1078,7 +1078,7 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
                 if self.interrupt:
                     continue
 
-                from project_name.utils.context import global_context
+                from shiva_dit.utils.context import global_context
                 global_context.update(current_timestep=t, current_iteration=i)
 
                 # expand the latents if we are doing classifier free guidance
@@ -1099,7 +1099,7 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
                 if self.do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
 
-                    from project_name.utils.context import global_context
+                    from shiva_dit.utils.context import global_context
                     global_context.update(
                         last_cfg_hidden_state=(noise_pred_uncond - noise_pred_text).abs(),
                     )

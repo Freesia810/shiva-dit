@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 from typing import Literal, Optional, Tuple, Union
 from diffusers.models.transformers.transformer_flux import FluxSingleTransformerBlock
-from project_name.hook import BaseDiTBlockHook, HookManager
-from project_name.utils import (
+from shiva_dit.hook import BaseDiTBlockHook, HookManager
+from shiva_dit.utils import (
     global_context,
     get_dst_src_tokens,
     sample_dst_src_with_2D_stride,

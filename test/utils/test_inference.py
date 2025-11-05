@@ -1,5 +1,5 @@
 import torch
-from project_name.utils.inference_utils import load_pipeline_for_inference
+from shiva_dit.utils.inference_utils import load_pipeline_for_inference
 
 CKPT_PATH = "./checkpoints/best.pt" 
 BASE_MODEL_PATH = None 

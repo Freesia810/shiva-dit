@@ -356,6 +356,9 @@ class WanTimeTextImageEmbedding(nn.Module):
         temb = self.time_embedder(timestep).type_as(encoder_hidden_states)
         timestep_proj = self.time_proj(self.act_fn(temb))
 
+        from shiva_dit.utils.context import global_context
+        global_context.update(pure_temb=timestep_proj)
+
         encoder_hidden_states = self.text_embedder(encoder_hidden_states)
         if encoder_hidden_states_image is not None:
             encoder_hidden_states_image = self.image_embedder(encoder_hidden_states_image)

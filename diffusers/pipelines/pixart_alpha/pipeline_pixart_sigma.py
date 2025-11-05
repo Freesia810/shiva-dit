@@ -243,7 +243,7 @@ class PixArtSigmaPipeline(DiffusionPipeline):
         self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1) if getattr(self, "vae", None) else 8
         self.image_processor = PixArtImageProcessor(vae_scale_factor=self.vae_scale_factor)
 
-        from project_name.utils.context import global_context
+        from shiva_dit.utils.context import global_context
         global_context.update(
             num_layers=self.transformer.config.num_layers,
             model_name="pixart-sigma",
@@ -831,7 +831,7 @@ class PixArtSigmaPipeline(DiffusionPipeline):
             latents,
         )
 
-        from project_name.utils.context import global_context
+        from shiva_dit.utils.context import global_context
         global_context.update(
             num_inference_steps=num_inference_steps,
             encoder_hidden_seq_len=prompt_embeds.shape[1], # cfg enable, prompt_embeds batch = 2
@@ -856,7 +856,7 @@ class PixArtSigmaPipeline(DiffusionPipeline):
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
                 current_timestep = t
-                from project_name.utils.context import global_context
+                from shiva_dit.utils.context import global_context
                 global_context.update(
                     current_timestep=current_timestep, current_iteration=i
                 )
@@ -888,7 +888,7 @@ class PixArtSigmaPipeline(DiffusionPipeline):
                 # perform guidance
                 if do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    from project_name.utils.context import global_context
+                    from shiva_dit.utils.context import global_context
                     global_context.update(
                         last_cfg_hidden_state=(
                             noise_pred_uncond - noise_pred_text

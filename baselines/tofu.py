@@ -2,8 +2,8 @@ import torch
 import torch.nn as nn
 from typing import Literal, Optional, Tuple, Union
 from baselines.tome_sd import ToMeSDDitBlockHook
-from project_name.hook import HookManager
-from project_name.utils import (
+from shiva_dit.hook import HookManager
+from shiva_dit.utils import (
     global_context,
     merge_dst_src_tokens,
     get_pipeline,

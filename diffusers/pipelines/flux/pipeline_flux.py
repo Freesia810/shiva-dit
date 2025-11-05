@@ -215,7 +215,7 @@ class FluxPipeline(
         )
         self.default_sample_size = 128
 
-        from project_name.utils.context import global_context
+        from shiva_dit.utils.context import global_context
         global_context.update(
             model_name="flux-dev",
             num_layers=self.transformer.config.num_layers,
@@ -879,7 +879,7 @@ class FluxPipeline(
             sigmas = None
         image_seq_len = latents.shape[1]
 
-        from project_name.utils.context import global_context
+        from shiva_dit.utils.context import global_context
         global_context.update(
             hidden_seq_height=(height // (self.vae_scale_factor) // 2),
             hidden_seq_width=(width // (self.vae_scale_factor) // 2),
@@ -905,7 +905,7 @@ class FluxPipeline(
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self._num_timesteps = len(timesteps)
 
-        from project_name.utils.context import global_context
+        from shiva_dit.utils.context import global_context
         global_context.update(
             num_inference_steps=num_inference_steps,
         )
@@ -959,7 +959,7 @@ class FluxPipeline(
                     continue
 
                 self._current_timestep = t
-                from project_name.utils.context import global_context
+                from shiva_dit.utils.context import global_context
                 global_context.update(
                     current_timestep=self._current_timestep, current_iteration=i
                 )
@@ -969,7 +969,7 @@ class FluxPipeline(
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
 
                 with self.transformer.cache_context("cond"):
-                    from project_name.utils.context import global_context
+                    from shiva_dit.utils.context import global_context
                     global_context.update(encoder_flag=True)
                     noise_pred = self.transformer(
                         hidden_states=latents,
@@ -988,7 +988,7 @@ class FluxPipeline(
                         self._joint_attention_kwargs["ip_adapter_image_embeds"] = negative_image_embeds
 
                     with self.transformer.cache_context("uncond"):
-                        from project_name.utils.context import global_context
+                        from shiva_dit.utils.context import global_context
                         global_context.update(encoder_flag=False)
                         neg_noise_pred = self.transformer(
                             hidden_states=latents,
@@ -1002,7 +1002,7 @@ class FluxPipeline(
                             return_dict=False,
                         )[0]
 
-                    from project_name.utils.context import global_context
+                    from shiva_dit.utils.context import global_context
                     global_context.update(
                         last_cfg_hidden_state=(noise_pred - neg_noise_pred).abs(),
                     )

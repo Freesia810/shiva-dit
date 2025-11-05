@@ -177,7 +177,7 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         self.prompt_template_encode_start_idx = 34
         self.default_sample_size = 128
 
-        from project_name.utils.context import global_context
+        from shiva_dit.utils.context import global_context
         global_context.update(
             model_name="qwen-image",
             num_layers=self.transformer.config.num_layers,
@@ -685,7 +685,7 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
             negative_prompt_embeds_mask.sum(dim=1).tolist() if negative_prompt_embeds_mask is not None else None
         )
 
-        from project_name.utils.context import global_context
+        from shiva_dit.utils.context import global_context
         global_context.update(
             num_inference_steps=num_inference_steps,
             hidden_seq_height=img_shapes[0][0][1],
@@ -703,14 +703,14 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                     continue
 
                 self._current_timestep = t
-                from project_name.utils.context import global_context
+                from shiva_dit.utils.context import global_context
                 global_context.update(
                     current_timestep=self._current_timestep, current_iteration=i
                 )
                 # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
                 timestep = t.expand(latents.shape[0]).to(latents.dtype)
                 with self.transformer.cache_context("cond"):
-                    from project_name.utils.context import global_context
+                    from shiva_dit.utils.context import global_context
                     global_context.update(encoder_flag=True)
                     noise_pred = self.transformer(
                         hidden_states=latents,
@@ -726,7 +726,7 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
 
                 if do_true_cfg:
                     with self.transformer.cache_context("uncond"):
-                        from project_name.utils.context import global_context
+                        from shiva_dit.utils.context import global_context
                         global_context.update(encoder_flag=False)
                         neg_noise_pred = self.transformer(
                             hidden_states=latents,
@@ -739,7 +739,7 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                             attention_kwargs=self.attention_kwargs,
                             return_dict=False,
                         )[0]
-                    from project_name.utils.context import global_context
+                    from shiva_dit.utils.context import global_context
                     global_context.update(
                         last_cfg_hidden_state=(noise_pred - neg_noise_pred).abs(),
                     )

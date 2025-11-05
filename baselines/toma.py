@@ -3,8 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Literal, Optional, Tuple, Union
 from diffusers.models.transformers.transformer_flux import FluxSingleTransformerBlock
-from project_name.hook import BaseDiTBlockHook, HookManager
-from project_name.utils import (
+from shiva_dit.hook import BaseDiTBlockHook, HookManager
+from shiva_dit.utils import (
     global_context,
     get_pipeline,
     process_quick_start,

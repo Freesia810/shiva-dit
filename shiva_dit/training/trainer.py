@@ -14,17 +14,17 @@ from accelerate import Accelerator
 from accelerate.utils import set_seed, DistributedDataParallelKwargs, broadcast_object_list
 from dataclasses import asdict
 
-from baselines.diffcr import DiffCRDitBlockHook, calculate_ratio_loss
-from baselines.dy_dit import DynamicDiTBlockHook, calculate_flops_loss
+from baselines.diffcr import DiffCRDitBlockHook
+from baselines.dy_dit import DynamicDiTBlockHook
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
-from project_name.hook import HookManager
-from project_name.utils import get_pipeline
-from project_name.training.input_preparers import get_input_preparer
-from project_name.training.config import TrainerConfig
-from project_name.training.dataset import ImageTextDataset, collate_fn
-from project_name.training.logging import NoOpLogger
-from project_name.utils import global_context
-
+from shiva_dit.hook import HookManager
+from shiva_dit.shiva import ShivaDitBlockHook
+from shiva_dit.utils import get_pipeline
+from shiva_dit.training.input_preparers import get_input_preparer
+from shiva_dit.training.config import TrainerConfig
+from shiva_dit.training.dataset import ImageTextDataset, collate_fn
+from shiva_dit.training.logging import NoOpLogger
+from shiva_dit.utils import global_context
 
 
 class DiffusionModelTrainer:
@@ -164,10 +164,14 @@ class DiffusionModelTrainer:
         if config.trainable_hook_config:
             hook_class, hook_kwargs = config.trainable_hook_config
 
-            if hook_class == DynamicDiTBlockHook:
+            if hook_class.__name__ == "DynamicDiTBlockHook":
                 self.hook_type = "dydit"
-            elif hook_class == DiffCRDitBlockHook:
+            elif hook_class.__name__ == "DiffCRDitBlockHook":
                 self.hook_type = "diffcr"
+            elif hook_class.__name__ == "ShivaDitBlockHook":
+                self.hook_type = "shiva"
+                if self.accelerator.is_main_process:
+                    print("Hook type: Shiva. Will use shared injection via setup_shared_hooks.")
             else:
                 raise ValueError(f"Unknown hook class: {hook_class.__name__}")
 
@@ -267,7 +271,7 @@ class DiffusionModelTrainer:
             return NoOpLogger()
         config = self.config
         try:
-            from project_name.training.logging import (
+            from shiva_dit.training.logging import (
                 TensorBoardLogger, WandbLogger, MLflowLogger, LoggerCollection
             )
         except ImportError as e:
@@ -602,13 +606,23 @@ class DiffusionModelTrainer:
 
     def _calculate_hook_loss(self, global_step: int):
         if self.hook_type == "dydit":
-            hook_loss = calculate_flops_loss(
+            hook_loss = DynamicDiTBlockHook.calculate_extra_loss(
                 self.config.extra_config, device=self.device
             )
         elif self.hook_type == "diffcr":
-            hook_loss = calculate_ratio_loss(
+            hook_loss = DiffCRDitBlockHook.calculate_extra_loss(
                 self.config.extra_config, device=self.device
             )
+        elif self.hook_type == "shiva":
+            hook_loss, consistency_loss, gate_loss, ratio_loss = (
+                ShivaDitBlockHook.calculate_extra_loss(
+                    self.config.extra_config, device=self.device
+                )
+            )
+
+            self.last_ratio_loss = ratio_loss.detach()
+            self.last_gate_loss = gate_loss.detach()
+            self.last_consistency_loss = consistency_loss.detach()
         else:
             hook_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
 
@@ -655,7 +669,7 @@ class DiffusionModelTrainer:
             print(f"\n[Step {self.global_step}]: Setting hook parameters' requires_grad = {requires_grad}")
 
         for hook in HookManager.get_all_hooks().values():
-            if isinstance(hook, DiffCRDitBlockHook):
+            if hook.__class__.__name__ == "DiffCRDitBlockHook":
                 if hasattr(hook, "diff_ratio"):
                     if hook.diff_ratio.requires_grad != requires_grad:
                         hook.diff_ratio.requires_grad = requires_grad
@@ -664,8 +678,8 @@ class DiffusionModelTrainer:
                 else:
                     if self.accelerator.is_main_process:
                         print(f"  - WARNING: Found DiffCRDitBlockHook without 'diff_ratio' param.")
-            
-            elif isinstance(hook, DynamicDiTBlockHook):
+
+            elif hook.__class__.__name__ == "DynamicDiTBlockHook":
                 if hasattr(hook, "dynamic_token_selector") and hook.dynamic_token_selector is not None:
                     if any(p.requires_grad != requires_grad for p in hook.dynamic_token_selector.parameters()):
                         hook.dynamic_token_selector.requires_grad_(requires_grad)
@@ -675,10 +689,21 @@ class DiffusionModelTrainer:
                     if self.accelerator.is_main_process:
                         print(f"  - WARNING: Found DynamicDiTBlockHook without 'dynamic_token_selector'.")
 
+            elif hook.__class__.__name__ == "ShivaDitBlockHook":
+                if hasattr(hook, "shiva_ratio"):
+                    if hook.shiva_ratio.requires_grad != requires_grad:
+                        hook.shiva_ratio.requires_grad = requires_grad
+                        if self.accelerator.is_main_process:
+                            print(f"  - Set Shiva.shiva_ratio.requires_grad = {requires_grad}")
+                else:
+                    if self.accelerator.is_main_process:
+                        print(f"  - WARNING: Found ShivaDitBlockHook without 'shiva_ratio' param.")
+
+
     def _set_finetuning_trainable_state(self, requires_grad: bool):        
         if self.accelerator.is_main_process:
             print(f"\n[Step {self.global_step}]: Setting finetuning parameters' requires_grad = {requires_grad}")
-        
+
         unwrapped_model = self.accelerator.unwrap_model(self.model)
         for name, param in unwrapped_model.named_parameters():
             if self.config.training_mode == "lora":                
@@ -813,6 +838,13 @@ class DiffusionModelTrainer:
                 "train/distill_loss": gathered_losses["distill"].item(),
                 "train/lr": self.lr_scheduler.get_last_lr()[0],
             })
+            if self.hook_type == "shiva":
+                shiva_metrics = {
+                    "shiva/ratio_loss": self.last_ratio_loss.item(),
+                    "shiva/gate_loss": self.last_gate_loss.item(),
+                    "shiva/consistency_loss": self.last_consistency_loss.item(),
+                }
+                metrics_to_log.update(shiva_metrics)
             self.logger.log_scalars(metrics_to_log, step=self.global_step)
 
             if self.global_step % log_trigger == 0:
@@ -824,6 +856,12 @@ class DiffusionModelTrainer:
                     "lr": f"{self.lr_scheduler.get_last_lr()[0]:.2e}",
                     "step": self.global_step,
                 }
+
+                if self.hook_type == "shiva":
+                    postfix_dict["ratio_loss"] = f"{self.last_ratio_loss.item():.4f}"
+                    postfix_dict["gate_loss"] = f"{self.last_gate_loss.item():.4f}"
+                    postfix_dict["consistency_loss"] = f"{self.last_consistency_loss.item():.4f}"
+
                 if self.config.training_mode == "lora":
                     postfix_dict["lora_norm"] = f"{lora_norm:.4f}"
                     postfix_dict["lora_grad_norm"] = f"{lora_grad_norm:.4e}"
@@ -841,7 +879,7 @@ class DiffusionModelTrainer:
     def _log_trainable_parameters(self, description: str = ""):
         if not self.accelerator.is_main_process:
             return
-        
+
         trainable_params = 0
         hook_params = 0
         lora_params = 0
@@ -864,13 +902,13 @@ class DiffusionModelTrainer:
         print(f"  Hook parameters:   {hook_params:,}")
         print(f"  LoRA parameters:   {lora_params:,}")
         print(f"  Trainable ratio:   {100 * trainable_params / all_params:.4f}%")
-        
+
         if len(trainable_param_names) > 0 and len(trainable_param_names) < 15:
-             print(f"  Trainable parameters: {trainable_param_names}")
+            print(f"  Trainable parameters: {trainable_param_names}")
         elif len(trainable_param_names) > 0:
-             print(f"  Trainable parameters: ['{trainable_param_names[0]}', ..., '{trainable_param_names[-1]}']")
+            print(f"  Trainable parameters: ['{trainable_param_names[0]}', ..., '{trainable_param_names[-1]}']")
         else:
-             print(f"  Trainable parameters: None")
+            print(f"  Trainable parameters: None")
         print(f"--------------------------------------------------\n")
 
     @torch.no_grad()
@@ -939,12 +977,19 @@ class DiffusionModelTrainer:
                 block_ratios_for_tb = {}
                 hook_ratios = []
                 for name, hook in HookManager.get_all_hooks().items():
-                    if isinstance(hook, DiffCRDitBlockHook):
+                    ratio_val = None
+                    if hook.__class__.__name__ == "DiffCRDitBlockHook":
                         ratio_val = hook.diff_ratio.item()
+                    elif hook.__class__.__name__ == "ShivaDitBlockHook":
+                        if hasattr(hook, "shiva_ratio"):
+                            ratio_val = hook.shiva_ratio.item()
+                    
+                    if ratio_val is not None:
                         hook_ratios.append(ratio_val)
                         print(f"    {name}: {ratio_val:.4f}")
                         clean_name = name.split(".")[-1]
                         block_ratios_for_tb[clean_name] = ratio_val
+
                 print(f"--------------------------------------")
 
                 self.logger.log_scalars(
@@ -1007,7 +1052,7 @@ class DiffusionModelTrainer:
 
         unwrapped_model = self.accelerator.unwrap_model(self.model)
 
-        # TODO: dual model attr
+        assert len(self.model_attrs) == 1, "Currently only single model_attr supported"
         model_attr_name = self.model_attrs[0]
         original_model_in_pipe = getattr(self.pipe, model_attr_name)
         setattr(self.pipe, model_attr_name, unwrapped_model)
@@ -1072,7 +1117,7 @@ class DiffusionModelTrainer:
                             if os.path.exists(os.path.join(path, "trainer_state.json")):
                                 return int(match_step.group(1))
                         return -1
-                    
+
                     valid_ckpt_dirs = [d for d in ckpt_dirs if extract_step_dir(d) != -1]
                     if valid_ckpt_dirs:
                         latest_ckpt_dir = max(valid_ckpt_dirs, key=extract_step_dir)
@@ -1083,7 +1128,7 @@ class DiffusionModelTrainer:
                     print("No accelerator checkpoint directories found. Starting fresh.")
             else:
                 print(f"No checkpoint directory found at {ckpt_dir}. Starting fresh.")
-        
+
         path_broadcast_list = [latest_ckpt_dir]
         broadcast_object_list(path_broadcast_list, from_process=0)
         latest_ckpt_dir = path_broadcast_list[0]
@@ -1093,16 +1138,16 @@ class DiffusionModelTrainer:
             try:
                 if self.accelerator.is_main_process:
                     print(f"[{self.accelerator.process_index}] Attempting to resume from {latest_ckpt_dir}...")
-                
+
                 self.accelerator.load_state(latest_ckpt_dir)
                 custom_state_path = os.path.join(latest_ckpt_dir, "trainer_state.json")
                 with open(custom_state_path, "r") as f:
                     custom_state = json.load(f)
-                
+
                 self.global_step = custom_state.get("global_step", 0)
                 self.epoch = custom_state.get("epoch", 0)
                 self.best_val_metric = custom_state.get("best_val_metric", None)
-                
+
                 resumed = True
                 if self.accelerator.is_main_process:
                     print(f"Resumed successfully from step={self.global_step}, epoch={self.epoch}")
@@ -1111,7 +1156,7 @@ class DiffusionModelTrainer:
                 resumed = False
                 if self.accelerator.is_main_process:
                     print(f"Failed to load checkpoint {latest_ckpt_dir}. Error: {e}. Starting fresh.")
-        
+
         self.accelerator.wait_for_everyone()
         if not resumed and self.accelerator.is_main_process:
             print("No checkpoint found or resume failed. Starting fresh.")
@@ -1126,19 +1171,19 @@ class DiffusionModelTrainer:
             is_in_warmup = self.global_step < scaled_hook_warmup_steps
             self._set_hook_trainable_state(requires_grad=not is_in_warmup)
         elif self.config.trainable_hook_config:
-             self._set_hook_trainable_state(requires_grad=True)
-    
+            self._set_hook_trainable_state(requires_grad=True)
+
         ## resume hook-only state
         if self.config.hook_only_steps > 0:
             scaled_hook_only_steps = max(
                 1, self.config.hook_only_steps // self.accelerator.num_processes
             )
-            
+
             is_in_hookonly = self.global_step < scaled_hook_only_steps
             self._set_finetuning_trainable_state(requires_grad=not is_in_hookonly)
         else:
             self._set_finetuning_trainable_state(requires_grad=True)
-        
+
         ## print parameter count
         self._log_trainable_parameters('Initial')
 
@@ -1240,7 +1285,7 @@ class DiffusionModelTrainer:
 
             else:
                 raise ValueError(f"Unknown training_mode: {mode}")
-            
+
             hook_info = None
             if self.config.trainable_hook_config:
                 hook_class, hook_kwargs = self.config.trainable_hook_config
@@ -1248,7 +1293,7 @@ class DiffusionModelTrainer:
                     "class_name": hook_class.__name__,
                     "config": hook_kwargs
                 }
-            
+
             lora_info = None
             if self.config.lora_config and self.config.lora_config.enable:
                 lora_info = asdict(self.config.lora_config)
@@ -1305,7 +1350,7 @@ class DiffusionModelTrainer:
         save_path_dir = os.path.join(
             self.config.output_dir, f"checkpoint_step_{self.global_step:06d}"
         )
-        
+
         self.accelerator.save_state(save_path_dir)
         if self.accelerator.is_main_process:
             custom_state = {

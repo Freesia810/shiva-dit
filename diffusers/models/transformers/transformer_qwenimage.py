@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from project_name.hook.delegate import delegated_forward
+from shiva_dit.hook.delegate import delegated_forward
 
 from ...configuration_utils import ConfigMixin, register_to_config
 from ...loaders import FromOriginalModelMixin, PeftAdapterMixin
@@ -153,6 +153,9 @@ class QwenTimestepProjEmbeddings(nn.Module):
     def forward(self, timestep, hidden_states):
         timesteps_proj = self.time_proj(timestep)
         timesteps_emb = self.timestep_embedder(timesteps_proj.to(dtype=hidden_states.dtype))  # (N, D)
+
+        from shiva_dit.utils.context import global_context
+        global_context.update(pure_temb=timesteps_emb)
 
         conditioning = timesteps_emb
 

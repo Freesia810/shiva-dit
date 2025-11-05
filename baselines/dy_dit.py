@@ -4,8 +4,8 @@ import torch
 import torch.nn as nn
 
 from diffusers.models.transformers.transformer_flux import FluxSingleTransformerBlock
-from project_name.hook import BaseDiTBlockHook, BaseDelegator, HookManager
-from project_name.utils import global_context, get_pipeline, process_quick_start
+from shiva_dit.hook import BaseDiTBlockHook, BaseDelegator, HookManager
+from shiva_dit.utils import global_context, get_pipeline, process_quick_start
 
 
 def _gumbel_sigmoid(logits, tau=1, hard=False, eps=1e-10, training=True, threshold=0.5):
@@ -363,29 +363,35 @@ class DynamicDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         else:
             return super().delegated_call(func, module_self, *args, **kwargs)
 
-def calculate_flops_loss(config: dict, device: torch.device) -> torch.Tensor:
-    lambda_target = config["target_flops"]
-    w_flops = config["flops_weight"]
+    @staticmethod
+    def calculate_flops_loss(config: dict, device: torch.device) -> torch.Tensor:
+        lambda_target = config["target_flops"]
+        w_flops = config["flops_weight"]
 
-    f_dynamic_all_blocks = []
-    f_static_all_blocks = []
+        f_dynamic_all_blocks = []
+        f_static_all_blocks = []
 
-    for hook in HookManager.get_all_hooks().values():
-        if isinstance(hook, DynamicDiTBlockHook):
-            if hook.f_dynamic_batch is not None:
-                f_dynamic_all_blocks.append(hook.f_dynamic_batch)
-                f_static_all_blocks.append(hook.f_static_total_block)
+        for hook in HookManager.get_all_hooks().values():
+            if isinstance(hook, DynamicDiTBlockHook):
+                if hook.f_dynamic_batch is not None:
+                    f_dynamic_all_blocks.append(hook.f_dynamic_batch)
+                    f_static_all_blocks.append(hook.f_static_total_block)
 
-    if not f_dynamic_all_blocks:
-        return torch.tensor(0.0, device=device)
+        if not f_dynamic_all_blocks:
+            return torch.tensor(0.0, device=device)
 
-    f_dynamic_per_sample = torch.stack(f_dynamic_all_blocks).sum(dim=0)
-    f_static_total = sum(f_static_all_blocks)
+        f_dynamic_per_sample = torch.stack(f_dynamic_all_blocks).sum(dim=0)
+        f_static_total = sum(f_static_all_blocks)
 
-    avg_flop_ratio_batch = (f_dynamic_per_sample / f_static_total).mean()
-    l_flops = (avg_flop_ratio_batch - lambda_target) ** 2
+        avg_flop_ratio_batch = (f_dynamic_per_sample / f_static_total).mean()
+        l_flops = (avg_flop_ratio_batch - lambda_target) ** 2
 
-    return w_flops * l_flops
+        return w_flops * l_flops
+
+    @staticmethod
+    def calculate_extra_loss(config: dict, device: torch.device) -> torch.Tensor:
+        flops_loss = DynamicDiTBlockHook.calculate_flops_loss(config, device)
+        return flops_loss
 
 if __name__ == "__main__":
     model_type = "flux-dev"
