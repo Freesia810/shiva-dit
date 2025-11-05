@@ -324,7 +324,8 @@ class DiffusionModelTrainer:
         params_to_train = []
 
         if self.config.training_mode == "hook_only":
-            print("Training mode: hook_only (only training Hook parameters)")
+            if self.accelerator.is_main_process:
+                print("Training mode: hook_only (only training Hook parameters)")
             self.model.requires_grad_(False)
             for hook in HookManager.get_all_hooks().values():
                 if isinstance(hook, nn.Module):
@@ -336,7 +337,8 @@ class DiffusionModelTrainer:
                     "No trainable Hook parameters found in 'hook_only' mode."
                 )
         elif self.config.training_mode == "finetune":
-            print("Training mode: finetune (training all DiT parameters)")
+            if self.accelerator.is_main_process:
+                print("Training mode: finetune (training all DiT parameters)")
             self.model.requires_grad_(True)
             params_to_train = list(self.model.parameters())
             for hook in HookManager.get_all_hooks().values():
@@ -344,7 +346,8 @@ class DiffusionModelTrainer:
                     hook.requires_grad_(True)
                     params_to_train.extend(hook.parameters())
         elif self.config.training_mode == "lora":
-            print("Training mode: lora (applying LoRA to DiT model)")
+            if self.accelerator.is_main_process:
+                print("Training mode: lora (applying LoRA to DiT model)")
             if not self.config.lora_config.enable:
                 raise ValueError(
                     "LoRA configuration is disabled in 'lora' training mode."
@@ -364,25 +367,12 @@ class DiffusionModelTrainer:
                 bias="none",
             )
             self.model = get_peft_model(self.model, peft_config)
-            self.model.print_trainable_parameters()
             for hook in HookManager.get_all_hooks().values():
                 if isinstance(hook, nn.Module):
                     hook.requires_grad_(True)
             params_to_train = [p for p in self.model.parameters() if p.requires_grad]
         else:
             raise ValueError(f"Unknown training mode: {self.config.training_mode}")
-
-        if self.config.hook_warmup_steps > 0:
-            # enable hook warm up, we need to froze all ratio
-            for hook in HookManager.get_all_hooks().values():
-                if isinstance(hook, DiffCRDitBlockHook):
-                    if hasattr(hook, "diff_ratio"):
-                        hook.diff_ratio.requires_grad = False
-                        print(f"Froze diff_ratio (value={hook.diff_ratio.item()}) for hook: {hook.__class__.__name__}")
-                    else:
-                        print(f"WARNING: Found DiffCRDitBlockHook without 'diff_ratio' param: {hook.__class__.__name__}")
-
-        print(f"Total trainable parameters: {sum(p.numel() for p in params_to_train)}")
 
         if self.config.optimizer == "AdamW":
             optimizer = torch.optim.AdamW(
@@ -652,9 +642,50 @@ class DiffusionModelTrainer:
         self.accelerator.backward(total_loss)
         return total_loss.detach(), main_loss.detach(), hook_loss.detach(), distill_loss.detach()
 
-    def _on_update_step_end(self, gathered_losses, progress_bar):
-        self._check_and_update_training_phase()
+    def _set_hook_trainable_state(self, requires_grad: bool):
+        if not self.config.trainable_hook_config:
+            return
 
+        if self.accelerator.is_main_process:
+            print(f"\n[Step {self.global_step}]: Setting hook parameters' requires_grad = {requires_grad}")
+
+        for hook in HookManager.get_all_hooks().values():
+            if isinstance(hook, DiffCRDitBlockHook):
+                if hasattr(hook, "diff_ratio"):
+                    if hook.diff_ratio.requires_grad != requires_grad:
+                        hook.diff_ratio.requires_grad = requires_grad
+                        if self.accelerator.is_main_process:
+                            print(f"  - Set DiffCR.diff_ratio.requires_grad = {requires_grad}")
+                else:
+                    if self.accelerator.is_main_process:
+                        print(f"  - WARNING: Found DiffCRDitBlockHook without 'diff_ratio' param.")
+            
+            elif isinstance(hook, DynamicDiTBlockHook):
+                if hasattr(hook, "dynamic_token_selector") and hook.dynamic_token_selector is not None:
+                    if any(p.requires_grad != requires_grad for p in hook.dynamic_token_selector.parameters()):
+                        hook.dynamic_token_selector.requires_grad_(requires_grad)
+                        if self.accelerator.is_main_process:
+                            print(f"  - Set DyDiT.dynamic_token_selector.requires_grad_ = {requires_grad}")
+                else:
+                    if self.accelerator.is_main_process:
+                        print(f"  - WARNING: Found DynamicDiTBlockHook without 'dynamic_token_selector'.")
+
+    def _set_finetuning_trainable_state(self, requires_grad: bool):        
+        if self.accelerator.is_main_process:
+            print(f"\n[Step {self.global_step}]: Setting finetuning parameters' requires_grad = {requires_grad}")
+        
+        unwrapped_model = self.accelerator.unwrap_model(self.model)
+        for name, param in unwrapped_model.named_parameters():
+            if self.config.training_mode == "lora":                
+                if "lora_" in name:
+                    if param.requires_grad != requires_grad:
+                        param.requires_grad = requires_grad
+            elif self.config.training_mode == "finetune":
+                if "hook" not in name:
+                    if param.requires_grad != requires_grad:
+                        param.requires_grad = requires_grad
+
+    def _on_update_step_end(self, gathered_losses, progress_bar):
         log_trigger = max(
             1, self.config.logging_steps // self.accelerator.num_processes
         )
@@ -802,44 +833,32 @@ class DiffusionModelTrainer:
             if inference_trigger and self.global_step % inference_trigger == 0:
                 self.run_inference_validation(self.global_step)
 
-    def _check_and_update_training_phase(self):
-        if self.config.hook_only_steps > 0:
-            scaled_hook_only_steps = max(1, self.config.hook_only_steps // self.accelerator.num_processes)
-            if self.global_step == scaled_hook_only_steps:
-                if self.accelerator.is_main_process:
-                    print(
-                        f"\n[Step {self.global_step}]: Hook-only phase complete. Unfreezing parameters ..."
-                    )
-                unfrozen = 0
-                if self.config.training_mode == "lora":
-                    for name, param in self.model.named_parameters():
-                        if "lora_" in name:
-                            param.requires_grad_(True)
-                            unfrozen += param.numel()
-                elif self.config.training_mode == "finetune":
-                    for name, param in self.model.named_parameters():
-                        if "hook" not in name:
-                            param.requires_grad_(True)
-                            unfrozen += param.numel()
-                if self.accelerator.is_main_process:
-                    print(f"  Unfroze {unfrozen} parameters.")
+    def _log_trainable_parameters(self, description: str = ""):
+        if not self.accelerator.is_main_process:
+            return
+        
+        trainable_params = 0
+        all_params = 0
+        trainable_param_names = []
 
-        if self.config.hook_warmup_steps > 0:
-            scaled_hook_warmup_steps = max(1, self.config.hook_warmup_steps // self.accelerator.num_processes)
-            if self.global_step == scaled_hook_warmup_steps:
-                if self.accelerator.is_main_process:
-                    print(
-                        f"\n[Step {self.global_step}]: Hook-warmup phase complete. Enabling hooks' ratio ..."
-                    )
-                for hook in HookManager.get_all_hooks().values():
-                    if isinstance(hook, DiffCRDitBlockHook):
-                        if hasattr(hook, "diff_ratio"):
-                            hook.diff_ratio.requires_grad = True
-                            if self.accelerator.is_main_process:
-                                print(f"Unfroze diff_ratio (value={hook.diff_ratio.item()}) for hook: {hook.__class__.__name__}")
-                        else:
-                            if self.accelerator.is_main_process:
-                                print(f"WARNING: Found DiffCRDitBlockHook without 'diff_ratio' param: {hook.__class__.__name__}")
+        for name, param in self.model.named_parameters():
+            all_params += param.numel()
+            if param.requires_grad:
+                trainable_params += param.numel()
+                trainable_param_names.append(name)
+
+        print(f"\n--- Trainable Parameters ({description}) ---")
+        print(f"  Currently trainable parameters: {trainable_params:,}")
+        print(f"  Total parameters:   {all_params:,}")
+        print(f"  Trainable ratio:   {100 * trainable_params / all_params:.4f}%")
+        
+        if len(trainable_param_names) > 0 and len(trainable_param_names) < 15:
+             print(f"  Trainable parameters: {trainable_param_names}")
+        elif len(trainable_param_names) > 0:
+             print(f"  Trainable parameters: ['{trainable_param_names[0]}', ..., '{trainable_param_names[-1]}']")
+        else:
+             print(f"  Trainable parameters: None")
+        print(f"--------------------------------------------------\n")
 
     @torch.no_grad()
     def validate(self, global_step):
@@ -1050,122 +1069,51 @@ class DiffusionModelTrainer:
             scaled_hook_warmup_steps = max(
                 1, self.config.hook_warmup_steps // self.accelerator.num_processes
             )
-            if self.global_step >= scaled_hook_warmup_steps:
-                if self.accelerator.is_main_process:
-                    print(
-                        f"\n[Step {self.global_step}]: Hook-warmup phase complete. Enabling hooks' ratio ..."
-                    )
-                for hook in HookManager.get_all_hooks().values():
-                    if isinstance(hook, DiffCRDitBlockHook):
-                        if hasattr(hook, "diff_ratio"):
-                            hook.diff_ratio.requires_grad = True
-                            if self.accelerator.is_main_process:
-                                print(
-                                    f"Unfroze diff_ratio (value={hook.diff_ratio.item()}) for hook: {hook.__class__.__name__}"
-                                )
-                        else:
-                            if self.accelerator.is_main_process:
-                                print(
-                                    f"WARNING: Found DiffCRDitBlockHook without 'diff_ratio' param: {hook.__class__.__name__}"
-                                )
 
+            is_in_warmup = self.global_step < scaled_hook_warmup_steps
+            self._set_hook_trainable_state(requires_grad=not is_in_warmup)
+        elif self.config.trainable_hook_config:
+             self._set_hook_trainable_state(requires_grad=True)
+    
         ## resume hook-only state
         if self.config.hook_only_steps > 0:
             scaled_hook_only_steps = max(
                 1, self.config.hook_only_steps // self.accelerator.num_processes
             )
-            if self.accelerator.is_main_process:
-                print(
-                    f"Training in '{self.config.training_mode}' mode with hook_only_steps > 0."
-                )
-                print(
-                    f"  Config hook_only_steps: {self.config.hook_only_steps} (equivalent single-GPU steps)"
-                )
-                print(
-                    f"  Scaled hook_only_steps: {scaled_hook_only_steps} (actual optimizer steps with {self.accelerator.num_processes} GPUs)"
-                )
-
-            if self.global_step < scaled_hook_only_steps:
-                if self.accelerator.is_main_process:
-                    print(
-                        f"  Resumed step ({self.global_step}) is less than scaled_hook_only_steps ({scaled_hook_only_steps}). Freezing parameters."
-                    )
-                frozen_params = 0
-                unwrapped_model = self.accelerator.unwrap_model(self.model)
-                if self.config.training_mode == "lora":
-                    for name, param in unwrapped_model.named_parameters():
-                        if "lora_" not in name:
-                            param.requires_grad_(False)
-                            frozen_params += param.numel()
-                elif self.config.training_mode == "finetune":
-                    for name, param in unwrapped_model.named_parameters():
-                        if "hook" not in name:
-                            param.requires_grad_(False)
-                            frozen_params += param.numel()
-                else:
-                    if self.accelerator.is_main_process:
-                        print(
-                            f"  Warning: Unknown training_mode '{self.config.training_mode}' during resume. No parameters were frozen."
-                        )
-                if self.accelerator.is_main_process:
-                    print(f"  Froze {frozen_params} LoRA parameters.")
-            else:
-                if self.accelerator.is_main_process:
-                    print(
-                        f"  Resumed step ({self.global_step}) has passed scaled_hook_only_steps ({scaled_hook_only_steps}). Parameters are trainable."
-                    )
+            
+            is_in_hookonly = self.global_step < scaled_hook_only_steps
+            self._set_finetuning_trainable_state(requires_grad=not is_in_hookonly)
+        else:
+            self._set_finetuning_trainable_state(requires_grad=True)
+        
+        ## print parameter count
+        self._log_trainable_parameters('Initial')
 
     def _trigger_phase(self):
         # trigger hook warmup completion
         if self.config.hook_warmup_steps > 0:
             scaled_hook_warmup_steps = max(1, self.config.hook_warmup_steps // self.accelerator.num_processes)
             if self.global_step == scaled_hook_warmup_steps:
-                if self.accelerator.is_main_process:
-                    print(
-                        f"\n[Step {self.global_step}]: Hook-warmup phase complete. Enabling hooks' ratio ..."
-                    )
-                for hook in HookManager.get_all_hooks().values():
-                    if isinstance(hook, DiffCRDitBlockHook):
-                        if hasattr(hook, "diff_ratio"):
-                            hook.diff_ratio.requires_grad = True
-                            if self.accelerator.is_main_process:
-                                print(f"Unfroze diff_ratio (value={hook.diff_ratio.item()}) for hook: {hook.__class__.__name__}")
-                        else:
-                            if self.accelerator.is_main_process:
-                                print(f"WARNING: Found DiffCRDitBlockHook without 'diff_ratio' param: {hook.__class__.__name__}")
+                self._set_hook_trainable_state(requires_grad=True)
+                self._log_trainable_parameters('After hook warmup')
 
         # trigger hook-only completion
         if self.config.hook_only_steps > 0:
             scaled_hook_only_steps = max(1, self.config.hook_only_steps // self.accelerator.num_processes)
             if self.global_step == scaled_hook_only_steps:
-                if self.accelerator.is_main_process:
-                    print(
-                        f"\n[Step {self.global_step}]: Hook-only phase complete. Unfreezing parameters ..."
-                    )
-
-                unfrozen = 0
-                if self.config.training_mode == "lora":
-                    for name, param in self.model.named_parameters():
-                        if "lora_" in name:
-                            param.requires_grad_(True)
-                            unfrozen += param.numel()
-                elif self.config.training_mode == "finetune":
-                    for name, param in self.model.named_parameters():
-                        if "hook" not in name:
-                            param.requires_grad_(True)
-                            unfrozen += param.numel()
-                print(f"  Unfroze {unfrozen} parameters.")
+                self._set_finetuning_trainable_state(requires_grad=True)
+                self._log_trainable_parameters('After hook-only')
 
     def train(self):
-        print("Starting training...")
+        if self.accelerator.is_main_process:
+            print("Starting training...")
         global_context.update(encoder_flag=True)
 
         self._try_resume()
+        self._initial_phase()
 
         self.prev_lora_state = None
         self.prev_finetune_state = None
-
-        self._initial_phase()
 
         unwrapped_model = self.accelerator.unwrap_model(self.model)
         if hasattr(unwrapped_model, "enable_adapter_layers"):
@@ -1216,7 +1164,7 @@ class DiffusionModelTrainer:
         if self.accelerator.is_main_process:
             print("Training completed. Saving final model...")
             final_path = os.path.join(self.config.output_dir, "final.pt")
-            self.save_checkpoint(final_path)  # save_checkpoint 内部需要 unwrap
+            self.save_checkpoint(final_path)
             print(f"Final model saved to {final_path}")
 
     def save_checkpoint(self, save_path: str, save_optimizer: bool = True):
@@ -1311,9 +1259,10 @@ class DiffusionModelTrainer:
         else:
             raise ValueError(f"Unknown training_mode: {mode}")
 
-        print(
-            f"Loaded model params (missing={len(missing)}, unexpected={len(unexpected)})"
-        )
+        if self.accelerator.is_main_process:
+            print(
+                f"Loaded model params (missing={len(missing)}, unexpected={len(unexpected)})"
+            )
 
         if (not for_inference) and load_optimizer:
             if checkpoint.get("optimizer") and self.optimizer is not None:
@@ -1323,7 +1272,8 @@ class DiffusionModelTrainer:
             self.global_step = checkpoint.get("global_step", 0)
             self.epoch = checkpoint.get("epoch", 0)
             self.best_val_metric = checkpoint.get("best_val_metric", None)
-            print(f"Resumed training from step {self.global_step}, epoch {self.epoch}")
+            if self.accelerator.is_main_process:
+                print(f"Resumed training from step {self.global_step}, epoch {self.epoch}")
 
         if self.accelerator.is_main_process:
             print(f"Loaded checkpoint successfully (mode={self.config.training_mode})")
