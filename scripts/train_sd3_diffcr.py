@@ -29,7 +29,7 @@ trainer_config = {
     "num_epochs": 1000,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16,
-    "learning_rate": 5e-5,
+    "learning_rate": 1e-4,
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
     "lr_scheduler": "cosine", # "linear", "cosine", "constant"
@@ -53,7 +53,7 @@ trainer_config = {
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
     "extra_config": {
         "ratio_loss_weight": 0.3,
-        "target_ratio": 0.8,
+        "target_ratio": 0.5,
     },
     "log_with_tensorboard": True,
     "log_with_wandb": True,
