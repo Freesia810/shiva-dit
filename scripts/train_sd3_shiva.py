@@ -30,12 +30,12 @@ trainer_config = {
     "model_path": None,
     "output_dir": "./checkpoints/",
     "training_mode": "lora",  # "hook_only" "finetune" "lora"
-    "hook_warmup_steps": 0, # 1 epoch
+    "hook_warmup_steps": 1750, # 1 epoch
     "hook_only_steps": 0,
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
     "caption_dropout_rate": 0.25,
-    "num_epochs": 1000,
+    "num_epochs": 500,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16,
     "learning_rate": 1e-4,
@@ -57,14 +57,14 @@ trainer_config = {
     "inference_steps": 1750, # 1 epoch
     "inference_metadata_file": "../dataset/MJHQ-30K/test.jsonl",
     "inference_seed": 42,
-    "inference_num_inference_steps": 20,
+    "inference_num_inference_steps": 30,
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
     "extra_config": {
         # (L_ratio = lambda * ratio^2)
-        "ratio_loss_weight": 0.01,
+        "ratio_loss_weight": 5e-3,
 
-        "schedule_steps": [5000, 10000],
+        "schedule_steps": [5250, 10500], # 3 epoch, 6 epoch
         
         # (L_gate = Entropy)
         "gate_schedule": [1e-9, 1e-9, 0.01],

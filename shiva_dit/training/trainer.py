@@ -654,7 +654,7 @@ class DiffusionModelTrainer:
                 1, self.config.hook_warmup_steps // self.accelerator.num_processes
             )
             if global_step < scaled_hook_warmup_steps:
-                current_hook_loss_weight = 0.0
+                current_hook_loss_weight = 1e-9
 
         return hook_loss * current_hook_loss_weight
 
@@ -1189,17 +1189,6 @@ class DiffusionModelTrainer:
             print("No checkpoint found or resume failed. Starting fresh.")
 
     def _initial_phase(self):
-        ## resume hook warmup state
-        if self.config.hook_warmup_steps > 0:
-            scaled_hook_warmup_steps = max(
-                1, self.config.hook_warmup_steps // self.accelerator.num_processes
-            )
-
-            is_in_warmup = self.global_step < scaled_hook_warmup_steps
-            self._set_hook_trainable_state(requires_grad=not is_in_warmup)
-        elif self.config.trainable_hook_config:
-            self._set_hook_trainable_state(requires_grad=True)
-
         ## resume hook-only state
         if self.config.hook_only_steps > 0:
             scaled_hook_only_steps = max(
@@ -1215,13 +1204,6 @@ class DiffusionModelTrainer:
         self._log_trainable_parameters('Initial')
 
     def _trigger_phase(self):
-        # trigger hook warmup completion
-        if self.config.hook_warmup_steps > 0:
-            scaled_hook_warmup_steps = max(1, self.config.hook_warmup_steps // self.accelerator.num_processes)
-            if self.global_step == scaled_hook_warmup_steps:
-                self._set_hook_trainable_state(requires_grad=True)
-                self._log_trainable_parameters('After hook warmup')
-
         # trigger hook-only completion
         if self.config.hook_only_steps > 0:
             scaled_hook_only_steps = max(1, self.config.hook_only_steps // self.accelerator.num_processes)
