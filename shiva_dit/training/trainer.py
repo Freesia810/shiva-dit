@@ -621,16 +621,40 @@ class DiffusionModelTrainer:
         elif self.hook_type == "shiva":
             current_consistency_weight = self.consistency_schedule[0]
             current_gate_weight = self.gate_schedule[0]
-            
-            if global_step > self.schedule_steps[0]:
+
+            scaled_schedule_steps_0 = max(
+                1, self.schedule_steps[0] // self.accelerator.num_processes
+            )
+            scaled_schedule_steps_1 = max(
+                1, self.schedule_steps[1] // self.accelerator.num_processes
+            )
+            if global_step > scaled_schedule_steps_0:
                 current_consistency_weight = self.consistency_schedule[1]
                 current_gate_weight = self.gate_schedule[1]
-            if global_step > self.schedule_steps[1]:
+            if global_step > scaled_schedule_steps_1:
                 current_consistency_weight = self.consistency_schedule[2]
                 current_gate_weight = self.gate_schedule[2]
+            
+            def get_annealing_weight(global_step, start_step, end_step):
+                if global_step < start_step:
+                    return 0.0
+                progress = (global_step - start_step) / max(1.0, end_step - start_step)
+                return min(1.0, progress)
+            
+            start_step = self.config.hook_warmup_steps
+            scaled_start_step = max(
+                1, start_step // self.accelerator.num_processes
+            )
+            anneal_steps = self.config.extra_config["anneal_steps"]
+            scaled_anneal_steps = max(
+                1, anneal_steps // self.accelerator.num_processes
+            )
+            anneal_factor = get_annealing_weight(global_step, scaled_start_step, scaled_anneal_steps)
+            base_lambda = self.config.extra_config["ratio_loss_weight"]
+            current_ratio_weight = base_lambda * anneal_factor
 
             loss_config = {
-                "ratio_loss_weight": self.config.extra_config.get("ratio_loss_weight", 0.01),
+                "ratio_loss_weight": current_ratio_weight,
                 "consistency_loss_weight": current_consistency_weight,
                 "gate_loss_weight": current_gate_weight,
             }

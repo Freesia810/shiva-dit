@@ -18,8 +18,8 @@ hook_config = {
 }
 lora_config = {
     "enable": True,
-    "rank": 32,
-    "lora_alpha": 32,
+    "rank": 128,
+    "lora_alpha": 128,
     "target_modules": ("to_q", "to_k", "to_v", "to_out.0"),
 }
 
@@ -30,7 +30,7 @@ trainer_config = {
     "model_path": None,
     "output_dir": "./checkpoints/",
     "training_mode": "lora",  # "hook_only" "finetune" "lora"
-    "hook_warmup_steps": 1750, # 1 epoch
+    "hook_warmup_steps": 7000, # 4 epoch
     "hook_only_steps": 0,
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
@@ -47,7 +47,7 @@ trainer_config = {
     "hook_loss_weight": 1.0,
     "seed": 42,
     "logging_steps": 5,
-    "save_steps": 3500, # 2 epoch
+    "save_steps": 1750, # 1 epoch
     "run_validation": True,
     "validation_steps": 875, # 0.5 epoch
     "val_batch_size": None,
@@ -62,21 +62,22 @@ trainer_config = {
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
     "extra_config": {
         # (L_ratio = lambda * ratio^2)
-        "ratio_loss_weight": 5e-3,
+        "anneal_steps": 28000, # 16 epoch
+        "ratio_loss_weight": 1e-5,
 
-        "schedule_steps": [5250, 10500], # 3 epoch, 6 epoch
+        "schedule_steps": [8750, 14000], # 5 epoch, 8 epoch
         
         # (L_gate = Entropy)
         "gate_schedule": [1e-9, 1e-9, 0.01],
         
         # (L_con = MSE(prune, fuse))
-        "consistency_schedule": [1.0, 0.1, 0.1],
+        "consistency_schedule": [1.0, 0.1, 0.2],
     },
     "log_with_tensorboard": True,
     "log_with_wandb": True,
     "wandb_project": "shiva-dit",
     "wandb_run_name": "sd3-shiva",
-    "log_with_mlflow": True,
+    "log_with_mlflow": False,
     "mlflow_experiment_name": "shiva-dit",
     "mlflow_run_name": "sd3-shiva",
     "mlflow_tracking_uri": None,

@@ -587,7 +587,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                     ratio_sq_losses_per_hook.append(avg_loss_for_hook)
                     device = avg_loss_for_hook.device
                 else:
-                    ratio_sq_losses_per_hook.append(torch.tensor(hook.shiva_ratio**2, device=device))
+                    ratio_sq_losses_per_hook.append(torch.tensor(hook.shiva_ratio.item()**2, device=device))
 
                 hook.ratio_sq_loss_accumulator.clear()
 
