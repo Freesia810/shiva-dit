@@ -178,8 +178,6 @@ class HookManager:
                             raise RuntimeError(
                                 f"Module '{hook_name}' does not support hook registration."
                             )
-                        if isinstance(hook, nn.Module):
-                            module.add_module(f"hook", hook)
 
                         cls._hook_map[hook_name] = hook
                         cls._weak_blocks[hook_name] = module

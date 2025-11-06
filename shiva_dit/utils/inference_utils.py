@@ -6,12 +6,18 @@ from dataclasses import asdict
 from shiva_dit.utils import get_pipeline
 from shiva_dit.hook import HookManager
 
+from shiva_dit.shiva import (
+    ShivaDitBlockHook, ShivaRouter, ShivaGater, ShivaContextPruner, 
+    ShivaFuserExpert, ShivaPrunerExpert
+)
+
 from baselines.diffcr import DiffCRDitBlockHook
 from baselines.dy_dit import DynamicDiTBlockHook
 
 HOOK_CLASS_MAP = {
     "DiffCRDitBlockHook": DiffCRDitBlockHook,
     "DynamicDiTBlockHook": DynamicDiTBlockHook,
+    "ShivaDitBlockHook": ShivaDitBlockHook,
 }
 
 def load_pipeline_for_inference(

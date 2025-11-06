@@ -153,6 +153,14 @@ class ShivaFuserExpert(nn.Module):
             fused_survivors = survivors + projected_info # (B, k, D)
         else:
             fused_survivors = survivors
+            if self.training:
+                dummy_output = self.fusion_ffn(
+                    torch.zeros(
+                        survivors.shape[0], 1, survivors.shape[2],
+                        device=survivors.device, dtype=survivors.dtype
+                    )
+                )
+                fused_survivors = fused_survivors + (dummy_output * 0.0)
 
         return fused_survivors
 
@@ -280,7 +288,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                     f"Module '{hook_name}' does not support hook registration."
                 )
 
-            module.add_module(f"hook", hook)
             hook_manager_cls._hook_map[hook_name] = hook
             hook_manager_cls._weak_blocks[hook_name] = module
             injected += 1
@@ -326,6 +333,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.gate_loss_accumulator = []
         self.prune_output_accumulator = []
         self.fuse_output_accumulator = []
+
+        self.gater_fuse_prob_accumulator = []
 
         self.token_scores = None
 
@@ -387,6 +396,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             entropy = -(gating_weights * torch.log(gating_weights + 1e-10)).sum(dim=-1)
             self.gate_loss_accumulator.append(entropy.mean())
 
+            avg_fuse_prob = gating_weights[:, 1].mean()
+            self.gater_fuse_prob_accumulator.append(avg_fuse_prob)
+
             g_prune = gating_weights[:, 0].unsqueeze(-1).unsqueeze(-1)
             g_fuse = gating_weights[:, 1].unsqueeze(-1).unsqueeze(-1)
 
@@ -402,6 +414,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             self.gate_loss_accumulator.clear()
             self.prune_output_accumulator.clear()
             self.fuse_output_accumulator.clear()
+            self.gater_fuse_prob_accumulator.clear()
 
             if self.use_gater_lut:
                 current_t_index = global_context.current_iteration # TODO: LUT Logic
@@ -594,15 +607,40 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         return extra_loss, consistency_loss, gate_loss, ratio_loss
 
+    @torch.no_grad()
+    @staticmethod
+    def calculate_shiva_gate_prob(device: torch.device) -> (torch.Tensor, dict):
+        gate_probs_per_hook = []
+        gate_probs_per_layer = {}
+
+        for name, hook in HookManager.get_all_hooks().items():
+            if isinstance(hook, ShivaDitBlockHook):
+                accumulator = hook.gater_fuse_prob_accumulator
+                
+                if accumulator:
+                    avg_prob_for_hook = torch.stack(accumulator).mean()
+                    gate_probs_per_hook.append(avg_prob_for_hook)
+                    
+                    layer_name = f"layer_{hook.layer_idx:02d}"
+                    gate_probs_per_layer[layer_name] = avg_prob_for_hook.item()
+                    
+                hook.gater_fuse_prob_accumulator.clear()
+
+        if gate_probs_per_hook:
+            global_avg_prob = torch.stack(gate_probs_per_hook).mean()
+            return global_avg_prob, gate_probs_per_layer
+        else:
+            return torch.tensor(0.0, device=device), {}
+
 if __name__ == "__main__":
     from shiva_dit.utils import get_pipeline, process_quick_start
-    model_type = "sd3"
+    model_type = "qwen-image-edit"
     pipe, model_attrs = get_pipeline(model_type)
 
     shiva_config = {
-        "bottleneck_dim": 2,
-        "layer_embed_dim": 4,
-        "num_router_groups": 1,
+        "bottleneck_dim": 64,
+        "layer_embed_dim": 64,
+        "num_router_groups": 4,
         "fuse_expert_ffn_mult": 2,
         "context_pruning_threshold": None,
         "context_pruning_ratio": None,

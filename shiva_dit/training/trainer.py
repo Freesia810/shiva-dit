@@ -31,11 +31,16 @@ class DiffusionModelTrainer:
     def __init__(self, config: TrainerConfig):
         self.config = config
         self.model_type = config.model_type
+        
+        # shiva's extra schedule
+        self.consistency_schedule = self.config.extra_config.get("consistency_schedule", [1.0, 0.1, 0.1])
+        self.gate_schedule = self.config.extra_config.get("gate_schedule", [0.0, 0.0, 0.01])
+        self.schedule_steps = self.config.extra_config.get("schedule_steps", [5000, 10000])
 
         self.input_preparer_fn = get_input_preparer(self.model_type)
 
         ## Initialize accelerator, device, seed and generator
-        ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+        ddp_kwargs = DistributedDataParallelKwargs(static_graph=True)
         self.accelerator = Accelerator(
             mixed_precision=config.mixed_precision,
             gradient_accumulation_steps=config.gradient_accumulation_steps,
@@ -614,9 +619,25 @@ class DiffusionModelTrainer:
                 self.config.extra_config, device=self.device
             )
         elif self.hook_type == "shiva":
+            current_consistency_weight = self.consistency_schedule[0]
+            current_gate_weight = self.gate_schedule[0]
+            
+            if global_step > self.schedule_steps[0]:
+                current_consistency_weight = self.consistency_schedule[1]
+                current_gate_weight = self.gate_schedule[1]
+            if global_step > self.schedule_steps[1]:
+                current_consistency_weight = self.consistency_schedule[2]
+                current_gate_weight = self.gate_schedule[2]
+
+            loss_config = {
+                "ratio_loss_weight": self.config.extra_config.get("ratio_loss_weight", 0.01),
+                "consistency_loss_weight": current_consistency_weight,
+                "gate_loss_weight": current_gate_weight,
+            }
+
             hook_loss, consistency_loss, gate_loss, ratio_loss = (
                 ShivaDitBlockHook.calculate_extra_loss(
-                    self.config.extra_config, device=self.device
+                    loss_config, device=self.device
                 )
             )
 
@@ -711,7 +732,7 @@ class DiffusionModelTrainer:
                     if param.requires_grad != requires_grad:
                         param.requires_grad = requires_grad
             elif self.config.training_mode == "finetune":
-                if "hook" not in name:
+                if "_hook" not in name:
                     if param.requires_grad != requires_grad:
                         param.requires_grad = requires_grad
 
@@ -844,6 +865,14 @@ class DiffusionModelTrainer:
                     "shiva/gate_loss": self.last_gate_loss.item(),
                     "shiva/consistency_loss": self.last_consistency_loss.item(),
                 }
+
+                avg_fuse_prob, per_layer_probs = ShivaDitBlockHook.calculate_shiva_gate_prob(self.device)
+                shiva_metrics["shiva/avg_fuse_prob"] = avg_fuse_prob.item()
+                if per_layer_probs:
+                     self.logger.add_scalars(
+                         "shiva/per_layer_fuse_prob", per_layer_probs, self.global_step
+                     )
+
                 metrics_to_log.update(shiva_metrics)
             self.logger.log_scalars(metrics_to_log, step=self.global_step)
 
@@ -861,6 +890,7 @@ class DiffusionModelTrainer:
                     postfix_dict["ratio_loss"] = f"{self.last_ratio_loss.item():.4f}"
                     postfix_dict["gate_loss"] = f"{self.last_gate_loss.item():.4f}"
                     postfix_dict["consistency_loss"] = f"{self.last_consistency_loss.item():.4f}"
+                    postfix_dict["fuse_prob"] = f"{avg_fuse_prob.item():.3f}"
 
                 if self.config.training_mode == "lora":
                     postfix_dict["lora_norm"] = f"{lora_norm:.4f}"
@@ -891,7 +921,7 @@ class DiffusionModelTrainer:
             if param.requires_grad:
                 trainable_params += param.numel()
                 trainable_param_names.append(name)
-                if "hook" in name:
+                if "_hook" in name:
                     hook_params += param.numel()
                 if "lora_" in name:
                     lora_params += param.numel()
@@ -920,9 +950,6 @@ class DiffusionModelTrainer:
             print(f"\nRunning validation at step {global_step}...")
 
         self.model.eval()
-        for hook in HookManager.get_all_hooks().values():
-            if isinstance(hook, nn.Module):
-                hook.eval()
 
         all_total_losses = []
         all_main_losses = []
@@ -1013,9 +1040,6 @@ class DiffusionModelTrainer:
             )
 
         self.model.train()
-        for hook in HookManager.get_all_hooks().values():
-            if isinstance(hook, nn.Module):
-                hook.train()
 
         return avg_val_loss if "avg_val_loss" in locals() else None
 
@@ -1032,6 +1056,7 @@ class DiffusionModelTrainer:
             f"\nRunning inference validation from file: {self.config.inference_metadata_file}..."
         )
 
+        self.model.eval()
         prompts = []
         try:
             with open(self.config.inference_metadata_file, "r", encoding="utf-8") as f:
@@ -1075,6 +1100,8 @@ class DiffusionModelTrainer:
 
         for i, prompt in enumerate(prompts):
             try:
+                if self.device.type == 'cuda':
+                    torch.cuda.empty_cache()
                 with self.accelerator.autocast():
                     image = self.pipe(
                         prompt=prompt,
@@ -1274,11 +1301,11 @@ class DiffusionModelTrainer:
             mode = self.config.training_mode
             if mode == "lora":
                 for k, v in state_dict.items():
-                    if "lora" in k or "hook" in k:
+                    if "lora" in k or "_hook" in k:
                         model_state[k] = v
 
             elif mode == "hook_only":
-                model_state = {k: v for k, v in state_dict.items() if "hook" in k}
+                model_state = {k: v for k, v in state_dict.items() if "_hook" in k}
 
             elif mode == "finetune":
                 model_state = state_dict
