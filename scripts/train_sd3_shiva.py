@@ -13,8 +13,8 @@ hook_config = {
     "fuse_expert_ffn_mult": 2,
     "use_gater_lut": False,
     
-    "context_pruning_threshold": 128,
-    "context_pruning_ratio": 0.5,      
+    "context_pruning_threshold": None,
+    "context_pruning_ratio": None,      
 }
 lora_config = {
     "enable": True,
