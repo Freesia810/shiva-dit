@@ -71,7 +71,7 @@ trainer_config = {
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
     "extra_config": {
         "anneal_steps": 35000, # 20 epoch
-        "ratio_loss_weight": 0.1,
+        "ratio_loss_weight": 0.01,
         "target_ratio": 0.8,
 
         "schedule_steps": [8750, 14000], # 5 epoch, 8 epoch

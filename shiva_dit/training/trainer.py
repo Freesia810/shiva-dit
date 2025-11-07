@@ -665,12 +665,13 @@ class DiffusionModelTrainer:
                 "gate_loss_weight": current_gate_weight,
             }
 
-            hook_loss, consistency_loss, gate_loss, ratio_loss = (
+            hook_loss, consistency_loss, gate_loss, ratio_loss, extra_metric = (
                 ShivaDitBlockHook.calculate_extra_loss(
                     loss_config, device=self.device
                 )
             )
 
+            self.last_extra_metric = extra_metric
             self.last_ratio_loss = ratio_loss.detach()
             self.last_gate_loss = gate_loss.detach()
             self.last_consistency_loss = consistency_loss.detach()
@@ -887,22 +888,22 @@ class DiffusionModelTrainer:
             metrics_to_log.update({
                 "train/total_loss": gathered_losses["total"].item(),
                 "train/main_loss": gathered_losses["main"].item(),
-                "train/hook_loss": gathered_losses["hook"].item(),
+                "train/extra_loss": gathered_losses["hook"].item(),
                 "train/distill_loss": gathered_losses["distill"].item(),
                 "train/lr": self.lr_scheduler.get_last_lr()[0],
             })
             if self.hook_type == "shiva":
                 shiva_metrics = {
-                    "shiva/ratio_loss": self.last_ratio_loss.item(),
-                    "shiva/gate_loss": self.last_gate_loss.item(),
-                    "shiva/consistency_loss": self.last_consistency_loss.item(),
+                    "shiva/ratio/ratio_loss": self.last_ratio_loss.item(),
+                    "shiva/gater/gate_loss": self.last_gate_loss.item(),
+                    "shiva/gater/consistency_loss": self.last_consistency_loss.item(),
                 }
 
                 avg_fuse_prob, per_layer_probs = ShivaDitBlockHook.calculate_shiva_gate_prob(self.device)
-                shiva_metrics["shiva/avg_fuse_prob"] = avg_fuse_prob.item()
+                shiva_metrics["shiva/fuser/avg_fuse_prob"] = avg_fuse_prob.item()
                 if per_layer_probs:
                      self.logger.add_scalars(
-                         "shiva/per_layer_fuse_prob", per_layer_probs, self.global_step
+                         "shiva/fuser/per_layer_fuse_prob", per_layer_probs, self.global_step
                      )
                     
                 router_stats = ShivaDitBlockHook.collect_router_stats(self.device)
@@ -910,6 +911,7 @@ class DiffusionModelTrainer:
                     shiva_metrics[k] = v.item()
 
                 metrics_to_log.update(shiva_metrics)
+                metrics_to_log.update(self.last_extra_metric)
             self.logger.log_scalars(metrics_to_log, step=self.global_step)
 
             if self.global_step % log_trigger == 0:
@@ -982,7 +984,7 @@ class DiffusionModelTrainer:
             if isinstance(hook, ShivaDitBlockHook):
                 heatmap = hook.get_router_heatmap()
                 if heatmap is not None:
-                    tag = f"router/heatmap/layer_{hook.layer_idx:02d}"
+                    tag = f"router_heatmap/layer_{hook.layer_idx:02d}"
                     self.logger.log_image(tag, heatmap, step=step)
 
     @torch.no_grad()

@@ -389,7 +389,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             else:
                 self.router_stats_accumulator.clear()
 
-        kept_ratio = torch.clamp(self.shiva_ratio, 0.1, 1.0)
+        kept_ratio = torch.clamp(self.shiva_ratio, 0.0, 1.0)
         k = ceil_ste(kept_ratio * N).to(torch.int32)
         k = torch.min(k, torch.tensor(N, device=hidden_states.device))
 
@@ -463,6 +463,10 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         final_hidden_states = self._scatter_add(
             processed_hidden_states, remaining_x, survivors_indices
         )
+        
+        r = self.shiva_ratio
+        if self.training:
+            final_hidden_states = final_hidden_states * (r / r.detach())
 
         if isinstance(processed_output, tuple):
             return processed_encoder_states, final_hidden_states
@@ -565,10 +569,13 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 hook.prune_output_accumulator.clear()
                 hook.fuse_output_accumulator.clear()
 
+        metrics = {"shiva/gater/consistency_loss": 0.0}
         if consistency_loss:
-            return torch.stack(consistency_loss).mean() * loss_weight
+            final_loss = torch.stack(consistency_loss).mean() * loss_weight
+            metrics["shiva/gater/consistency_loss"] = final_loss.item()
+            return final_loss, metrics
         else:
-            return torch.tensor(0.0, device=device)
+            return torch.tensor(0.0, device=device), metrics
 
     @staticmethod
     def calculate_gate_loss(config: dict, device: torch.device) -> torch.Tensor:
@@ -586,44 +593,62 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
                 hook.gate_loss_accumulator.clear()
 
+        metrics = {"shiva/gater/gate_loss": 0.0}
         if gate_losses:
-            return torch.stack(gate_losses).mean() * loss_weight
+            final_loss = torch.stack(gate_losses).mean() * loss_weight
+            metrics["shiva/gater/gate_loss"] = final_loss.item()
+            return final_loss, metrics
         else:
-            return torch.tensor(0.0, device=device)
+            return torch.tensor(0.0, device=device), metrics
 
     @staticmethod
-    def calculate_ratio_loss(config: dict, device: torch.device) -> torch.Tensor:        
+    def calculate_ratio_loss(config: dict, device: torch.device) -> (torch.Tensor, dict):
         loss_weight = config["ratio_loss_weight"]
         current_target_ratio = config["target_ratio"]
         
         ratios = []
-        custom_losses = []
         for hook in HookManager.get_all_hooks().values():
             if isinstance(hook, ShivaDitBlockHook):
                 ratios.append(hook.shiva_ratio)
         
-        if ratios:
-            avg_ratio = torch.mean(torch.stack(ratios))
-            target_ratio_tensor = torch.tensor(current_target_ratio, device=avg_ratio.device)
-            mse_loss = F.mse_loss(avg_ratio, target_ratio_tensor)
-            custom_losses.append(mse_loss)
+        metrics = {
+            "shiva/ratio/avg_ratio": 0.0,
+            "shiva/ratio/std_dev": 0.0,
+            "shiva/ratio/mse_loss": 0.0,
+        }
 
-        if custom_losses:
-            return torch.stack(custom_losses).mean() * loss_weight
+        if ratios:
+            ratios_tensor = torch.stack(ratios)
+            avg_ratio = torch.mean(ratios_tensor)
+            std_ratio = torch.std(ratios_tensor) 
+            target_ratio_tensor = torch.tensor(current_target_ratio, device=device, dtype=avg_ratio.dtype)
+            mse_loss = F.mse_loss(avg_ratio, target_ratio_tensor)
+            
+            final_loss = mse_loss * loss_weight
+            metrics = {
+                "shiva/ratio/avg_ratio": avg_ratio.item(),
+                "shiva/ratio/std_dev": std_ratio.item(),
+                "shiva/ratio/mse_loss": mse_loss.item(),
+            }
+            
+            return final_loss, metrics
         else:
-            return torch.tensor(0.0, device=device)
+            return torch.tensor(0.0, device=device), metrics
 
     @staticmethod
     def calculate_extra_loss(config: dict, device: torch.device) -> torch.Tensor:
         extra_loss = torch.tensor(0.0, device=device)
+        metric = {}
 
-        consistency_loss = ShivaDitBlockHook.calculate_consistency_loss(config, device)
-        gate_loss = ShivaDitBlockHook.calculate_gate_loss(config, device)
-        ratio_loss = ShivaDitBlockHook.calculate_ratio_loss(config, device)
+        consistency_loss, _ = ShivaDitBlockHook.calculate_consistency_loss(config, device)
+        gate_loss, _ = ShivaDitBlockHook.calculate_gate_loss(config, device)
+        ratio_loss, ratio_metric = ShivaDitBlockHook.calculate_ratio_loss(config, device)
 
         extra_loss += consistency_loss + gate_loss + ratio_loss
 
-        return extra_loss, consistency_loss, gate_loss, ratio_loss
+        metric.update(ratio_metric)
+
+        return extra_loss, consistency_loss, gate_loss, ratio_loss, metric
 
     @torch.no_grad()
     @staticmethod
