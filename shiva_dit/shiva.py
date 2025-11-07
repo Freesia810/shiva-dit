@@ -259,9 +259,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         ).to(device, dtype)
 
         ## initialization: keep parameters to reasonable values
-        nn.init.constant_(shared_gater.net[-1].bias, 0.0)
-        shared_gater.net[-1].bias.data[0] = 5.0
-        shared_gater.net[-1].bias.data[1] = -5.0
+        # nn.init.constant_(shared_gater.net[-1].bias, 0.0)
+        # shared_gater.net[-1].bias.data[0] = 5.0
+        # shared_gater.net[-1].bias.data[1] = -5.0
 
         fuser_last_layer = shared_fuse_expert.fusion_ffn[-1]
         nn.init.zeros_(fuser_last_layer.weight)
@@ -341,9 +341,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.gate_loss_accumulator = []
         self.prune_output_accumulator = []
         self.fuse_output_accumulator = []
-
         self.gater_fuse_prob_accumulator = []
-
         self.router_stats_accumulator = []
 
         self.token_scores = None
@@ -463,7 +461,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         final_hidden_states = self._scatter_add(
             processed_hidden_states, remaining_x, survivors_indices
         )
-        
+
         r = self.shiva_ratio
         if self.training:
             final_hidden_states = final_hidden_states * (r / r.detach())
@@ -612,71 +610,59 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             return torch.tensor(0.0, device=device), metrics
 
     @staticmethod
-    def calculate_ratio_loss(config: dict, device: torch.device) -> (torch.Tensor, dict):
-        loss_weight = config["ratio_loss_weight"]
-        current_target_ratio = config["target_ratio"]
-        
+    def calculate_ratio_loss(config: dict, device: torch.device) -> tuple[torch.Tensor, dict]:
+        ratios_per_layer = {}
         ratios = []
         for hook in HookManager.get_all_hooks().values():
             if isinstance(hook, ShivaDitBlockHook):
+                layer_name = f"layer_{hook.layer_idx:02d}"
+                ratios_per_layer[layer_name] = hook.shiva_ratio.item()
                 ratios.append(hook.shiva_ratio)
-        
+
         metrics = {
             "shiva/ratio/avg_ratio": 0.0,
-            "shiva/ratio/std_dev": 0.0,
-            "shiva/ratio/mse_loss": 0.0,
+            "shiva/ratio/std_ratio": 0.0,
+            "shiva/ratio/ratio_loss_raw": 0.0,
+            "shiva/ratio/ratio_loss": 0.0,
         }
 
+        loss_weight = config["ratio_loss_weight"]
+        current_target_ratio = config["target_ratio"]
         if ratios:
             ratios_tensor = torch.stack(ratios)
             avg_ratio = torch.mean(ratios_tensor)
             std_ratio = torch.std(ratios_tensor) 
             target_ratio_tensor = torch.tensor(current_target_ratio, device=device, dtype=avg_ratio.dtype)
             mse_loss = F.mse_loss(avg_ratio, target_ratio_tensor)
-            
             final_loss = mse_loss * loss_weight
             metrics = {
                 "shiva/ratio/avg_ratio": avg_ratio.item(),
-                "shiva/ratio/std_dev": std_ratio.item(),
-                "shiva/ratio/mse_loss": mse_loss.item(),
+                "shiva/ratio/std_ratio": std_ratio.item(),
+                "shiva/ratio/ratio_loss_raw": mse_loss.item(),
+                "shiva/ratio/ratio_loss": final_loss.item(),
             }
-            
-            return final_loss, metrics
+
+            return final_loss, metrics, ratios_per_layer
         else:
-            return torch.tensor(0.0, device=device), metrics
-
-    @staticmethod
-    def calculate_extra_loss(config: dict, device: torch.device) -> torch.Tensor:
-        extra_loss = torch.tensor(0.0, device=device)
-        metric = {}
-
-        consistency_loss, _ = ShivaDitBlockHook.calculate_consistency_loss(config, device)
-        gate_loss, _ = ShivaDitBlockHook.calculate_gate_loss(config, device)
-        ratio_loss, ratio_metric = ShivaDitBlockHook.calculate_ratio_loss(config, device)
-
-        extra_loss += consistency_loss + gate_loss + ratio_loss
-
-        metric.update(ratio_metric)
-
-        return extra_loss, consistency_loss, gate_loss, ratio_loss, metric
+            return torch.tensor(0.0, device=device), metrics, ratios_per_layer
 
     @torch.no_grad()
     @staticmethod
-    def calculate_shiva_gate_prob(device: torch.device) -> (torch.Tensor, dict):
+    def calculate_shiva_gate_prob(device: torch.device) -> tuple[torch.Tensor, dict]:
         gate_probs_per_hook = []
         gate_probs_per_layer = {}
 
         for name, hook in HookManager.get_all_hooks().items():
             if isinstance(hook, ShivaDitBlockHook):
                 accumulator = hook.gater_fuse_prob_accumulator
-                
+
                 if accumulator:
                     avg_prob_for_hook = torch.stack(accumulator).mean()
                     gate_probs_per_hook.append(avg_prob_for_hook)
-                    
+
                     layer_name = f"layer_{hook.layer_idx:02d}"
                     gate_probs_per_layer[layer_name] = avg_prob_for_hook.item()
-                    
+
                 hook.gater_fuse_prob_accumulator.clear()
 
         if gate_probs_per_hook:
@@ -703,9 +689,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         if total_mean:
             return {
-                "router/mean_score": torch.stack(total_mean).mean(),
-                "router/std_score": torch.stack(total_std).mean(),
-                "router/min_score": torch.stack(total_min).min(),
+                "shiva/router/mean_score": torch.stack(total_mean).mean(),
+                "shiva/router/std_score": torch.stack(total_std).mean(),
+                "shiva/router/min_score": torch.stack(total_min).min(),
             }
         else:
             return {}
@@ -717,22 +703,22 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         except ImportError:
             print("Warning: PIL not installed. Cannot generate heatmap images.")
             return None
-            
+
         scores = self._last_forward_scores
-        
+
         if scores is None:
             return None
 
         H = global_context.hidden_seq_height
         W = global_context.hidden_seq_width
-        
+
         if H is None or W is None:
-             return None
-    
+            return None
+
         sample_score = torch.sigmoid(scores[0]) 
-        
+
         if sample_score.shape[0] != H * W:
-             return None 
+            return None 
 
         heatmap = sample_score.view(1, H, W)
         heatmap_scaled = heatmap.detach().cpu().to(torch.float32) * 255.0
@@ -740,7 +726,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         heatmap_hw = heatmap_uint8.squeeze(0)
         heatmap_np = heatmap_hw.numpy()
         pil_image = Image.fromarray(heatmap_np, mode='L')
-        
+
         return pil_image
 
 if __name__ == "__main__":

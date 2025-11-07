@@ -4,15 +4,11 @@ from shiva_dit.shiva import ShivaDitBlockHook
 HookType = ShivaDitBlockHook
 hook_config = {
     "initial_kept_ratio": 1.0,
-    
-    "num_router_groups": 4,      # SD3 (L=24) / 4 = 6 layers per group
-
+    "num_router_groups": 4,
     "bottleneck_dim": 64,
     "layer_embed_dim": 64,
-
     "fuse_expert_ffn_mult": 2,
     "use_gater_lut": False,
-    
     "context_pruning_threshold": None,
     "context_pruning_ratio": None,      
 }
@@ -39,7 +35,6 @@ trainer_config = {
     "model_path": None,
     "output_dir": "./checkpoints/",
     "training_mode": "lora",  # "hook_only" "finetune" "lora"
-    "hook_warmup_steps": 3500, # 2 epoch
     "hook_only_steps": 0,
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
@@ -50,36 +45,32 @@ trainer_config = {
     "learning_rate": 1e-4,
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
-    "lr_scheduler": "cosine", # "linear", "cosine", "constant"
+    "lr_scheduler": "cosine",  # "linear", "cosine", "constant"
     "num_warmup_steps": 0,
     "main_loss_weight": 1.0,
     "hook_loss_weight": 1.0,
     "seed": 42,
     "logging_steps": 5,
-    "save_steps": 1750, # 1 epoch
+    "save_steps": 1750,  # 1 epoch
     "run_validation": True,
-    "validation_steps": 875, # 0.5 epoch
+    "validation_steps": 875,  # 0.5 epoch
     "val_batch_size": None,
     "val_metadata_file": "../dataset/MJHQ-30K/val.jsonl",
     "val_image_dir": "../dataset/MJHQ-30K/",
     "run_inference_validation": True,
-    "inference_steps": 1750, # 1 epoch
+    "inference_steps": 1750,  # 1 epoch
     "inference_metadata_file": "../dataset/MJHQ-30K/test.jsonl",
     "inference_seed": 42,
     "inference_num_inference_steps": 30,
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
+    "hook_warmup_steps": 3500,  # 2 epoch
     "extra_config": {
-        "anneal_steps": 35000, # 20 epoch
-        "ratio_loss_weight": 0.01,
+        "anneal_steps": 35000,  # 20 epoch
+        "ratio_loss_weight": 0.1,
         "target_ratio": 0.8,
-
-        "schedule_steps": [8750, 14000], # 5 epoch, 8 epoch
-        
-        # (L_gate = Entropy)
+        "schedule_steps": [17500, 26250],  # 10 epoch, 15 epoch
         "gate_schedule": [1e-9, 1e-9, 0.01],
-        
-        # (L_con = MSE(prune, fuse))
         "consistency_schedule": [1.0, 0.1, 0.2],
     },
     "log_with_tensorboard": True,

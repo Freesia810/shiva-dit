@@ -190,11 +190,6 @@ class DiffCRDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         else:
             return torch.tensor(0.0, device)
 
-    @staticmethod
-    def calculate_extra_loss(config: dict, device: torch.device) -> torch.Tensor:
-        ratio_loss = DiffCRDitBlockHook.calculate_ratio_loss(config, device)
-        return ratio_loss
-
 if __name__ == "__main__":
     model_type = "pixart-sigma"
     pipe, model_attrs = get_pipeline(model_type)

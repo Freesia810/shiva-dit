@@ -24,6 +24,7 @@ from shiva_dit.training.input_preparers import get_input_preparer
 from shiva_dit.training.config import TrainerConfig
 from shiva_dit.training.dataset import ImageTextDataset, collate_fn
 from shiva_dit.training.logging import NoOpLogger
+from shiva_dit.training.metric_manager import MetricManager
 from shiva_dit.utils import global_context
 
 
@@ -31,7 +32,7 @@ class DiffusionModelTrainer:
     def __init__(self, config: TrainerConfig):
         self.config = config
         self.model_type = config.model_type
-        
+
         # shiva's extra schedule
         self.consistency_schedule = self.config.extra_config.get("consistency_schedule", [1.0, 0.1, 0.1])
         self.gate_schedule = self.config.extra_config.get("gate_schedule", [0.0, 0.0, 0.01])
@@ -71,6 +72,8 @@ class DiffusionModelTrainer:
         self._prepare_with_accelerator()
 
         self.logger = self._setup_logging()
+
+        self._setup_metric_manager()
 
         self._setup_caption_dropout_embeds()
 
@@ -327,6 +330,36 @@ class DiffusionModelTrainer:
             return NoOpLogger()
 
         return LoggerCollection(loggers)
+
+    def _setup_metric_manager(self):
+        self.metric_grouping_rules = {
+            "shiva/ratio/values": [
+                "shiva/ratio/avg_ratio",
+                "shiva/ratio/std_ratio",
+                "shiva/ratio/target_ratio",
+            ],
+            "shiva/losses": [
+                "shiva/ratio/ratio_loss",
+                "shiva/gater/gate_loss",
+                "shiva/gater/consistency_loss",
+            ],
+            "shiva/losses_raw": [
+                "shiva/ratio/ratio_loss_raw",
+                "shiva/gater/gate_loss_raw",
+                "shiva/gater/consistency_loss_raw",
+            ],
+            "shiva/router/scores": [
+                "shiva/router/mean_score",
+                "shiva/router/std_score",
+                "shiva/router/min_score",
+            ],
+        }
+
+        self.metric_manager = MetricManager(
+            self.logger, self.accelerator, self.metric_grouping_rules
+        )
+        self.step_metrics = {}
+        self.step_per_layer_metrics = {}
 
     def _setup_model_and_optimizer(self):
         # freeze VAE and Text Encoder(s)
@@ -609,74 +642,104 @@ class DiffusionModelTrainer:
 
         return main_loss
 
+    def _get_shiva_loss_config(self, global_step: int) -> dict:
+        # multi-stage schedule for Shiva gater
+        current_consistency_weight = self.consistency_schedule[0]
+        current_gate_weight = self.gate_schedule[0]
+
+        scaled_schedule_steps_0 = max(
+            1, self.schedule_steps[0] // self.accelerator.num_processes
+        )
+        scaled_schedule_steps_1 = max(
+            1, self.schedule_steps[1] // self.accelerator.num_processes
+        )
+
+        if global_step > scaled_schedule_steps_0:
+            current_consistency_weight = self.consistency_schedule[1]
+            current_gate_weight = self.gate_schedule[1]
+        if global_step > scaled_schedule_steps_1:
+            current_consistency_weight = self.consistency_schedule[2]
+            current_gate_weight = self.gate_schedule[2]
+
+        def get_annealing_weight(global_step, start_step, end_step):
+            if global_step < start_step:
+                return 0.0
+            progress = (global_step - start_step) / max(1.0, end_step - start_step)
+            return min(1.0, progress)
+
+        start_step = self.config.hook_warmup_steps
+        scaled_start_step = max(1, start_step // self.accelerator.num_processes)
+        anneal_steps = self.config.extra_config["anneal_steps"]
+        scaled_anneal_steps = max(1, anneal_steps // self.accelerator.num_processes)
+        anneal_factor = get_annealing_weight(
+            global_step, scaled_start_step, scaled_anneal_steps
+        )
+
+        base_lambda = self.config.extra_config["ratio_loss_weight"]
+        current_ratio_weight = base_lambda * anneal_factor
+
+        start_ratio = 1.0
+        final_target_ratio = self.config.extra_config["target_ratio"]
+        current_target_ratio = (
+            start_ratio - (start_ratio - final_target_ratio) * anneal_factor
+        )
+
+        return {
+            "ratio_loss_weight": current_ratio_weight,
+            "target_ratio": current_target_ratio,
+            "consistency_loss_weight": current_consistency_weight,
+            "gate_loss_weight": current_gate_weight,
+        }
+
     def _calculate_hook_loss(self, global_step: int):
+        total_hook_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
+        aggregated_metrics = {}
+        self.step_per_layer_metrics = {}
+
         if self.hook_type == "dydit":
-            hook_loss = DynamicDiTBlockHook.calculate_extra_loss(
+            hook_loss = DynamicDiTBlockHook.calculate_flops_loss(
                 self.config.extra_config, device=self.device
             )
+            total_hook_loss = hook_loss
         elif self.hook_type == "diffcr":
-            hook_loss = DiffCRDitBlockHook.calculate_extra_loss(
+            hook_loss = DiffCRDitBlockHook.calculate_ratio_loss(
                 self.config.extra_config, device=self.device
             )
+            total_hook_loss = hook_loss
         elif self.hook_type == "shiva":
-            current_consistency_weight = self.consistency_schedule[0]
-            current_gate_weight = self.gate_schedule[0]
+            loss_config = self._get_shiva_loss_config(global_step)
 
-            scaled_schedule_steps_0 = max(
-                1, self.schedule_steps[0] // self.accelerator.num_processes
+            consistency_loss, c_metrics = ShivaDitBlockHook.calculate_consistency_loss(
+                loss_config, self.device
             )
-            scaled_schedule_steps_1 = max(
-                1, self.schedule_steps[1] // self.accelerator.num_processes
+            gate_loss, g_metrics = ShivaDitBlockHook.calculate_gate_loss(
+                loss_config, self.device
             )
-            if global_step > scaled_schedule_steps_0:
-                current_consistency_weight = self.consistency_schedule[1]
-                current_gate_weight = self.gate_schedule[1]
-            if global_step > scaled_schedule_steps_1:
-                current_consistency_weight = self.consistency_schedule[2]
-                current_gate_weight = self.gate_schedule[2]
-            
-            def get_annealing_weight(global_step, start_step, end_step):
-                if global_step < start_step:
-                    return 0.0
-                progress = (global_step - start_step) / max(1.0, end_step - start_step)
-                return min(1.0, progress)
-            
-            start_step = self.config.hook_warmup_steps
-            scaled_start_step = max(
-                1, start_step // self.accelerator.num_processes
+            ratio_loss, r_metrics, per_layer_ratios = ShivaDitBlockHook.calculate_ratio_loss(
+                loss_config, self.device
             )
-            anneal_steps = self.config.extra_config["anneal_steps"]
-            scaled_anneal_steps = max(
-                1, anneal_steps // self.accelerator.num_processes
-            )
-            anneal_factor = get_annealing_weight(global_step, scaled_start_step, scaled_anneal_steps)
-            base_lambda = self.config.extra_config["ratio_loss_weight"]
-            current_ratio_weight = base_lambda * anneal_factor
 
+            total_hook_loss = consistency_loss + gate_loss + ratio_loss
 
-            start_ratio = 1.0
-            final_target_ratio = self.config.extra_config["target_ratio"]
-            current_target_ratio = start_ratio - (start_ratio - final_target_ratio) * anneal_factor
+            aggregated_metrics.update(c_metrics)
+            aggregated_metrics.update(g_metrics)
+            aggregated_metrics.update(r_metrics)
+            aggregated_metrics["shiva/ratio/target_ratio"] = loss_config["target_ratio"]
 
-            loss_config = {
-                "ratio_loss_weight": current_ratio_weight,
-                "target_ratio": current_target_ratio,
-                "consistency_loss_weight": current_consistency_weight,
-                "gate_loss_weight": current_gate_weight,
+            avg_fuse_prob, per_layer_probs = (
+                ShivaDitBlockHook.calculate_shiva_gate_prob(self.device)
+            )
+            aggregated_metrics["shiva/fuser/avg_fuse_prob"] = avg_fuse_prob.item()
+            self.step_per_layer_metrics = {
+                "shiva/fuser/per_layer_fuse_prob": per_layer_probs,
+                "shiva/ratio/per_layer_ratios": per_layer_ratios,
             }
 
-            hook_loss, consistency_loss, gate_loss, ratio_loss, extra_metric = (
-                ShivaDitBlockHook.calculate_extra_loss(
-                    loss_config, device=self.device
-                )
-            )
+            router_stats = ShivaDitBlockHook.collect_router_stats(self.device)
+            aggregated_metrics.update(router_stats)
 
-            self.last_extra_metric = extra_metric
-            self.last_ratio_loss = ratio_loss.detach()
-            self.last_gate_loss = gate_loss.detach()
-            self.last_consistency_loss = consistency_loss.detach()
         else:
-            hook_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
+            total_hook_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
 
         current_hook_loss_weight = self.config.hook_loss_weight
 
@@ -687,7 +750,7 @@ class DiffusionModelTrainer:
             if global_step < scaled_hook_warmup_steps:
                 current_hook_loss_weight = 1e-9
 
-        return hook_loss * current_hook_loss_weight
+        return total_hook_loss * current_hook_loss_weight, aggregated_metrics
 
     def _compute_loss(self, batch, global_step: int):
         img_latents, noise, noisy_latents, timesteps, model_kwargs = (
@@ -701,17 +764,26 @@ class DiffusionModelTrainer:
         )
 
         main_loss = self._calculate_main_loss(noise_pred, noise, img_latents)
-        hook_loss = self._calculate_hook_loss(global_step)
+        hook_loss, hook_metrics = self._calculate_hook_loss(global_step)
         total_loss = main_loss + hook_loss + distill_loss
 
-        return total_loss, main_loss, hook_loss, distill_loss
+        return total_loss, main_loss, hook_loss, distill_loss, hook_metrics
 
     def _train_step(self, batch):
-        total_loss, main_loss, hook_loss, distill_loss = self._compute_loss(
-            batch, self.global_step
+        total_loss, main_loss, hook_loss, distill_loss, hook_metrics = (
+            self._compute_loss(batch, self.global_step)
         )
         self.accelerator.backward(total_loss)
-        return total_loss.detach(), main_loss.detach(), hook_loss.detach(), distill_loss.detach()
+
+        if self.accelerator.is_main_process:
+            self.step_metrics = hook_metrics
+
+        return (
+            total_loss.detach(),
+            main_loss.detach(),
+            hook_loss.detach(),
+            distill_loss.detach(),
+        )
 
     def _set_hook_trainable_state(self, requires_grad: bool):
         if not self.config.trainable_hook_config:
@@ -817,7 +889,8 @@ class DiffusionModelTrainer:
             self.maybe_save_periodically()
 
         if self.accelerator.is_main_process:
-            metrics_to_log = {}
+            metrics_to_log = self.step_metrics.copy()
+
             if self.config.training_mode == 'lora':
                 lora_params = [
                     p for n, p in self.model.named_parameters() if "lora_" in n
@@ -892,52 +965,26 @@ class DiffusionModelTrainer:
                 "train/distill_loss": gathered_losses["distill"].item(),
                 "train/lr": self.lr_scheduler.get_last_lr()[0],
             })
-            if self.hook_type == "shiva":
-                shiva_metrics = {
-                    "shiva/ratio/ratio_loss": self.last_ratio_loss.item(),
-                    "shiva/gater/gate_loss": self.last_gate_loss.item(),
-                    "shiva/gater/consistency_loss": self.last_consistency_loss.item(),
-                }
 
-                avg_fuse_prob, per_layer_probs = ShivaDitBlockHook.calculate_shiva_gate_prob(self.device)
-                shiva_metrics["shiva/fuser/avg_fuse_prob"] = avg_fuse_prob.item()
-                if per_layer_probs:
-                     self.logger.add_scalars(
-                         "shiva/fuser/per_layer_fuse_prob", per_layer_probs, self.global_step
-                     )
-                    
-                router_stats = ShivaDitBlockHook.collect_router_stats(self.device)
-                for k, v in router_stats.items():
-                    shiva_metrics[k] = v.item()
-
-                metrics_to_log.update(shiva_metrics)
-                metrics_to_log.update(self.last_extra_metric)
-            self.logger.log_scalars(metrics_to_log, step=self.global_step)
+            self.metric_manager.update(metrics_to_log)
+            self.metric_manager.log_step(self.global_step)
+            if hasattr(self, "step_per_layer_metrics"):
+                for key, value_dict in self.step_per_layer_metrics.items():
+                    if value_dict:
+                        self.logger.add_scalars(key, value_dict, self.global_step)
 
             if self.global_step % log_trigger == 0:
                 postfix_dict = {
-                    "loss": f"{gathered_losses['total'].item():.4f}",
-                    "main_loss": f"{gathered_losses['main'].item():.4f}",
-                    "hook_loss": f"{gathered_losses['hook'].item():.4f}",
-                    "distill_loss": f"{gathered_losses['distill'].item():.4f}",
+                    "loss": f"{self.metric_manager.get_metric('train/total_loss'):.4f}",
+                    "main_loss": f"{self.metric_manager.get_metric('train/main_loss'):.4f}",
+                    "extra_loss": f"{self.metric_manager.get_metric('train/hook_loss'):.4f}",
+                    "distill_loss": f"{self.metric_manager.get_metric('train/distill_loss'):.4f}",
                     "lr": f"{self.lr_scheduler.get_last_lr()[0]:.2e}",
                     "step": self.global_step,
                 }
 
                 if self.hook_type == "shiva":
-                    postfix_dict["ratio_loss"] = f"{self.last_ratio_loss.item():.4f}"
-                    postfix_dict["gate_loss"] = f"{self.last_gate_loss.item():.4f}"
-                    postfix_dict["consistency_loss"] = f"{self.last_consistency_loss.item():.4f}"
-                    postfix_dict["fuse_prob"] = f"{avg_fuse_prob.item():.3f}"
-
-                if self.config.training_mode == "lora":
-                    postfix_dict["lora_norm"] = f"{lora_norm:.4f}"
-                    postfix_dict["lora_grad_norm"] = f"{lora_grad_norm:.4e}"
-                    postfix_dict["lora_delta"] = f"{lora_delta:.4e}"
-                elif self.config.training_mode == "finetune":
-                    postfix_dict["param_norm"] = f"{param_norm:.4f}"
-                    postfix_dict["grad_norm"] = f"{grad_norm:.4e}"
-                    postfix_dict["param_delta"] = f"{param_delta:.4e}"
+                    postfix_dict["ratio_loss"] = f"{self.metric_manager.get_metric('shiva/ratio/ratio_loss'):.4f}"
 
                 progress_bar.set_postfix(postfix_dict)
 
@@ -1056,7 +1103,7 @@ class DiffusionModelTrainer:
                     elif hook.__class__.__name__ == "ShivaDitBlockHook":
                         if hasattr(hook, "shiva_ratio"):
                             ratio_val = hook.shiva_ratio.item()
-                    
+
                     if ratio_val is not None:
                         hook_ratios.append(ratio_val)
                         print(f"    {name}: {ratio_val:.4f}")
@@ -1233,7 +1280,7 @@ class DiffusionModelTrainer:
         self.accelerator.wait_for_everyone()
         if not resumed and self.accelerator.is_main_process:
             print("No checkpoint found or resume failed. Starting fresh.")
-        
+
         if resumed:
             steps_per_epoch = len(self.train_dataloader) // self.config.gradient_accumulation_steps
             expected_epoch = self.global_step // steps_per_epoch

@@ -388,10 +388,6 @@ class DynamicDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         return w_flops * l_flops
 
-    @staticmethod
-    def calculate_extra_loss(config: dict, device: torch.device) -> torch.Tensor:
-        flops_loss = DynamicDiTBlockHook.calculate_flops_loss(config, device)
-        return flops_loss
 
 if __name__ == "__main__":
     model_type = "flux-dev"
