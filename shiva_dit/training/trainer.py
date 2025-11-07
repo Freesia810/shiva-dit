@@ -875,9 +875,6 @@ class DiffusionModelTrainer:
         val_metric = None
         if validate_trigger and self.global_step % validate_trigger == 0:
             val_metric = self.validate(self.global_step)
-            # heatmap
-            if self.accelerator.is_main_process:
-                self._log_router_heatmaps(self.global_step)
 
         if self.config.save_best and val_metric is not None:
             self.auto_save_best(
@@ -1025,14 +1022,6 @@ class DiffusionModelTrainer:
         else:
             print(f"  Trainable parameters: None")
         print(f"--------------------------------------------------\n")
-
-    def _log_router_heatmaps(self, step):
-        for name, hook in HookManager.get_all_hooks().items():
-            if isinstance(hook, ShivaDitBlockHook):
-                heatmap = hook.get_router_heatmap()
-                if heatmap is not None:
-                    tag = f"router_heatmap/layer_{hook.layer_idx:02d}"
-                    self.logger.log_image(tag, heatmap, step=step)
 
     @torch.no_grad()
     def validate(self, global_step):

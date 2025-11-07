@@ -696,39 +696,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         else:
             return {}
 
-    @torch.no_grad()
-    def get_router_heatmap(self):
-        try:
-            from PIL import Image
-        except ImportError:
-            print("Warning: PIL not installed. Cannot generate heatmap images.")
-            return None
-
-        scores = self._last_forward_scores
-
-        if scores is None:
-            return None
-
-        H = global_context.hidden_seq_height
-        W = global_context.hidden_seq_width
-
-        if H is None or W is None:
-            return None
-
-        sample_score = torch.sigmoid(scores[0]) 
-
-        if sample_score.shape[0] != H * W:
-            return None 
-
-        heatmap = sample_score.view(1, H, W)
-        heatmap_scaled = heatmap.detach().cpu().to(torch.float32) * 255.0
-        heatmap_uint8 = heatmap_scaled.to(torch.uint8)
-        heatmap_hw = heatmap_uint8.squeeze(0)
-        heatmap_np = heatmap_hw.numpy()
-        pil_image = Image.fromarray(heatmap_np, mode='L')
-
-        return pil_image
-
 if __name__ == "__main__":
     from shiva_dit.utils import get_pipeline, process_quick_start
     model_type = "qwen-image-edit"
