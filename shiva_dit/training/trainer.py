@@ -972,10 +972,10 @@ class DiffusionModelTrainer:
 
             if self.global_step % log_trigger == 0:
                 postfix_dict = {
-                    "loss": f"{self.metric_manager.get_metric('train/total_loss'):.4f}",
-                    "main_loss": f"{self.metric_manager.get_metric('train/main_loss'):.4f}",
-                    "extra_loss": f"{self.metric_manager.get_metric('train/hook_loss'):.4f}",
-                    "distill_loss": f"{self.metric_manager.get_metric('train/distill_loss'):.4f}",
+                    "loss": f"{gathered_losses["total"].item():.4f}",
+                    "main_loss": f"{gathered_losses["main"].item():.4f}",
+                    "extra_loss": f"{ gathered_losses["hook"].item():.4f}",
+                    "distill_loss": f"{gathered_losses["distill"].item():.4f}",
                     "lr": f"{self.lr_scheduler.get_last_lr()[0]:.2e}",
                     "step": self.global_step,
                 }
