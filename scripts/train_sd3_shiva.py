@@ -18,9 +18,18 @@ hook_config = {
 }
 lora_config = {
     "enable": True,
-    "rank": 128,
-    "lora_alpha": 128,
-    "target_modules": ("to_q", "to_k", "to_v", "to_out.0"),
+    "rank": 32,
+    "lora_alpha": 32,
+    "target_modules": [
+        "to_q",
+        "to_k",
+        "to_v",
+        "to_out.0",
+        "linear",
+        "proj_mlp",
+        "proj_out",
+        "net.2",
+    ],
 }
 
 trainer_config = {
@@ -30,7 +39,7 @@ trainer_config = {
     "model_path": None,
     "output_dir": "./checkpoints/",
     "training_mode": "lora",  # "hook_only" "finetune" "lora"
-    "hook_warmup_steps": 7000, # 4 epoch
+    "hook_warmup_steps": 3500, # 2 epoch
     "hook_only_steps": 0,
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
@@ -61,9 +70,9 @@ trainer_config = {
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
     "extra_config": {
-        # (L_ratio = lambda * ratio^2)
-        "anneal_steps": 28000, # 16 epoch
-        "ratio_loss_weight": 1e-5,
+        "anneal_steps": 35000, # 20 epoch
+        "ratio_loss_weight": 0.1,
+        "target_ratio": 0.8,
 
         "schedule_steps": [8750, 14000], # 5 epoch, 8 epoch
         

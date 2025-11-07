@@ -653,8 +653,14 @@ class DiffusionModelTrainer:
             base_lambda = self.config.extra_config["ratio_loss_weight"]
             current_ratio_weight = base_lambda * anneal_factor
 
+
+            start_ratio = 1.0
+            final_target_ratio = self.config.extra_config["target_ratio"]
+            current_target_ratio = start_ratio - (start_ratio - final_target_ratio) * anneal_factor
+
             loss_config = {
                 "ratio_loss_weight": current_ratio_weight,
+                "target_ratio": current_target_ratio,
                 "consistency_loss_weight": current_consistency_weight,
                 "gate_loss_weight": current_gate_weight,
             }
@@ -744,7 +750,6 @@ class DiffusionModelTrainer:
                     if self.accelerator.is_main_process:
                         print(f"  - WARNING: Found ShivaDitBlockHook without 'shiva_ratio' param.")
 
-
     def _set_finetuning_trainable_state(self, requires_grad: bool):        
         if self.accelerator.is_main_process:
             print(f"\n[Step {self.global_step}]: Setting finetuning parameters' requires_grad = {requires_grad}")
@@ -797,6 +802,9 @@ class DiffusionModelTrainer:
         val_metric = None
         if validate_trigger and self.global_step % validate_trigger == 0:
             val_metric = self.validate(self.global_step)
+            # heatmap
+            if self.accelerator.is_main_process:
+                self._log_router_heatmaps(self.global_step)
 
         if self.config.save_best and val_metric is not None:
             self.auto_save_best(
@@ -896,6 +904,10 @@ class DiffusionModelTrainer:
                      self.logger.add_scalars(
                          "shiva/per_layer_fuse_prob", per_layer_probs, self.global_step
                      )
+                    
+                router_stats = ShivaDitBlockHook.collect_router_stats(self.device)
+                for k, v in router_stats.items():
+                    shiva_metrics[k] = v.item()
 
                 metrics_to_log.update(shiva_metrics)
             self.logger.log_scalars(metrics_to_log, step=self.global_step)
@@ -964,6 +976,14 @@ class DiffusionModelTrainer:
         else:
             print(f"  Trainable parameters: None")
         print(f"--------------------------------------------------\n")
+
+    def _log_router_heatmaps(self, step):
+        for name, hook in HookManager.get_all_hooks().items():
+            if isinstance(hook, ShivaDitBlockHook):
+                heatmap = hook.get_router_heatmap()
+                if heatmap is not None:
+                    tag = f"router/heatmap/layer_{hook.layer_idx:02d}"
+                    self.logger.log_image(tag, heatmap, step=step)
 
     @torch.no_grad()
     def validate(self, global_step):
@@ -1211,6 +1231,13 @@ class DiffusionModelTrainer:
         self.accelerator.wait_for_everyone()
         if not resumed and self.accelerator.is_main_process:
             print("No checkpoint found or resume failed. Starting fresh.")
+        
+        if resumed:
+            steps_per_epoch = len(self.train_dataloader) // self.config.gradient_accumulation_steps
+            expected_epoch = self.global_step // steps_per_epoch
+            if self.epoch != expected_epoch:
+                print(f"Adjusting epoch from {self.epoch} to {expected_epoch} based on global_step.")
+                self.epoch = expected_epoch
 
     def _initial_phase(self):
         ## resume hook-only state

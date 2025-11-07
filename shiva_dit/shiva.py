@@ -57,6 +57,10 @@ class ShivaRouter(nn.Module):
 
 
 class ShivaContextPruner(nn.Module):
+    """
+    TODO: if the model has larger context length, we should propose a better pruning strategy
+    Now we only use this module to pool the encoder states for the hidden's router
+    """
     def __init__(self, threshold: int = None, ratio: float = None):
         super().__init__()
         if ratio is not None and not 0.0 < ratio <= 1.0:
@@ -258,7 +262,12 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         nn.init.constant_(shared_gater.net[-1].bias, 0.0)
         shared_gater.net[-1].bias.data[0] = 5.0
         shared_gater.net[-1].bias.data[1] = -5.0
-        nn.init.zeros_(shared_fuse_expert.fusion_ffn[-1].weight)
+
+        fuser_last_layer = shared_fuse_expert.fusion_ffn[-1]
+        nn.init.zeros_(fuser_last_layer.weight)
+        if fuser_last_layer.bias is not None:
+            nn.init.zeros_(fuser_last_layer.bias)
+
         for router in grouped_routers:
             nn.init.zeros_(router.router_head.weight)
             nn.init.constant_(router.router_head.bias, 5.0)
@@ -329,12 +338,13 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 "but 'shared_gater_cache' was not provided."
             )
 
-        self.ratio_sq_loss_accumulator = []
         self.gate_loss_accumulator = []
         self.prune_output_accumulator = []
         self.fuse_output_accumulator = []
 
         self.gater_fuse_prob_accumulator = []
+
+        self.router_stats_accumulator = []
 
         self.token_scores = None
 
@@ -367,6 +377,18 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             hidden_states.to(dtype), pure_temb, pooled_encoder_vector, layer_emb_vector
         )
 
+        self._last_forward_scores = token_scores.detach()
+        with torch.no_grad():
+            sigmoid_scores = torch.sigmoid(token_scores)
+            if self.training:
+                self.router_stats_accumulator.append({
+                    "mean": sigmoid_scores.mean(),
+                    "std": sigmoid_scores.std(),
+                    "min": sigmoid_scores.min(),
+                })
+            else:
+                self.router_stats_accumulator.clear()
+
         kept_ratio = torch.clamp(self.shiva_ratio, 0.1, 1.0)
         k = ceil_ste(kept_ratio * N).to(torch.int32)
         k = torch.min(k, torch.tensor(N, device=hidden_states.device))
@@ -387,9 +409,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         survivor_rope = self._gather_rope(image_rotary_emb, survivors_indices)
 
         if self.training:
-            ratio_sq_loss = self.shiva_ratio**2
-            self.ratio_sq_loss_accumulator.append(ratio_sq_loss)
-
             gater_logits = self.gater(pure_temb, layer_emb_vector)  # (B, 2)
             gating_weights = F.softmax(gater_logits, dim=-1)
 
@@ -410,7 +429,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
             final_topk_states = (g_prune * output_prune) + (g_fuse * output_fuse)
         else:
-            self.ratio_sq_loss_accumulator.clear()
             self.gate_loss_accumulator.clear()
             self.prune_output_accumulator.clear()
             self.fuse_output_accumulator.clear()
@@ -574,26 +592,24 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             return torch.tensor(0.0, device=device)
 
     @staticmethod
-    def calculate_ratio_loss(config: dict, device: torch.device) -> torch.Tensor:
-        ratio_sq_losses_per_hook = []
-        loss_weight = config.get("ratio_loss_weight", 0.0)
-
+    def calculate_ratio_loss(config: dict, device: torch.device) -> torch.Tensor:        
+        loss_weight = config["ratio_loss_weight"]
+        current_target_ratio = config["target_ratio"]
+        
+        ratios = []
+        custom_losses = []
         for hook in HookManager.get_all_hooks().values():
             if isinstance(hook, ShivaDitBlockHook):
-                accumulator = hook.ratio_sq_loss_accumulator
+                ratios.append(hook.shiva_ratio)
+        
+        if ratios:
+            avg_ratio = torch.mean(torch.stack(ratios))
+            target_ratio_tensor = torch.tensor(current_target_ratio, device=avg_ratio.device)
+            mse_loss = F.mse_loss(avg_ratio, target_ratio_tensor)
+            custom_losses.append(mse_loss)
 
-                if accumulator:
-                    avg_loss_for_hook = torch.stack(accumulator).mean()
-                    ratio_sq_losses_per_hook.append(avg_loss_for_hook)
-                    device = avg_loss_for_hook.device
-                else:
-                    ratio_sq_losses_per_hook.append(torch.tensor(hook.shiva_ratio.item()**2, device=device))
-
-                hook.ratio_sq_loss_accumulator.clear()
-
-        if ratio_sq_losses_per_hook:
-            mean_ratio_sq_loss = torch.stack(ratio_sq_losses_per_hook).mean()
-            return mean_ratio_sq_loss * loss_weight
+        if custom_losses:
+            return torch.stack(custom_losses).mean() * loss_weight
         else:
             return torch.tensor(0.0, device=device)
 
@@ -633,6 +649,64 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             return global_avg_prob, gate_probs_per_layer
         else:
             return torch.tensor(0.0, device=device), {}
+
+    @staticmethod
+    @torch.no_grad()
+    def collect_router_stats(device: torch.device) -> dict:
+        total_mean = []
+        total_std = []
+        total_min = []
+
+        for hook in HookManager.get_all_hooks().values():
+            if isinstance(hook, ShivaDitBlockHook):
+                acc = hook.router_stats_accumulator
+                if acc:
+                    total_mean.append(torch.stack([x["mean"] for x in acc]).mean())
+                    total_std.append(torch.stack([x["std"] for x in acc]).mean())
+                    total_min.append(torch.stack([x["min"] for x in acc]).min())
+                acc.clear()
+
+        if total_mean:
+            return {
+                "router/mean_score": torch.stack(total_mean).mean(),
+                "router/std_score": torch.stack(total_std).mean(),
+                "router/min_score": torch.stack(total_min).min(),
+            }
+        else:
+            return {}
+
+    @torch.no_grad()
+    def get_router_heatmap(self):
+        try:
+            from PIL import Image
+        except ImportError:
+            print("Warning: PIL not installed. Cannot generate heatmap images.")
+            return None
+            
+        scores = self._last_forward_scores
+        
+        if scores is None:
+            return None
+
+        H = global_context.hidden_seq_height
+        W = global_context.hidden_seq_width
+        
+        if H is None or W is None:
+             return None
+    
+        sample_score = torch.sigmoid(scores[0]) 
+        
+        if sample_score.shape[0] != H * W:
+             return None 
+
+        heatmap = sample_score.view(1, H, W)
+        heatmap_scaled = heatmap.detach().cpu().to(torch.float32) * 255.0
+        heatmap_uint8 = heatmap_scaled.to(torch.uint8)
+        heatmap_hw = heatmap_uint8.squeeze(0)
+        heatmap_np = heatmap_hw.numpy()
+        pil_image = Image.fromarray(heatmap_np, mode='L')
+        
+        return pil_image
 
 if __name__ == "__main__":
     from shiva_dit.utils import get_pipeline, process_quick_start
