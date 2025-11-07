@@ -1048,7 +1048,7 @@ class DiffusionModelTrainer:
 
         for batch in val_progress_bar:
             try:
-                total_loss, main_loss, hook_loss, distill_loss = self._compute_loss(
+                total_loss, main_loss, hook_loss, distill_loss, _ = self._compute_loss(
                     batch, global_step
                 )
 
