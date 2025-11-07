@@ -544,7 +544,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
     @staticmethod
     def calculate_consistency_loss(config: dict, device: torch.device) -> torch.Tensor:
         consistency_loss = []
-        loss_weight = config.get("consistency_loss_weight", 0.0)
 
         for hook in HookManager.get_all_hooks().values():
             if isinstance(hook, ShivaDitBlockHook):
@@ -569,9 +568,15 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 hook.prune_output_accumulator.clear()
                 hook.fuse_output_accumulator.clear()
 
-        metrics = {"shiva/gater/consistency_loss": 0.0}
+        metrics = {
+            "shiva/gater/consistency_loss_raw": 0.0,
+            "shiva/gater/consistency_loss": 0.0,
+        }
+        loss_weight = config["consistency_loss_weight"]
         if consistency_loss:
-            final_loss = torch.stack(consistency_loss).mean() * loss_weight
+            raw_loss = torch.stack(consistency_loss).mean()
+            final_loss = raw_loss * loss_weight
+            metrics["shiva/gater/consistency_loss_raw"] = raw_loss.item()
             metrics["shiva/gater/consistency_loss"] = final_loss.item()
             return final_loss, metrics
         else:
@@ -580,7 +585,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
     @staticmethod
     def calculate_gate_loss(config: dict, device: torch.device) -> torch.Tensor:
         gate_losses = []
-        loss_weight = config.get("gate_loss_weight", 0.0)
 
         for hook in HookManager.get_all_hooks().values():
             if isinstance(hook, ShivaDitBlockHook):
@@ -593,9 +597,15 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
                 hook.gate_loss_accumulator.clear()
 
-        metrics = {"shiva/gater/gate_loss": 0.0}
+        metrics = {
+            "shiva/gater/gate_loss_raw": 0.0,
+            "shiva/gater/gate_loss": 0.0,
+        }
+        loss_weight = config["gate_loss_weight"]
         if gate_losses:
-            final_loss = torch.stack(gate_losses).mean() * loss_weight
+            raw_loss = torch.stack(gate_losses).mean()
+            final_loss = raw_loss * loss_weight
+            metrics["shiva/gater/gate_loss_raw"] = raw_loss.item()
             metrics["shiva/gater/gate_loss"] = final_loss.item()
             return final_loss, metrics
         else:
