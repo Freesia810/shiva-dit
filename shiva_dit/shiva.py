@@ -263,10 +263,10 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         # shared_gater.net[-1].bias.data[0] = 5.0
         # shared_gater.net[-1].bias.data[1] = -5.0
 
-        fuser_last_layer = shared_fuse_expert.fusion_ffn[-1]
-        nn.init.zeros_(fuser_last_layer.weight)
-        if fuser_last_layer.bias is not None:
-            nn.init.zeros_(fuser_last_layer.bias)
+        # fuser_last_layer = shared_fuse_expert.fusion_ffn[-1]
+        # nn.init.zeros_(fuser_last_layer.weight)
+        # if fuser_last_layer.bias is not None:
+        #     nn.init.zeros_(fuser_last_layer.bias)
 
         for router in grouped_routers:
             nn.init.zeros_(router.router_head.weight)
@@ -387,7 +387,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             else:
                 self.router_stats_accumulator.clear()
 
-        kept_ratio = torch.clamp(self.shiva_ratio, 0.0, 1.0)
+        kept_ratio = torch.clamp(self.shiva_ratio, min=1e-9, max=1.0)
         k = ceil_ste(kept_ratio * N).to(torch.int32)
         k = torch.min(k, torch.tensor(N, device=hidden_states.device))
 
@@ -458,13 +458,13 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         else:
             processed_hidden_states = processed_output
 
+        if self.training:
+            proxy_scale_ste = (kept_ratio - kept_ratio.detach()) + 1.0
+            processed_hidden_states = processed_hidden_states * proxy_scale_ste
+
         final_hidden_states = self._scatter_add(
             processed_hidden_states, remaining_x, survivors_indices
         )
-
-        r = self.shiva_ratio
-        if self.training:
-            final_hidden_states = final_hidden_states * (r / r.detach())
 
         if isinstance(processed_output, tuple):
             return processed_encoder_states, final_hidden_states
