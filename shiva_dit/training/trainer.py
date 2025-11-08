@@ -55,6 +55,8 @@ class DiffusionModelTrainer:
             config.seed
         )
 
+        self._setup_scaled_steps()
+
         self._setup_models_and_components()
 
         self._setup_hooks()
@@ -78,6 +80,53 @@ class DiffusionModelTrainer:
         self._setup_caption_dropout_embeds()
 
         self._print_setup_summary()
+
+    def _scale_steps(self, steps: int) -> int:
+        """
+        Helper method to scale a step count by the number of DDP processes.
+        Ensures the result is at least 1.
+        """
+        if steps <= 0:
+            return steps
+        return max(1, steps // self.accelerator.num_processes)
+
+    def _setup_scaled_steps(self):
+        """
+        Pre-calculates all step counts scaled by the number of processes.
+        """
+        config = self.config
+
+        # Shiva loss schedule
+        self.scaled_schedule_steps_0 = self._scale_steps(self.schedule_steps[0])
+        self.scaled_schedule_steps_1 = self._scale_steps(self.schedule_steps[1])
+
+        # Shiva ratio loss annealing
+        self.scaled_hook_warmup_steps = self._scale_steps(config.hook_warmup_steps)
+        self.scaled_anneal_steps = self._scale_steps(
+            config.extra_config["anneal_steps"]
+        )
+
+        # Hook-only phase
+        self.scaled_hook_only_steps = self._scale_steps(config.hook_only_steps)
+
+        # Logging & Validation Triggers
+        self.log_trigger = self._scale_steps(config.logging_steps)
+
+        self.validate_trigger = (
+            self._scale_steps(config.validation_steps)
+            if config.validation_steps > 0
+            else None
+        )
+
+        self.inference_trigger = (
+            self._scale_steps(config.inference_steps)
+            if config.inference_steps > 0
+            else None
+        )
+
+        self.save_trigger = (
+            self._scale_steps(config.save_steps) if config.save_steps > 0 else None
+        )
 
     @staticmethod
     def _get_dtype(self, mixed_precision: str):
@@ -647,17 +696,10 @@ class DiffusionModelTrainer:
         current_consistency_weight = self.consistency_schedule[0]
         current_gate_weight = self.gate_schedule[0]
 
-        scaled_schedule_steps_0 = max(
-            1, self.schedule_steps[0] // self.accelerator.num_processes
-        )
-        scaled_schedule_steps_1 = max(
-            1, self.schedule_steps[1] // self.accelerator.num_processes
-        )
-
-        if global_step > scaled_schedule_steps_0:
+        if global_step > self.scaled_schedule_steps_0:
             current_consistency_weight = self.consistency_schedule[1]
             current_gate_weight = self.gate_schedule[1]
-        if global_step > scaled_schedule_steps_1:
+        if global_step > self.scaled_schedule_steps_1:
             current_consistency_weight = self.consistency_schedule[2]
             current_gate_weight = self.gate_schedule[2]
 
@@ -667,12 +709,8 @@ class DiffusionModelTrainer:
             progress = (global_step - start_step) / max(1.0, end_step - start_step)
             return min(1.0, progress)
 
-        start_step = self.config.hook_warmup_steps
-        scaled_start_step = max(1, start_step // self.accelerator.num_processes)
-        anneal_steps = self.config.extra_config["anneal_steps"]
-        scaled_anneal_steps = max(1, anneal_steps // self.accelerator.num_processes)
         anneal_factor = get_annealing_weight(
-            global_step, scaled_start_step, scaled_anneal_steps
+            global_step, self.scaled_start_step, self.scaled_anneal_steps
         )
 
         base_lambda = self.config.extra_config["ratio_loss_weight"]
@@ -696,16 +734,25 @@ class DiffusionModelTrainer:
         aggregated_metrics = {}
         self.step_per_layer_metrics = {}
 
+        is_hook_warmup = False
+        if self.config.hook_warmup_steps > 0:
+            if global_step < self.scaled_hook_warmup_steps:
+                is_hook_warmup = True
+
         if self.hook_type == "dydit":
             hook_loss = DynamicDiTBlockHook.calculate_flops_loss(
                 self.config.extra_config, device=self.device
             )
             total_hook_loss = hook_loss
         elif self.hook_type == "diffcr":
-            hook_loss = DiffCRDitBlockHook.calculate_ratio_loss(
+            ratio_loss = DiffCRDitBlockHook.calculate_ratio_loss(
                 self.config.extra_config, device=self.device
             )
-            total_hook_loss = hook_loss
+
+            if is_hook_warmup:
+                ratio_loss = ratio_loss * 1e-9
+
+            total_hook_loss = ratio_loss
         elif self.hook_type == "shiva":
             loss_config = self._get_shiva_loss_config(global_step)
 
@@ -718,6 +765,10 @@ class DiffusionModelTrainer:
             ratio_loss, r_metrics, per_layer_ratios = ShivaDitBlockHook.calculate_ratio_loss(
                 loss_config, self.device
             )
+
+            if is_hook_warmup:
+                consistency_loss = consistency_loss * 1e-9
+                ratio_loss = ratio_loss * 1e-9
 
             total_hook_loss = consistency_loss + gate_loss + ratio_loss
 
@@ -742,13 +793,6 @@ class DiffusionModelTrainer:
             total_hook_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
 
         current_hook_loss_weight = self.config.hook_loss_weight
-
-        if self.config.hook_warmup_steps > 0:
-            scaled_hook_warmup_steps = max(
-                1, self.config.hook_warmup_steps // self.accelerator.num_processes
-            )
-            if global_step < scaled_hook_warmup_steps:
-                current_hook_loss_weight = 1e-9
 
         return total_hook_loss * current_hook_loss_weight, aggregated_metrics
 
@@ -839,38 +883,10 @@ class DiffusionModelTrainer:
                         param.requires_grad = requires_grad
 
     def _on_update_step_end(self, gathered_losses, progress_bar):
-        log_trigger = max(
-            1, self.config.logging_steps // self.accelerator.num_processes
-        )
-
-        validate_trigger = (
-            max(
-                1,
-                self.config.validation_steps
-                // self.accelerator.num_processes,
-            )
-            if hasattr(self.config, "validation_steps")
-            and self.config.validation_steps > 0
-            else None
-        )
-
-        inference_trigger = (
-            max(
-                1,
-                self.config.inference_steps
-                // self.accelerator.num_processes,
-            )
-            if hasattr(self.config, "inference_steps")
-            and self.config.inference_steps > 0
-            else None
-        )
-
-        save_trigger = (
-            max(1, self.config.save_steps // self.accelerator.num_processes)
-            if hasattr(self.config, "save_steps")
-            and self.config.save_steps > 0
-            else None
-        )
+        log_trigger = self.log_trigger
+        validate_trigger = self.validate_trigger
+        inference_trigger = self.inference_trigger
+        save_trigger = self.save_trigger
 
         val_metric = None
         if validate_trigger and self.global_step % validate_trigger == 0:
@@ -1280,11 +1296,7 @@ class DiffusionModelTrainer:
     def _initial_phase(self):
         ## resume hook-only state
         if self.config.hook_only_steps > 0:
-            scaled_hook_only_steps = max(
-                1, self.config.hook_only_steps // self.accelerator.num_processes
-            )
-
-            is_in_hookonly = self.global_step < scaled_hook_only_steps
+            is_in_hookonly = self.global_step < self.scaled_hook_only_steps
             self._set_finetuning_trainable_state(requires_grad=not is_in_hookonly)
         else:
             self._set_finetuning_trainable_state(requires_grad=True)
@@ -1295,8 +1307,7 @@ class DiffusionModelTrainer:
     def _trigger_phase(self):
         # trigger hook-only completion
         if self.config.hook_only_steps > 0:
-            scaled_hook_only_steps = max(1, self.config.hook_only_steps // self.accelerator.num_processes)
-            if self.global_step == scaled_hook_only_steps:
+            if self.global_step == self.scaled_hook_only_steps:
                 self._set_finetuning_trainable_state(requires_grad=True)
                 self._log_trainable_parameters('After hook-only')
 
