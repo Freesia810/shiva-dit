@@ -70,7 +70,7 @@ trainer_config = {
         "ratio_loss_weight": 0.1,
         "target_ratio": 0.8,
         "schedule_steps": [17500, 26250],  # 10 epoch, 15 epoch
-        "gate_schedule": [1e-9, 1e-9, 0.01],
+        "gate_schedule": [0.01, 0.01, 0.01],
         "consistency_schedule": [1e-9, 0.1, 0.2],
     },
     "log_with_tensorboard": True,

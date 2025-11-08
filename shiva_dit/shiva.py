@@ -259,14 +259,12 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         ).to(device, dtype)
 
         ## initialization: keep parameters to reasonable values
-        # nn.init.constant_(shared_gater.net[-1].bias, 0.0)
-        # shared_gater.net[-1].bias.data[0] = 5.0
-        # shared_gater.net[-1].bias.data[1] = -5.0
+        nn.init.constant_(shared_gater.net[-1].bias, 0.0)
 
-        # fuser_last_layer = shared_fuse_expert.fusion_ffn[-1]
-        # nn.init.zeros_(fuser_last_layer.weight)
-        # if fuser_last_layer.bias is not None:
-        #     nn.init.zeros_(fuser_last_layer.bias)
+        fuser_last_layer = shared_fuse_expert.fusion_ffn[-1]
+        nn.init.zeros_(fuser_last_layer.weight)
+        if fuser_last_layer.bias is not None:
+            nn.init.zeros_(fuser_last_layer.bias)
 
         for router in grouped_routers:
             nn.init.zeros_(router.router_head.weight)
@@ -410,8 +408,13 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             gater_logits = self.gater(pure_temb, layer_emb_vector)  # (B, 2)
             gating_weights = F.softmax(gater_logits, dim=-1)
 
-            entropy = -(gating_weights * torch.log(gating_weights + 1e-10)).sum(dim=-1)
-            self.gate_loss_accumulator.append(entropy.mean())
+            # entropy = -(gating_weights * torch.log(gating_weights + 1e-10)).sum(dim=-1)
+            # self.gate_loss_accumulator.append(entropy.mean())
+
+            avg_gating_probs = gating_weights.mean(dim=0)  # (B, 2) -> (2)
+            num_experts = 2  # (pruner, fuser)
+            load_balancing_loss = num_experts * torch.sum(avg_gating_probs.pow(2))
+            self.gate_loss_accumulator.append(load_balancing_loss)
 
             avg_fuse_prob = gating_weights[:, 1].mean()
             self.gater_fuse_prob_accumulator.append(avg_fuse_prob)
