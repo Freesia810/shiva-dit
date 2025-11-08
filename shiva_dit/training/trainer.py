@@ -710,7 +710,7 @@ class DiffusionModelTrainer:
             return min(1.0, progress)
 
         anneal_factor = get_annealing_weight(
-            global_step, self.scaled_start_step, self.scaled_anneal_steps
+            global_step, self.scaled_hook_warmup_steps, self.scaled_anneal_steps
         )
 
         base_lambda = self.config.extra_config["ratio_loss_weight"]
