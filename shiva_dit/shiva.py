@@ -269,7 +269,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         for router in grouped_routers:
             nn.init.zeros_(router.router_head.weight)
-            nn.init.constant_(router.router_head.bias, 5.0)
+            nn.init.constant_(router.router_head.bias, 2.0)
 
         layers_per_group = num_layers // num_router_groups
 
@@ -567,7 +567,10 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
                     micro_batch_losses = []
                     for prune_out, fuse_out in zip(prune_list, fuse_list):
-                        loss = F.mse_loss(prune_out.detach(), fuse_out)
+                        loss = F.mse_loss(
+                            prune_out.detach().to(torch.float32),
+                            fuse_out.to(torch.float32),
+                        )
                         micro_batch_losses.append(loss)
 
                     if micro_batch_losses:

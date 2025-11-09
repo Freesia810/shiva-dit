@@ -58,7 +58,7 @@ trainer_config = {
     "val_metadata_file": "../dataset/MJHQ-30K/val.jsonl",
     "val_image_dir": "../dataset/MJHQ-30K/",
     "run_inference_validation": True,
-    "inference_steps": 1750,  # 1 epoch
+    "inference_steps": 3500,  # 1 epoch
     "inference_metadata_file": "../dataset/MJHQ-30K/test.jsonl",
     "inference_seed": 42,
     "inference_num_inference_steps": 30,
