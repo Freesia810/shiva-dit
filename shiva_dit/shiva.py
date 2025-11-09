@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from shiva_dit.hook.block_hook import BaseDiTBlockHook
 from shiva_dit.hook.delegate import BaseDelegator
 from shiva_dit.hook.hook_manager import HookManager
-from shiva_dit.utils import ceil_ste, global_context
+from shiva_dit.utils import ceil_ste, sigmoid_ste, global_context
 from shiva_dit.utils.utils import join_image_rotary_emb, parse_image_rotary_emb
 
 
@@ -352,7 +352,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
     @property
     def shiva_ratio(self) -> torch.Tensor:
-        return torch.sigmoid(self.shiva_ratio_logit)
+        return sigmoid_ste(self.shiva_ratio_logit)
 
     def delegated_call(self, func, module_self, *args, **kwargs):
         sig = inspect.signature(func)
