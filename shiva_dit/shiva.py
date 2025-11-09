@@ -385,8 +385,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             else:
                 self.router_stats_accumulator.clear()
 
-        kept_ratio = self.shiva_ratio
-        kept_ratio = torch.clamp(kept_ratio, min=1e-9)
+        unclamped_ratio = self.shiva_ratio
+        kept_ratio = torch.clamp(unclamped_ratio, min=1e-9, max=1.0)
         k = ceil_ste(kept_ratio * N).to(torch.int32)
         k = torch.min(k, torch.tensor(N, device=hidden_states.device))
 
@@ -430,6 +430,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             self.fuse_output_accumulator.append(output_fuse)
 
             final_topk_states = (g_prune * output_prune) + (g_fuse * output_fuse)
+
+            proxy_scale_ste = (unclamped_ratio - unclamped_ratio.detach()) + 1.0
         else:
             self.gate_loss_accumulator.clear()
             self.prune_output_accumulator.clear()
@@ -463,7 +465,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             processed_hidden_states = processed_output
 
         if self.training:
-            proxy_scale_ste = (kept_ratio - kept_ratio.detach()) + 1.0
             processed_hidden_states = processed_hidden_states * proxy_scale_ste
 
         final_hidden_states = self._scatter_add(
@@ -623,7 +624,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         for hook in HookManager.get_all_hooks().values():
             if isinstance(hook, ShivaDitBlockHook):
                 layer_name = f"layer_{hook.layer_idx:02d}"
-                current_ratio = hook.shiva_ratio
+                current_ratio_unclamped = hook.shiva_ratio
+                current_ratio = torch.clamp(current_ratio_unclamped, min=1e-9, max=1.0)
                 ratios_per_layer[layer_name] = current_ratio.item()
                 ratios.append(current_ratio)
 
