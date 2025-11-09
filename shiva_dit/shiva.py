@@ -1,4 +1,5 @@
 import inspect
+import math
 from typing import Literal, Type
 import torch
 import torch.nn as nn
@@ -318,7 +319,10 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         super().__init__(**kwargs)
 
-        self.shiva_ratio = nn.Parameter(torch.tensor(float(initial_kept_ratio)))
+        initial_kept_ratio = float(initial_kept_ratio)
+        initial_kept_ratio_clamped = min(max(initial_kept_ratio, 1e-6), 1.0 - 1e-6) 
+        initial_logit = math.log(initial_kept_ratio_clamped / (1.0 - initial_kept_ratio_clamped))
+        self.shiva_ratio_logit = nn.Parameter(torch.tensor(initial_logit))
 
         self.layer_embedder = shared_layer_embedder
         self.router = shared_router
@@ -345,6 +349,10 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.token_scores = None
 
         self.eval()
+
+    @property
+    def shiva_ratio(self) -> torch.Tensor:
+        return torch.sigmoid(self.shiva_ratio_logit)
 
     def delegated_call(self, func, module_self, *args, **kwargs):
         sig = inspect.signature(func)
@@ -385,7 +393,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             else:
                 self.router_stats_accumulator.clear()
 
-        kept_ratio = torch.clamp(self.shiva_ratio, min=1e-9, max=1.0)
+        kept_ratio = self.shiva_ratio
+        kept_ratio = torch.clamp(kept_ratio, min=1e-9)
         k = ceil_ste(kept_ratio * N).to(torch.int32)
         k = torch.min(k, torch.tensor(N, device=hidden_states.device))
 
@@ -619,8 +628,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         for hook in HookManager.get_all_hooks().values():
             if isinstance(hook, ShivaDitBlockHook):
                 layer_name = f"layer_{hook.layer_idx:02d}"
-                ratios_per_layer[layer_name] = hook.shiva_ratio.item()
-                ratios.append(hook.shiva_ratio)
+                current_ratio = hook.shiva_ratio
+                ratios_per_layer[layer_name] = current_ratio.item()
+                ratios.append(current_ratio)
 
         metrics = {
             "shiva/ratio/avg_ratio": 0.0,
