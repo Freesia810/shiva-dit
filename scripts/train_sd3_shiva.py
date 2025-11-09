@@ -67,11 +67,11 @@ trainer_config = {
     "hook_warmup_steps": 3500,  # 2 epoch
     "extra_config": {
         "anneal_steps": 35000,  # 20 epoch
-        "ratio_loss_weight": 0.1,
+        "ratio_loss_weight": 0.2,
         "target_ratio": 0.8,
         "schedule_steps": [3500, 26250],  # 2 epoch, 15 epoch
-        "gate_schedule": [0.01, 0.01, 0.01],
-        "consistency_schedule": [1e-9, 0.1, 0.2],
+        "gate_schedule": [0.1, 0.1, 0.1],
+        "consistency_schedule": [1e-9, 1e-9, 0.1],
     },
     "log_with_tensorboard": True,
     "log_with_wandb": True,
