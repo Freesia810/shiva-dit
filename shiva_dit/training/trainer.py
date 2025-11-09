@@ -467,10 +467,6 @@ class DiffusionModelTrainer:
                 if isinstance(hook, nn.Module):
                     hook.requires_grad_(True)
             params_to_train = [p for p in self.model.parameters() if p.requires_grad]
-            for hook in HookManager.get_all_hooks().values():
-                if isinstance(hook, nn.Module):
-                    hook.requires_grad_(True) 
-                    params_to_train.extend(hook.parameters())
         else:
             raise ValueError(f"Unknown training mode: {self.config.training_mode}")
 
