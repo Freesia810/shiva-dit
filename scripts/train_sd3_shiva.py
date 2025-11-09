@@ -51,14 +51,14 @@ trainer_config = {
     "hook_loss_weight": 1.0,
     "seed": 42,
     "logging_steps": 5,
-    "save_steps": 1750,  # 1 epoch
+    "save_steps": 3500,  # 1 epoch
     "run_validation": True,
     "validation_steps": 875,  # 0.5 epoch
     "val_batch_size": None,
     "val_metadata_file": "../dataset/MJHQ-30K/val.jsonl",
     "val_image_dir": "../dataset/MJHQ-30K/",
     "run_inference_validation": True,
-    "inference_steps": 3500,  # 1 epoch
+    "inference_steps": 1750,  # 1 epoch
     "inference_metadata_file": "../dataset/MJHQ-30K/test.jsonl",
     "inference_seed": 42,
     "inference_num_inference_steps": 30,
