@@ -321,8 +321,13 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         initial_kept_ratio = float(initial_kept_ratio)
         initial_kept_ratio_clamped = min(max(initial_kept_ratio, 1e-6), 1.0 - 1e-6) 
-        initial_logit = math.log(initial_kept_ratio_clamped / (1.0 - initial_kept_ratio_clamped))
-        self.shiva_ratio_logit = nn.Parameter(torch.tensor(initial_logit))
+        initial_logit_bias_value = math.log(
+            initial_kept_ratio_clamped / (1.0 - initial_kept_ratio_clamped)
+        )
+        self.register_buffer(
+            "initial_logit_bias", torch.tensor(initial_logit_bias_value)
+        )
+        self.shiva_ratio_logit_delta = nn.Parameter(torch.tensor(0.0))
 
         self.layer_embedder = shared_layer_embedder
         self.router = shared_router
@@ -352,7 +357,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
     @property
     def shiva_ratio(self) -> torch.Tensor:
-        return sigmoid_ste(self.shiva_ratio_logit)
+        total_logit = self.initial_logit_bias + self.shiva_ratio_logit_delta
+        return sigmoid_ste(total_logit)
 
     def delegated_call(self, func, module_self, *args, **kwargs):
         sig = inspect.signature(func)
