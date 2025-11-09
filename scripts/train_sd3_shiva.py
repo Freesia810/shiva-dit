@@ -66,11 +66,11 @@ trainer_config = {
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
     "hook_warmup_steps": 3500,  # 2 epoch
     "extra_config": {
-        "anneal_steps": 0,  # 20 epoch
-        "ratio_loss_weight": 0.1,
+        "anneal_steps": 21000,  # 12 epoch
+        "ratio_loss_weight": 0.3,
         "target_ratio": 0.8,
-        "schedule_steps": [3500, 26250],  # 2 epoch, 15 epoch
-        "gate_schedule": [0.1, 0.1, 0.1],
+        "schedule_steps": [10500, 26250],  # 6 epoch, 15 epoch
+        "gate_schedule": [0.1, 0.05, 0.01],
         "consistency_schedule": [1e-9, 1e-9, 0.1],
     },
     "log_with_tensorboard": True,
