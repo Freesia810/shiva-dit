@@ -467,6 +467,10 @@ class DiffusionModelTrainer:
                 if isinstance(hook, nn.Module):
                     hook.requires_grad_(True)
             params_to_train = [p for p in self.model.parameters() if p.requires_grad]
+            for hook in HookManager.get_all_hooks().values():
+                if isinstance(hook, nn.Module):
+                    hook.requires_grad_(True) 
+                    params_to_train.extend(hook.parameters())
         else:
             raise ValueError(f"Unknown training mode: {self.config.training_mode}")
 
@@ -828,44 +832,6 @@ class DiffusionModelTrainer:
             hook_loss.detach(),
             distill_loss.detach(),
         )
-
-    def _set_hook_trainable_state(self, requires_grad: bool):
-        if not self.config.trainable_hook_config:
-            return
-
-        if self.accelerator.is_main_process:
-            print(f"\n[Step {self.global_step}]: Setting hook parameters' requires_grad = {requires_grad}")
-
-        for hook in HookManager.get_all_hooks().values():
-            if hook.__class__.__name__ == "DiffCRDitBlockHook":
-                if hasattr(hook, "diff_ratio"):
-                    if hook.diff_ratio.requires_grad != requires_grad:
-                        hook.diff_ratio.requires_grad = requires_grad
-                        if self.accelerator.is_main_process:
-                            print(f"  - Set DiffCR.diff_ratio.requires_grad = {requires_grad}")
-                else:
-                    if self.accelerator.is_main_process:
-                        print(f"  - WARNING: Found DiffCRDitBlockHook without 'diff_ratio' param.")
-
-            elif hook.__class__.__name__ == "DynamicDiTBlockHook":
-                if hasattr(hook, "dynamic_token_selector") and hook.dynamic_token_selector is not None:
-                    if any(p.requires_grad != requires_grad for p in hook.dynamic_token_selector.parameters()):
-                        hook.dynamic_token_selector.requires_grad_(requires_grad)
-                        if self.accelerator.is_main_process:
-                            print(f"  - Set DyDiT.dynamic_token_selector.requires_grad_ = {requires_grad}")
-                else:
-                    if self.accelerator.is_main_process:
-                        print(f"  - WARNING: Found DynamicDiTBlockHook without 'dynamic_token_selector'.")
-
-            elif hook.__class__.__name__ == "ShivaDitBlockHook":
-                if hasattr(hook, "shiva_ratio"):
-                    if hook.shiva_ratio.requires_grad != requires_grad:
-                        hook.shiva_ratio.requires_grad = requires_grad
-                        if self.accelerator.is_main_process:
-                            print(f"  - Set Shiva.shiva_ratio.requires_grad = {requires_grad}")
-                else:
-                    if self.accelerator.is_main_process:
-                        print(f"  - WARNING: Found ShivaDitBlockHook without 'shiva_ratio' param.")
 
     def _set_finetuning_trainable_state(self, requires_grad: bool):        
         if self.accelerator.is_main_process:
