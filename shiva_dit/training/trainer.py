@@ -245,8 +245,6 @@ class DiffusionModelTrainer:
 
     def _setup_dataloaders(self):
         config = self.config
-        total_cores = os.cpu_count()
-        num_workers = min(total_cores, 64)
         self.train_dataset = ImageTextDataset(
             model_type=self.model_type,
             metadata_file=config.metadata_file,
@@ -260,7 +258,6 @@ class DiffusionModelTrainer:
             batch_size=config.train_batch_size,
             shuffle=True,
             collate_fn=collate_fn,
-            num_workers=num_workers,
             pin_memory=True,
         )
 
@@ -285,7 +282,6 @@ class DiffusionModelTrainer:
                     batch_size=val_batch_size,
                     shuffle=False,
                     collate_fn=collate_fn,
-                    num_workers=num_workers,
                     pin_memory=True,
                 )
             except Exception as e:
