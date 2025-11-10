@@ -4,3 +4,4 @@ checkpoints/
 wandb/
 mlruns/
 *.log
+shiva_env/
