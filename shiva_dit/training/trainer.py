@@ -103,7 +103,7 @@ class DiffusionModelTrainer:
         # Shiva ratio loss annealing
         self.scaled_hook_warmup_steps = self._scale_steps(config.hook_warmup_steps)
         self.scaled_anneal_steps = self._scale_steps(
-            config.extra_config["anneal_steps"]
+            config.extra_config.get("anneal_steps", 0)
         )
 
         # Hook-only phase

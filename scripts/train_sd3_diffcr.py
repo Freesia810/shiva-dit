@@ -53,14 +53,14 @@ trainer_config = {
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
     "extra_config": {
         "ratio_loss_weight": 0.3,
-        "target_ratio": 0.5,
+        "target_ratio": 0.8,
     },
     "log_with_tensorboard": True,
     "log_with_wandb": True,
-    "wandb_project": "generative-model-boost",
+    "wandb_project": "shiva-dit",
     "wandb_run_name": "sd3-diffcr",
-    "log_with_mlflow": True,
-    "mlflow_experiment_name": "generative-model-boost",
+    "log_with_mlflow": False,
+    "mlflow_experiment_name": "shiva-dit",
     "mlflow_run_name": "sd3-diffcr",
     "mlflow_tracking_uri": None,
 }
