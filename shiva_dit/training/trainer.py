@@ -402,6 +402,16 @@ class DiffusionModelTrainer:
                 "shiva/router/std_score",
                 "shiva/router/min_score",
             ],
+            "shiva/fuser/behavior_norm": [
+                "shiva/fuser/avg_discarded_norm",
+                "shiva/fuser/avg_diff_norm",
+            ],
+            "shiva/fuser/cosine_sim": [
+                "shiva/fuser/avg_cos_sim",
+            ],
+            "shiva/fuser/gate_prob_avg": [
+                "shiva/fuser/avg_fuse_prob",
+            ]
         }
 
         self.metric_manager = MetricManager(
@@ -781,13 +791,17 @@ class DiffusionModelTrainer:
                 ShivaDitBlockHook.calculate_shiva_gate_prob(self.device)
             )
             aggregated_metrics["shiva/fuser/avg_fuse_prob"] = avg_fuse_prob.item()
-            self.step_per_layer_metrics = {
+            self.step_per_layer_metrics.update({
                 "shiva/fuser/per_layer_fuse_prob": per_layer_probs,
                 "shiva/ratio/per_layer_ratios": per_layer_ratios,
-            }
+            })
 
             router_stats = ShivaDitBlockHook.collect_router_stats(self.device)
             aggregated_metrics.update(router_stats)
+
+            fuser_stats_global, fuser_stats_per_layer = ShivaDitBlockHook.collect_fuser_stats(self.device)
+            aggregated_metrics.update(fuser_stats_global)
+            self.step_per_layer_metrics.update(fuser_stats_per_layer)
 
         else:
             total_hook_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)

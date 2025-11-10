@@ -344,6 +344,10 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.gater_fuse_prob_accumulator = []
         self.router_stats_accumulator = []
 
+        self.discarded_info_norm_accumulator = []
+        self.fuser_diff_norm_accumulator = []
+        self.fuser_cos_sim_accumulator = []
+
         self.token_scores = None
 
     def delegated_call(self, func, module_self, *args, **kwargs):
@@ -426,6 +430,20 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             output_prune = self.prune_expert(survivors)
             output_fuse = self.fuse_expert(survivors.to(dtype), discarded.to(dtype))
 
+            if discarded.shape[1] > 0:
+                global_info = torch.mean(discarded, dim=1, keepdim=True)
+                discarded_info_norm = torch.norm(global_info, p=2, dim=-1).mean().detach()
+            else:
+                discarded_info_norm = torch.tensor(0.0, device=survivors.device, dtype=survivors.dtype)
+            
+            output_diff = output_fuse - output_prune
+            diff_norm = torch.norm(output_diff, p=2, dim=-1).mean().detach()
+            cos_sim = F.cosine_similarity(output_prune, output_fuse, dim=-1).mean().detach()
+
+            self.discarded_info_norm_accumulator.append(discarded_info_norm)
+            self.fuser_diff_norm_accumulator.append(diff_norm)
+            self.fuser_cos_sim_accumulator.append(cos_sim)
+
             self.prune_output_accumulator.append(output_prune)
             self.fuse_output_accumulator.append(output_fuse)
 
@@ -437,6 +455,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             self.prune_output_accumulator.clear()
             self.fuse_output_accumulator.clear()
             self.gater_fuse_prob_accumulator.clear()
+            self.discarded_info_norm_accumulator.clear()
+            self.fuser_diff_norm_accumulator.clear()
+            self.fuser_cos_sim_accumulator.clear()
 
             if self.use_gater_lut:
                 current_t_index = global_context.current_iteration # TODO: LUT Logic
@@ -705,6 +726,54 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             }
         else:
             return {}
+    
+    @staticmethod
+    @torch.no_grad()
+    def collect_fuser_stats(device: torch.device) -> tuple[dict, dict]:
+        metrics_global_lists = {
+            "shiva/fuser/avg_discarded_norm": [],
+            "shiva/fuser/avg_diff_norm": [],
+            "shiva/fuser/avg_cos_sim": [],
+        }
+        metrics_per_layer = {
+            "shiva/fuser/per_layer_discarded_norm": {},
+            "shiva/fuser/per_layer_diff_norm": {},
+            "shiva/fuser/per_layer_cos_sim": {},
+        }
+
+        for hook in HookManager.get_all_hooks().values():
+            if not isinstance(hook, ShivaDitBlockHook):
+                continue
+            
+            layer_name = f"layer_{hook.layer_idx:02d}"
+
+            if hook.discarded_info_norm_accumulator:
+                val = torch.stack(hook.discarded_info_norm_accumulator).mean()
+                metrics_global_lists["shiva/fuser/avg_discarded_norm"].append(val)
+                metrics_per_layer["shiva/fuser/per_layer_discarded_norm"][layer_name] = val.item()
+                hook.discarded_info_norm_accumulator.clear()
+
+            if hook.fuser_diff_norm_accumulator:
+                val = torch.stack(hook.fuser_diff_norm_accumulator).mean()
+                metrics_global_lists["shiva/fuser/avg_diff_norm"].append(val)
+                metrics_per_layer["shiva/fuser/per_layer_diff_norm"][layer_name] = val.item()
+                hook.fuser_diff_norm_accumulator.clear()
+
+            if hook.fuser_cos_sim_accumulator:
+                val = torch.stack(hook.fuser_cos_sim_accumulator).mean()
+                metrics_global_lists["shiva/fuser/avg_cos_sim"].append(val)
+                metrics_per_layer["shiva/fuser/per_layer_cos_sim"][layer_name] = val.item()
+                hook.fuser_cos_sim_accumulator.clear()
+
+        final_metrics_global = {}
+        for key, val_list in metrics_global_lists.items():
+            if val_list:
+                final_metrics_global[key] = torch.stack(val_list).mean().item()
+            else:
+                final_metrics_global[key] = 0.0
+
+        return final_metrics_global, metrics_per_layer
+
 
 if __name__ == "__main__":
     from shiva_dit.utils import get_pipeline, process_quick_start
