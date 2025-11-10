@@ -11,7 +11,16 @@ lora_config = {
     "enable": True,
     "rank": 32,
     "lora_alpha": 32,
-    "target_modules": ("to_q", "to_k", "to_v", "to_out.0"),
+    "target_modules": [
+        "to_q",
+        "to_k",
+        "to_v",
+        "to_out.0",
+        "linear",
+        "proj_mlp",
+        "proj_out",
+        "net.2",
+    ],
 }
 
 trainer_config = {
