@@ -10,8 +10,17 @@ hook_config = {
 lora_config = {
     "enable": True,
     "rank": 32,
-    "lora_alpha": 32,
-    "target_modules": ("to_q", "to_k", "to_v", "to_out.0"),
+    "lora_alpha": 64,
+    "target_modules": [
+        "to_q",
+        "to_k",
+        "to_v",
+        "to_out.0",
+        "linear",
+        "proj_mlp",
+        "proj_out",
+        "net.2",
+    ],
 }
 
 trainer_config = {
@@ -45,7 +54,7 @@ trainer_config = {
     "val_metadata_file": "../dataset/MJHQ-30K/val.jsonl",
     "val_image_dir": "../dataset/MJHQ-30K/",
     "run_inference_validation": True,
-    "inference_steps": 1750, # 1 epoch
+    "inference_steps": 438, # 1 epoch
     "inference_metadata_file": "../dataset/MJHQ-30K/test.jsonl",
     "inference_seed": 42,
     "inference_num_inference_steps": 30,

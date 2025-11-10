@@ -4,7 +4,7 @@ from shiva_dit.shiva import ShivaDitBlockHook
 HookType = ShivaDitBlockHook
 hook_config = {
     "initial_kept_ratio": 1.0,
-    "num_router_groups": 4,
+    "num_router_groups": 14,
     "bottleneck_dim": 64,
     "layer_embed_dim": 64,
     "fuse_expert_ffn_mult": 2,
