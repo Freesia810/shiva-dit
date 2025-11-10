@@ -275,7 +275,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         for router in grouped_routers:
             nn.init.zeros_(router.router_head.weight)
-            nn.init.constant_(router.router_head.bias, 2.0)
+            nn.init.zeros_(router.router_head.bias)
 
         layers_per_group = num_layers // num_router_groups
 
@@ -374,7 +374,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.fuser_diff_norm_accumulator = []
         self.fuser_cos_sim_accumulator = []
 
-        self.token_scores = None
+        self.k_raw_logits = None
     
     # --- 新增：DiffCR 辅助函数 ---
     def find_neighbour_bins(self, kept_ratio):
@@ -525,17 +525,23 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         
         dtype = hidden_states.dtype
         B, N, D = hidden_states.shape
+        raw_logits = token_scores
 
         k = ceil_ste(kept_ratio * N).to(torch.int32)
         k = torch.min(k, torch.tensor(N, device=hidden_states.device))
 
         (
-            self.token_scores,  # (B, k)
+            _,  # (B, k)
             survivors,  # (B, k, D)
             remaining_x,  # (B, N, D)
             survivors_indices,  # (B, k)
             self.index, # (B, k) or None
         ) = self._select_topk_and_remaining_tokens(hidden_states, token_scores, k, D)
+
+        gather_index = survivors_indices.unsqueeze(-1)
+        self.k_raw_logits = torch.gather(
+            raw_logits.unsqueeze(-1), 1, gather_index
+        ).squeeze(-1) # (B, k)
 
         discarded_mask = torch.ones_like(hidden_states, dtype=torch.bool)
         discarded_mask.scatter_(
@@ -701,21 +707,17 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         encoder_hidden_output: torch.Tensor = None,
     ):
         if module_name == "ffn":
-            # --- 修改：处理排序后的 index ---
+            k_logits = self.k_raw_logits
+
             if self.index is not None:
-                # DiffCR 风格: 使用 index 从 (B, k) 的 token_scores 中 gather
-                hidden_output = hidden_output * (
-                    self.token_scores.gather(dim=1, index=self.index).unsqueeze(2).to(hidden_output.dtype)
-                )
-            elif self.token_scores is not None:
-                # 原始 Shiva 风格: token_scores 已经是 (B, k)，直接使用
-                 hidden_output = hidden_output * (
-                    self.token_scores.unsqueeze(2).to(hidden_output.dtype)
-                )
+                k_logits = k_logits.gather(dim=1, index=self.index)
             
-            self.token_scores = None
-            self.index = None # 每次用完后清除
-            # --- 结束修改 ---
+            s_scale = (1.0 + torch.tanh(k_logits)).unsqueeze(2).to(hidden_output.dtype)
+            
+            hidden_output = hidden_output * s_scale
+
+            self.index = None
+            self.k_raw_logits = None
 
         return super().hook_after_module(
             module_name, hidden_output, encoder_hidden_output
@@ -933,7 +935,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
 if __name__ == "__main__":
     from shiva_dit.utils import get_pipeline, process_quick_start
-    model_type = "qwen-image-edit"
+    model_type = "sd3"
     pipe, model_attrs = get_pipeline(model_type)
 
     shiva_config = {
@@ -945,6 +947,18 @@ if __name__ == "__main__":
         "context_pruning_ratio": None,
         "initial_kept_ratio": 1.0,
         "use_gater_lut": False,
+
+        # "gradient_proxy_mode": "diffcr",
+        # "use_sorted_topk": True,
+        # "ratio_min": 0.1,
+        # "ratio_max": 1.0,
+        # "ratio_step": -0.1,
+
+        # "gradient_proxy_mode": "scale",
+        # "use_sorted_topk": True,
+
+        "gradient_proxy_mode": "scale",
+        "use_sorted_topk": False,
     }
 
     HookManager.configure_hooks(
