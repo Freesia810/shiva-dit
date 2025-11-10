@@ -11,6 +11,18 @@ hook_config = {
     "use_gater_lut": False,
     "context_pruning_threshold": None,
     "context_pruning_ratio": None,      
+
+    "gradient_proxy_mode": "diffcr",
+    "use_sorted_topk": True,
+    "ratio_min": 0.1,
+    "ratio_max": 1.0,
+    "ratio_step": -0.1,
+
+    # "gradient_proxy_mode": "scale",
+    # "use_sorted_topk": True,
+
+    # "gradient_proxy_mode": "scale",
+    # "use_sorted_topk": False,
 }
 lora_config = {
     "enable": True,
