@@ -10,7 +10,7 @@ hook_config = {
 lora_config = {
     "enable": True,
     "rank": 32,
-    "lora_alpha": 64,
+    "lora_alpha": 32,
     "target_modules": [
         "to_q",
         "to_k",
