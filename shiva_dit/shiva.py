@@ -192,6 +192,12 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         if 'initial_kept_ratio' not in kwargs:
             kwargs['initial_kept_ratio'] = 1.0
 
+        kwargs.setdefault("gradient_proxy_mode", "scale")
+        kwargs.setdefault("ratio_min", 0.1)
+        kwargs.setdefault("ratio_max", 1.0)
+        kwargs.setdefault("ratio_step", -0.1)
+        kwargs.setdefault("use_sorted_topk", False)
+
         model_dim = global_context.hidden_dim
         prompt_embed_dim = global_context.encoder_hidden_dim
         if model_dim is None:
@@ -314,6 +320,13 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         initial_kept_ratio: float = 0.5,
         use_gater_lut: bool = False,
         shared_gater_cache: torch.Tensor = None,
+        # --- 新增配置参数 ---
+        gradient_proxy_mode: str = "scale",
+        ratio_min: float = 0.1,
+        ratio_max: float = 1.0,
+        ratio_step: float = -0.1,
+        use_sorted_topk: bool = False,
+        # --- 结束新增 ---
         **kwargs,
     ):
 
@@ -332,6 +345,19 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.use_gater_lut = use_gater_lut
         self.gater_cache = shared_gater_cache
 
+        # --- 新增配置存储 ---
+        self.gradient_proxy_mode = gradient_proxy_mode
+        self.ratio_min = ratio_min
+        self.ratio_max = ratio_max
+        self.use_sorted_topk = use_sorted_topk
+
+        if self.gradient_proxy_mode not in ["scale", "diffcr"]:
+            raise ValueError(f"Unknown gradient_proxy_mode: {gradient_proxy_mode}")
+
+        if self.gradient_proxy_mode == "diffcr":
+            self.register_buffer("kept_ratio_candidate", torch.arange(ratio_max, ratio_min, ratio_step).float())
+        # --- 结束新增 ---
+
         if self.use_gater_lut and self.gater_cache is None:
             raise ValueError(
                 f"ShivaDitBlockHook(layer_idx={self.layer_idx}): 'use_gater_lut' is True, "
@@ -349,6 +375,27 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.fuser_cos_sim_accumulator = []
 
         self.token_scores = None
+    
+    # --- 新增：DiffCR 辅助函数 ---
+    def find_neighbour_bins(self, kept_ratio):
+        differences = torch.abs(self.kept_ratio_candidate - kept_ratio)
+        _, indices = torch.topk(differences, 2, largest=False)
+        neighbour_bins = self.kept_ratio_candidate[indices]
+        return neighbour_bins, indices
+
+    def find_closest_bin(self, kept_ratio):
+        differences = torch.abs(self.kept_ratio_candidate - kept_ratio)
+        closest_index = torch.argmin(differences)
+        return self.kept_ratio_candidate[closest_index]
+
+    def _blend_output(self, lower_output, upper_output, lw, uw):
+        if isinstance(lower_output, tuple):
+            return tuple(
+                lw * lo + uw * up for lo, up in zip(lower_output, upper_output)
+            )
+        else:
+            return lw * lower_output + uw * upper_output
+    # --- 结束新增 ---
 
     def delegated_call(self, func, module_self, *args, **kwargs):
         sig = inspect.signature(func)
@@ -390,7 +437,95 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 self.router_stats_accumulator.clear()
 
         unclamped_ratio = self.shiva_ratio
-        kept_ratio = torch.clamp(unclamped_ratio, min=1e-9, max=1.0)
+        # Clamp with min/max for stability, esp. for diffcr
+        clamped_ratio = torch.clamp(unclamped_ratio, min=self.ratio_min, max=self.ratio_max)
+
+        # --- 重构：梯度代理路由 ---
+        if self.training:
+            if self.gradient_proxy_mode == "diffcr":
+                (lower_bin, upper_bin), _ = self.find_neighbour_bins(clamped_ratio)
+                # Add epsilon for numerical stability if lower_bin == upper_bin
+                lower_weight = (upper_bin - clamped_ratio) / (upper_bin - lower_bin + 1e-9)
+                upper_weight = 1.0 - lower_weight
+
+                lower_output = self._process_forward(
+                    lower_bin, func, module_self, bound, token_scores,
+                    hidden_states, pruned_encoder_states, image_rotary_emb,
+                    pure_temb, layer_emb_vector
+                )
+                upper_output = self._process_forward(
+                    upper_bin, func, module_self, bound, token_scores,
+                    hidden_states, pruned_encoder_states, image_rotary_emb,
+                    pure_temb, layer_emb_vector
+                )
+                return self._blend_output(lower_output, upper_output, lower_weight, upper_weight)
+            
+            elif self.gradient_proxy_mode == "scale":
+                # 使用 clamped_ratio 进行前向传播
+                output = self._process_forward(
+                    clamped_ratio, func, module_self, bound, token_scores,
+                    hidden_states, pruned_encoder_states, image_rotary_emb,
+                    pure_temb, layer_emb_vector
+                )
+                
+                # 使用 unclamped_ratio 计算梯度代理
+                proxy_scale_ste = (unclamped_ratio - unclamped_ratio.detach()) + 1.0
+
+                # 将代理应用于输出
+                if isinstance(output, tuple):
+                    processed_encoder_states, processed_hidden_states = output
+                    processed_hidden_states = processed_hidden_states * proxy_scale_ste
+                    return processed_encoder_states, processed_hidden_states
+                else:
+                    output = output * proxy_scale_ste
+                    return output
+            
+            else:
+                raise ValueError(f"Unknown gradient_proxy_mode: {self.gradient_proxy_mode}")
+
+        else: # 非 self.training (推理)
+            self.gate_loss_accumulator.clear()
+            self.prune_output_accumulator.clear()
+            self.fuse_output_accumulator.clear()
+            self.gater_fuse_prob_accumulator.clear()
+            self.discarded_info_norm_accumulator.clear()
+            self.fuser_diff_norm_accumulator.clear()
+            self.fuser_cos_sim_accumulator.clear()
+
+            if self.gradient_proxy_mode == "diffcr":
+                # 吸附到最近的离散 bin
+                final_kept_ratio = self.find_closest_bin(clamped_ratio)
+            else: # "scale" 模式
+                final_kept_ratio = clamped_ratio
+
+            return self._process_forward(
+                final_kept_ratio, func, module_self, bound, token_scores,
+                hidden_states, pruned_encoder_states, image_rotary_emb,
+                pure_temb, layer_emb_vector
+            )
+        # --- 结束重构 ---
+
+
+    def _process_forward(
+        self, 
+        kept_ratio: torch.Tensor,
+        func, 
+        module_self, 
+        bound: inspect.BoundArguments, 
+        token_scores: torch.Tensor,
+        hidden_states: torch.Tensor,
+        pruned_encoder_states: torch.Tensor,
+        image_rotary_emb: torch.Tensor,
+        pure_temb: torch.Tensor,
+        layer_emb_vector: torch.Tensor
+    ):
+        """
+        Refactored main processing logic.
+        """
+        
+        dtype = hidden_states.dtype
+        B, N, D = hidden_states.shape
+
         k = ceil_ste(kept_ratio * N).to(torch.int32)
         k = torch.min(k, torch.tensor(N, device=hidden_states.device))
 
@@ -399,6 +534,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             survivors,  # (B, k, D)
             remaining_x,  # (B, N, D)
             survivors_indices,  # (B, k)
+            self.index, # (B, k) or None
         ) = self._select_topk_and_remaining_tokens(hidden_states, token_scores, k, D)
 
         discarded_mask = torch.ones_like(hidden_states, dtype=torch.bool)
@@ -449,21 +585,11 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
             final_topk_states = (g_prune * output_prune) + (g_fuse * output_fuse)
 
-            proxy_scale_ste = (unclamped_ratio - unclamped_ratio.detach()) + 1.0
         else:
-            self.gate_loss_accumulator.clear()
-            self.prune_output_accumulator.clear()
-            self.fuse_output_accumulator.clear()
-            self.gater_fuse_prob_accumulator.clear()
-            self.discarded_info_norm_accumulator.clear()
-            self.fuser_diff_norm_accumulator.clear()
-            self.fuser_cos_sim_accumulator.clear()
-
             if self.use_gater_lut:
                 current_t_index = global_context.current_iteration # TODO: LUT Logic
                 decision = self.gater_cache[self.layer_idx, current_t_index].item()
             else:
-                # we can use the first batch's decision safely because all samples share the same layer_idx and timestep
                 gater_logits = self.gater(pure_temb, layer_emb_vector)
                 decision = torch.argmax(gater_logits[0], dim=-1).item()
 
@@ -485,9 +611,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         else:
             processed_hidden_states = processed_output
 
-        if self.training:
-            processed_hidden_states = processed_hidden_states * proxy_scale_ste
-
         final_hidden_states = self._scatter_add(
             processed_hidden_states, remaining_x, survivors_indices
         )
@@ -499,18 +622,40 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
     def _select_topk_and_remaining_tokens(self, x, token_scores, k, C):
         B, N, _ = x.shape
-        token_scores, topk_indices = torch.topk(
-            torch.sigmoid(token_scores), k=k, sorted=False
-        )
+        
+        # (token_scores, k)
+        token_scores_sigmoid = torch.sigmoid(token_scores)
 
-        # ===== Top-k tokens =====
-        gather_index = topk_indices.unsqueeze(-1).expand(-1, -1, C)  # (B, k, C)
-        topk_x = torch.gather(x, dim=1, index=gather_index)  # (B, k, C)
-        # ===== Remaining tokens =====
-        remaining_x = x.clone()
-        remaining_x.scatter_(1, gather_index, 0.0)
+        if self.use_sorted_topk:
+            # --- 新增：排序逻辑 (来自 DiffCR) ---
+            token_scores_k, topk_indices = torch.topk(token_scores_sigmoid, k=k, sorted=False)
+            sorted_indices, index = torch.sort(topk_indices, dim=1)
+            
+            # (B, k, C)
+            gather_index = sorted_indices.unsqueeze(-1).expand(-1, -1, C)
+            topk_x = torch.gather(x, dim=1, index=gather_index) # (B, k, C)
+            
+            remaining_x = x.clone()
+            remaining_x.scatter_(1, gather_index, 0.0)
+            
+            # 返回排序后的 token scores (B, k) 和 index (B, k)
+            token_scores_sorted = torch.gather(token_scores_sigmoid, dim=1, index=sorted_indices)
+            return token_scores_sorted, topk_x, remaining_x, sorted_indices, index
+            # --- 结束新增 ---
+        else:
+            # --- 原始逻辑 ---
+            token_scores_k, topk_indices = torch.topk(
+                token_scores_sigmoid, k=k, sorted=False
+            )
 
-        return token_scores, topk_x, remaining_x, topk_indices
+            gather_index = topk_indices.unsqueeze(-1).expand(-1, -1, C)  # (B, k, C)
+            topk_x = torch.gather(x, dim=1, index=gather_index)  # (B, k, C)
+            
+            remaining_x = x.clone()
+            remaining_x.scatter_(1, gather_index, 0.0)
+
+            return token_scores_k, topk_x, remaining_x, topk_indices, None # 返回 None 作为 index
+            # --- 结束原始 ---
 
     def _gather_rope(self, image_rotary_emb, survivors_indices):
         if image_rotary_emb is not None:
@@ -556,11 +701,22 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         encoder_hidden_output: torch.Tensor = None,
     ):
         if module_name == "ffn":
-            # gate with topk scores, to maintain the grad
-            hidden_output = hidden_output * (
-                self.token_scores.unsqueeze(2).to(hidden_output.dtype)
-            )
+            # --- 修改：处理排序后的 index ---
+            if self.index is not None:
+                # DiffCR 风格: 使用 index 从 (B, k) 的 token_scores 中 gather
+                hidden_output = hidden_output * (
+                    self.token_scores.gather(dim=1, index=self.index).unsqueeze(2).to(hidden_output.dtype)
+                )
+            elif self.token_scores is not None:
+                # 原始 Shiva 风格: token_scores 已经是 (B, k)，直接使用
+                 hidden_output = hidden_output * (
+                    self.token_scores.unsqueeze(2).to(hidden_output.dtype)
+                )
+            
             self.token_scores = None
+            self.index = None # 每次用完后清除
+            # --- 结束修改 ---
+
         return super().hook_after_module(
             module_name, hidden_output, encoder_hidden_output
         )
