@@ -46,6 +46,8 @@ trainer_config = {
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16,
     "learning_rate": 1e-4,
+    "lora_learning_rate": 1e-4,
+    "ratio_learning_rate": 1e-3,
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
     "lr_scheduler": "cosine",  # "linear", "cosine", "constant"
@@ -67,10 +69,10 @@ trainer_config = {
     "inference_num_inference_steps": 30,
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
-    "hook_warmup_steps": 0,  # 2 epoch
+    "hook_warmup_steps": 3500,  # 2 epoch
     "extra_config": {
-        "anneal_steps": 21000,  # 12 epoch
-        "ratio_loss_weight": 0.1,
+        "anneal_steps": 0,  # 12 epoch
+        "ratio_loss_weight": 0.2,
         "target_ratio": 0.8,
         "schedule_steps": [10500, 26250],  # 6 epoch, 15 epoch
         "gate_schedule": [0.01, 0.005, 0.001],
