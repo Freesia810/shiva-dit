@@ -48,6 +48,12 @@ class TrainerConfig:
     gradient_accumulation_steps: int = 4 # batch_size = train_batch_size * gradient_accumulation_steps
 
     learning_rate: float = 1e-4
+    lora_learning_rate: float = field(
+        default=1e-6, metadata={"help": "Learning rate for LoRA parameters."}
+    )
+    ratio_learning_rate: float = field(
+        default=1e-4, metadata={"help": "Learning rate for ratio parameters (merge/prune)."}
+    )
     optimizer: str = "AdamW" # "Adam", "AdamW", "SGD"
     weight_decay: float = 1e-2
     lr_scheduler: str = "cosine" # "linear", "cosine", "constant"

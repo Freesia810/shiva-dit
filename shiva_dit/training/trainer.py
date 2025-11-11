@@ -428,30 +428,36 @@ class DiffusionModelTrainer:
         for text_encoder in self.text_encoders:
             text_encoder.requires_grad_(False)
 
-        params_to_train = []
-
         if self.config.training_mode == "hook_only":
             if self.accelerator.is_main_process:
                 print("Training mode: hook_only (only training Hook parameters)")
             self.model.requires_grad_(False)
+            
+            hook_param_found = False
             for hook in HookManager.get_all_hooks().values():
                 if isinstance(hook, nn.Module):
                     hook.requires_grad_(True)
-                    params_to_train.extend(hook.parameters())
+                    if list(hook.parameters()):
+                        hook_param_found = True
 
-            if not params_to_train:
-                raise ValueError(
-                    "No trainable Hook parameters found in 'hook_only' mode."
-                )
+            if not hook_param_found:
+                all_hook_params = []
+                for hook in HookManager.get_all_hooks().values():
+                    if isinstance(hook, nn.Module):
+                        all_hook_params.extend(list(hook.parameters()))
+                if not all_hook_params:
+                    raise ValueError(
+                        "No trainable Hook parameters found in 'hook_only' mode."
+                    )
+        
         elif self.config.training_mode == "finetune":
             if self.accelerator.is_main_process:
                 print("Training mode: finetune (training all DiT parameters)")
             self.model.requires_grad_(True)
-            params_to_train = list(self.model.parameters())
             for hook in HookManager.get_all_hooks().values():
                 if isinstance(hook, nn.Module):
                     hook.requires_grad_(True)
-                    params_to_train.extend(hook.parameters())
+        
         elif self.config.training_mode == "lora":
             if self.accelerator.is_main_process:
                 print("Training mode: lora (applying LoRA to DiT model)")
@@ -464,7 +470,7 @@ class DiffusionModelTrainer:
             for hook in HookManager.get_all_hooks().values():
                 if isinstance(hook, nn.Module):
                     hook.requires_grad_(False)
-
+            
             lora_conf = self.config.lora_config
             peft_config = PeftLoraConfig(
                 r=lora_conf.rank,
@@ -474,18 +480,53 @@ class DiffusionModelTrainer:
                 bias="none",
             )
             self.model = get_peft_model(self.model, peft_config)
-            self.model.print_trainable_parameters()
+            
+            if self.accelerator.is_main_process:
+                self.model.print_trainable_parameters()
+
             for hook in HookManager.get_all_hooks().values():
                 if isinstance(hook, nn.Module):
                     hook.requires_grad_(True)
-            params_to_train = [p for p in self.model.parameters() if p.requires_grad]
         else:
             raise ValueError(f"Unknown training mode: {self.config.training_mode}")
 
+        lora_params = []
+        ratio_params = []
+        other_model_params = []
+
+        for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                continue
+            
+            if "lora" in name:
+                lora_params.append(param)
+            elif "ratio" in name:
+                ratio_params.append(param)
+            else:
+                other_model_params.append(param)
+
+        base_lr_params = other_model_params
+
+        if self.accelerator.is_main_process:
+            print(f"Optimizing {len(lora_params)} LoRA params with LR: {self.config.lora_learning_rate}")
+            print(f"Optimizing {len(ratio_params)} Ratio params with LR: {self.config.ratio_learning_rate}")
+            print(f"Optimizing {len(base_lr_params)} other params with LR: {self.config.learning_rate}")
+
+        optimizer_grouped_parameters = [
+            {"params": lora_params, "lr": self.config.lora_learning_rate},
+            {"params": ratio_params, "lr": self.config.ratio_learning_rate},
+            {"params": base_lr_params, "lr": self.config.learning_rate},
+        ]
+        
+        optimizer_grouped_parameters = [g for g in optimizer_grouped_parameters if g["params"]]
+        
+        if not optimizer_grouped_parameters:
+             raise ValueError("No trainable parameters found for the optimizer.")
+
+        
         if self.config.optimizer == "AdamW":
             optimizer = torch.optim.AdamW(
-                params_to_train,
-                lr=self.config.learning_rate,
+                optimizer_grouped_parameters,
                 weight_decay=self.config.weight_decay,
             )
         else:
@@ -493,7 +534,6 @@ class DiffusionModelTrainer:
             raise ValueError(f"Unknown optimizer: {self.config.optimizer}")
 
         return optimizer
-
     def _setup_scheduler(self):
         scheduler = get_scheduler(
             self.config.lr_scheduler,

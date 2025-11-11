@@ -10,7 +10,10 @@ hook_config = {
     "fuse_expert_ffn_mult": 2,
     "use_gater_lut": False,
     "context_pruning_threshold": None,
-    "context_pruning_ratio": None,      
+    "context_pruning_ratio": None,    
+    "ratio_min": 0.05,
+    "ratio_max": 1.0,
+    "ratio_step": -0.01,  
 }
 lora_config = {
     "enable": True,
@@ -43,6 +46,8 @@ trainer_config = {
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16,
     "learning_rate": 1e-4,
+    "lora_learning_rate": 1e-6,
+    "ratio_learning_rate": 1e-4,
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
     "lr_scheduler": "cosine",  # "linear", "cosine", "constant"
@@ -64,14 +69,14 @@ trainer_config = {
     "inference_num_inference_steps": 30,
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
-    "hook_warmup_steps": 3500,  # 2 epoch
+    "hook_warmup_steps": 0,  # 2 epoch
     "extra_config": {
-        "anneal_steps": 21000,  # 12 epoch
-        "ratio_loss_weight": 0.3,
-        "target_ratio": 0.7,
+        "anneal_steps": 0,  # 12 epoch
+        "ratio_loss_weight": 0.2,
+        "target_ratio": 0.8,
         "schedule_steps": [10500, 26250],  # 6 epoch, 15 epoch
-        "gate_schedule": [0.1, 0.05, 0.01],
-        "consistency_schedule": [1e-9, 1e-9, 0.01],
+        "gate_schedule": [0.01, 0.005, 0.001],
+        "consistency_schedule": [1e-6, 1e-4, 0.01],
     },
     "log_with_tensorboard": True,
     "log_with_wandb": True,
