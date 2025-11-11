@@ -11,9 +11,8 @@ hook_config = {
     "use_gater_lut": False,
     "context_pruning_threshold": None,
     "context_pruning_ratio": None,    
-    "ratio_min": 0.05,
-    "ratio_max": 1.0,
-    "ratio_step": -0.01,  
+    "initial_T": 30.0,
+    "learnable_T": True,
 }
 lora_config = {
     "enable": True,

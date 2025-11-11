@@ -70,8 +70,8 @@ class ShivaTopkFunc(torch.autograd.Function):
         grad_k = torch.sum((x * dsoft_dk) * grad_x)
 
         # d(soft)/dT = (k - idx) * soft*(1-soft)
-        dsoft_dT = (k - idx) * soft_mask * (1 - soft_mask)
-        grad_T = torch.sum((x * dsoft_dT) * grad_x)
+        dsoft_dT = (k - idx).view(1, N, 1) * soft_mask * (1 - soft_mask)
+        grad_T = torch.sum((torch.sum(x * grad_x, dim=-1) * dsoft_dT.squeeze(-1)))
 
         return grad_x, grad_scores, grad_k, grad_T
 
