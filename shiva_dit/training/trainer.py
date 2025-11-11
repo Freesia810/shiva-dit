@@ -11,7 +11,7 @@ from transformers import get_scheduler
 from peft import LoraConfig as PeftLoraConfig, get_peft_model
 from tqdm import tqdm
 from accelerate import Accelerator
-from accelerate.utils import set_seed, DistributedDataParallelKwargs, broadcast_object_list
+from accelerate.utils import set_seed, DistributedDataParallelKwargs, broadcast_object_list, TorchDynamoPlugin
 from dataclasses import asdict
 
 from baselines.diffcr import DiffCRDitBlockHook
@@ -41,6 +41,18 @@ class DiffusionModelTrainer:
         self.input_preparer_fn = get_input_preparer(self.model_type)
 
         ## Initialize accelerator, device, seed and generator
+        dynamo_plugin = None
+        if self.config.compile_model:
+            print("Enabling torch.compile() via Accelerator with TorchDynamoPlugin.")
+
+            cache_limit = 64 
+            print(f"Setting torch.compile cache_size_limit to {cache_limit}.")
+            torch._dynamo.config.cache_size_limit = cache_limit
+
+            dynamo_plugin = TorchDynamoPlugin(
+                backend="inductor",
+                mode="max-autotune"
+            )
         ddp_kwargs = DistributedDataParallelKwargs(static_graph=True)
         self.accelerator = Accelerator(
             mixed_precision=config.mixed_precision,
@@ -48,6 +60,7 @@ class DiffusionModelTrainer:
             log_with="tensorboard" if config.log_with_tensorboard else None,
             project_dir=os.path.join(config.output_dir, config.tensorboard_log_dir),
             kwargs_handlers=[ddp_kwargs],
+            dynamo_plugin=dynamo_plugin,
         )
         self.device = self.accelerator.device
         set_seed(config.seed)

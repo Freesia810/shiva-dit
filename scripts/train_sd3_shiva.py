@@ -11,9 +11,9 @@ hook_config = {
     "use_gater_lut": False,
     "context_pruning_threshold": None,
     "context_pruning_ratio": None,      
-    "ratio_min": 0.1,
+    "ratio_min": 0.05,
     "ratio_max": 1.0,
-    "ratio_step": -0.1,
+    "ratio_step": -0.01,
 }
 lora_config = {
     "enable": True,
@@ -38,6 +38,7 @@ trainer_config = {
     "model_path": None,
     "output_dir": "./checkpoints/",
     "training_mode": "lora",  # "hook_only" "finetune" "lora"
+    "compile_model": True,
     "hook_only_steps": 0,
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),

@@ -446,8 +446,10 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 lower_output_proxy, upper_output_proxy, lower_weight, upper_weight
             )
 
+            with torch.no_grad():
+                real_ratio = self.find_closest_bin(clamped_ratio.detach())
             real_output = self._process_forward(
-                clamped_ratio.detach(), func, module_self, bound, token_scores,
+                real_ratio, func, module_self, bound, token_scores,
                 hidden_states, pruned_encoder_states, image_rotary_emb,
                 pure_temb, layer_emb_vector,
                 prune_only_for_ratio_grad=False

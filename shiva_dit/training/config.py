@@ -35,6 +35,7 @@ class TrainerConfig:
     training_mode: TrainingMode = "hook_only" # "hook_only" "finetune" "lora"
     lora_config: LoraConfig = field(default_factory=LoraConfig)
     trainable_hook_config: Tuple[type, Dict[str, Any]] = None 
+    compile_model: bool = True
 
     # 0 -> hook_warmup_steps -> hook_only_steps
     hook_warmup_steps: int = 0
