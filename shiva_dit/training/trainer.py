@@ -11,7 +11,7 @@ from transformers import get_scheduler
 from peft import LoraConfig as PeftLoraConfig, get_peft_model
 from tqdm import tqdm
 from accelerate import Accelerator
-from accelerate.utils import set_seed, DistributedDataParallelKwargs, broadcast_object_list, TorchDynamoPlugin
+from accelerate.utils import set_seed, DistributedDataParallelKwargs, broadcast_object_list
 from dataclasses import asdict
 
 from baselines.diffcr import DiffCRDitBlockHook
@@ -43,6 +43,7 @@ class DiffusionModelTrainer:
         ## Initialize accelerator, device, seed and generator
         dynamo_plugin = None
         if self.config.compile_model:
+            from accelerate.utils import TorchDynamoPlugin
             print("Enabling torch.compile() via Accelerator with TorchDynamoPlugin.")
 
             cache_limit = 64 
