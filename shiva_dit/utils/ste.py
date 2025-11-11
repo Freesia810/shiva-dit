@@ -25,7 +25,7 @@ class ShivaTopkFunc(torch.autograd.Function):
         B, N, D = x.shape
         k_int = int(k.item())
 
-        scores_sorted, idx_sorted = torch.sort(scores, dim=-1, descending=True)
+        _, idx_sorted = torch.sort(scores, dim=-1, descending=True)
         topk_idx = idx_sorted[:, :k_int]
         rest_idx = idx_sorted[:, k_int:]
 

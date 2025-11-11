@@ -431,40 +431,18 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
             final_topk_states = (g_prune * output_prune) + (g_fuse * output_fuse)
 
-            ## metric collect
-            self.gate_loss_accumulator.append(load_balancing_loss)
-            self.gater_fuse_prob_accumulator.append(avg_fuse_prob)
-            k_val = int(k_float.item())
-            n_minus_k_val = N - k_val
-            if x_rej.shape[1] > 0:
-                global_info = torch.mean(x_rej, dim=1, keepdim=True)
-                discarded_info_norm = torch.norm(global_info, p=2, dim=-1).mean().detach()
-            else:
-                discarded_info_norm = torch.tensor(0.0, device=x_sel.device, dtype=x_sel.dtype)
-            output_diff = output_fuse - output_prune
-            diff_norm = torch.norm(output_diff, p=2, dim=-1).mean().detach()
-            cos_sim = F.cosine_similarity(output_prune, output_fuse, dim=-1).mean().detach()
-            self.discarded_info_norm_accumulator.append(discarded_info_norm)
-            self.fuser_diff_norm_accumulator.append(diff_norm)
-            self.fuser_cos_sim_accumulator.append(cos_sim)
-            self.k_accumulator.append(k_val)
-            self.n_minus_k_accumulator.append(n_minus_k_val)
-            self.prune_output_accumulator.append(output_prune)
-            self.fuse_output_accumulator.append(output_fuse)
-            self.router_stats_accumulator.append({
-                "mean": token_scores.mean(),
-                "std": token_scores.std(),
-                "min": token_scores.min(),
-            })
+            self._collect_training_metrics(
+                load_balancing_loss=load_balancing_loss,
+                avg_fuse_prob=avg_fuse_prob,
+                token_scores=token_scores,
+                k_float=k_float,
+                N=N,
+                x_rej=x_rej,
+                output_prune=output_prune,
+                output_fuse=output_fuse,
+            )
         else:
-            self.router_stats_accumulator.clear()
-            self.gate_loss_accumulator.clear()
-            self.prune_output_accumulator.clear()
-            self.fuse_output_accumulator.clear()
-            self.gater_fuse_prob_accumulator.clear()
-            self.discarded_info_norm_accumulator.clear()
-            self.fuser_diff_norm_accumulator.clear()
-            self.fuser_cos_sim_accumulator.clear()
+            self.clear_accumulators()
 
             if self.use_gater_lut:
                 current_t_index = global_context.current_iteration # TODO: LUT Logic
@@ -479,7 +457,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 final_topk_states = self.fuse_expert(
                     x_sel.to(dtype), x_rej.to(dtype)
                 )
-        
+
         # call original function
         bound.arguments["hidden_states"] = final_topk_states
         bound.arguments["image_rotary_emb"] = sel_rope
@@ -553,46 +531,102 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         )
         return final_states
 
-    def hook_after_module(
-        self,
-        module_name: Literal["self-attn", "cross-attn", "ffn"],
-        hidden_output: torch.Tensor,
-        encoder_hidden_output: torch.Tensor = None,
-    ):
+    def clear_accumulators(self):
+        self.gate_loss_accumulator.clear()
+        self.prune_output_accumulator.clear()
+        self.fuse_output_accumulator.clear()
+        self.gater_fuse_prob_accumulator.clear()
+        self.router_stats_accumulator.clear()
+        self.discarded_info_norm_accumulator.clear()
+        self.fuser_diff_norm_accumulator.clear()
+        self.fuser_cos_sim_accumulator.clear()
+        self.k_accumulator.clear()
+        self.n_minus_k_accumulator.clear()
 
-        return super().hook_after_module(
-            module_name, hidden_output, encoder_hidden_output
+    @torch.no_grad()
+    def _collect_training_metrics(
+        self,
+        load_balancing_loss,
+        avg_fuse_prob,
+        token_scores,
+        k_float,
+        N,
+        x_rej,
+        output_prune,
+        output_fuse,
+    ):
+        self.gate_loss_accumulator.append(load_balancing_loss)
+        self.gater_fuse_prob_accumulator.append(avg_fuse_prob)
+
+        self.prune_output_accumulator.append(output_prune)
+        self.fuse_output_accumulator.append(output_fuse)
+
+        self.router_stats_accumulator.append(
+            {
+                "mean": token_scores.mean(),
+                "std": token_scores.std(),
+                "min": token_scores.min(),
+            }
         )
+
+        k_val = int(k_float.item())
+        n_minus_k_val = N - k_val
+        self.k_accumulator.append(k_val)
+        self.n_minus_k_accumulator.append(n_minus_k_val)
+
+        if x_rej.shape[1] > 0:
+            global_info = torch.mean(x_rej, dim=1, keepdim=True)
+            discarded_info_norm = torch.norm(global_info, p=2, dim=-1).mean()
+        else:
+            discarded_info_norm = torch.tensor(
+                0.0, device=x_rej.device, dtype=x_rej.dtype
+            )
+
+        output_diff = output_fuse - output_prune
+        diff_norm = torch.norm(output_diff, p=2, dim=-1).mean()
+        cos_sim = F.cosine_similarity(output_prune, output_fuse, dim=-1).mean()
+
+        self.discarded_info_norm_accumulator.append(discarded_info_norm)
+        self.fuser_diff_norm_accumulator.append(diff_norm)
+        self.fuser_cos_sim_accumulator.append(cos_sim)
+
+    @staticmethod
+    def _get_shiva_hooks():
+        if not HookManager.is_enabled():
+            return
+
+        for hook in HookManager.get_all_hooks().values():
+            if isinstance(hook, ShivaDitBlockHook):
+                yield hook
 
     @staticmethod
     def calculate_consistency_loss(config: dict, device: torch.device) -> torch.Tensor:
         consistency_loss = []
 
-        for hook in HookManager.get_all_hooks().values():
-            if isinstance(hook, ShivaDitBlockHook):
-                prune_list = hook.prune_output_accumulator
-                fuse_list = hook.fuse_output_accumulator
+        for hook in ShivaDitBlockHook._get_shiva_hooks():
+            prune_list = hook.prune_output_accumulator
+            fuse_list = hook.fuse_output_accumulator
 
-                if prune_list and fuse_list:
-                    assert len(prune_list) == len(
-                        fuse_list
-                    ), "Prune/Fuse accumulator length mismatch"
+            if prune_list and fuse_list:
+                assert len(prune_list) == len(
+                    fuse_list
+                ), "Prune/Fuse accumulator length mismatch"
 
-                    micro_batch_losses = []
-                    for prune_out, fuse_out in zip(prune_list, fuse_list):
-                        loss = F.mse_loss(
-                            prune_out.detach().to(torch.float32),
-                            fuse_out.to(torch.float32),
-                        )
-                        micro_batch_losses.append(loss)
+                micro_batch_losses = []
+                for prune_out, fuse_out in zip(prune_list, fuse_list):
+                    loss = F.mse_loss(
+                        prune_out.detach().to(torch.float32),
+                        fuse_out.to(torch.float32),
+                    )
+                    micro_batch_losses.append(loss)
 
-                    if micro_batch_losses:
-                        avg_loss_for_hook = torch.stack(micro_batch_losses).mean()
-                        consistency_loss.append(avg_loss_for_hook)
-                        device = avg_loss_for_hook.device
+                if micro_batch_losses:
+                    avg_loss_for_hook = torch.stack(micro_batch_losses).mean()
+                    consistency_loss.append(avg_loss_for_hook)
+                    device = avg_loss_for_hook.device
 
-                hook.prune_output_accumulator.clear()
-                hook.fuse_output_accumulator.clear()
+            hook.prune_output_accumulator.clear()
+            hook.fuse_output_accumulator.clear()
 
         metrics = {
             "shiva/gater/consistency_loss_raw": 0.0,
@@ -612,16 +646,15 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
     def calculate_gate_loss(config: dict, device: torch.device) -> torch.Tensor:
         gate_losses = []
 
-        for hook in HookManager.get_all_hooks().values():
-            if isinstance(hook, ShivaDitBlockHook):
-                accumulator = hook.gate_loss_accumulator
+        for hook in ShivaDitBlockHook._get_shiva_hooks():
+            accumulator = hook.gate_loss_accumulator
 
-                if accumulator:
-                    avg_loss_for_hook = torch.stack(accumulator).mean()
-                    gate_losses.append(avg_loss_for_hook)
-                    device = avg_loss_for_hook.device
+            if accumulator:
+                avg_loss_for_hook = torch.stack(accumulator).mean()
+                gate_losses.append(avg_loss_for_hook)
+                device = avg_loss_for_hook.device
 
-                hook.gate_loss_accumulator.clear()
+            hook.gate_loss_accumulator.clear()
 
         metrics = {
             "shiva/gater/gate_loss_raw": 0.0,
@@ -641,13 +674,12 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
     def calculate_ratio_loss(config: dict, device: torch.device) -> tuple[torch.Tensor, dict]:
         ratios_per_layer = {}
         ratios = []
-        for hook in HookManager.get_all_hooks().values():
-            if isinstance(hook, ShivaDitBlockHook):
-                layer_name = f"layer_{hook.layer_idx:02d}"
-                current_ratio_unclamped = hook.shiva_ratio
-                current_ratio = torch.clamp(current_ratio_unclamped, min=1e-9, max=1.0)
-                ratios_per_layer[layer_name] = current_ratio.item()
-                ratios.append(current_ratio)
+        for hook in ShivaDitBlockHook._get_shiva_hooks():
+            layer_name = f"layer_{hook.layer_idx:02d}"
+            current_ratio_unclamped = hook.shiva_ratio
+            current_ratio = torch.clamp(current_ratio_unclamped, min=1e-9, max=1.0)
+            ratios_per_layer[layer_name] = current_ratio.item()
+            ratios.append(current_ratio)
 
         metrics = {
             "shiva/ratio/avg_ratio": 0.0,
@@ -682,18 +714,17 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         gate_probs_per_hook = []
         gate_probs_per_layer = {}
 
-        for name, hook in HookManager.get_all_hooks().items():
-            if isinstance(hook, ShivaDitBlockHook):
-                accumulator = hook.gater_fuse_prob_accumulator
+        for hook in ShivaDitBlockHook._get_shiva_hooks():
+            accumulator = hook.gater_fuse_prob_accumulator
 
-                if accumulator:
-                    avg_prob_for_hook = torch.stack(accumulator).mean()
-                    gate_probs_per_hook.append(avg_prob_for_hook)
+            if accumulator:
+                avg_prob_for_hook = torch.stack(accumulator).mean()
+                gate_probs_per_hook.append(avg_prob_for_hook)
 
-                    layer_name = f"layer_{hook.layer_idx:02d}"
-                    gate_probs_per_layer[layer_name] = avg_prob_for_hook.item()
+                layer_name = f"layer_{hook.layer_idx:02d}"
+                gate_probs_per_layer[layer_name] = avg_prob_for_hook.item()
 
-                hook.gater_fuse_prob_accumulator.clear()
+            hook.gater_fuse_prob_accumulator.clear()
 
         if gate_probs_per_hook:
             global_avg_prob = torch.stack(gate_probs_per_hook).mean()
@@ -708,14 +739,13 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         total_std = []
         total_min = []
 
-        for hook in HookManager.get_all_hooks().values():
-            if isinstance(hook, ShivaDitBlockHook):
-                acc = hook.router_stats_accumulator
-                if acc:
-                    total_mean.append(torch.stack([x["mean"] for x in acc]).mean())
-                    total_std.append(torch.stack([x["std"] for x in acc]).mean())
-                    total_min.append(torch.stack([x["min"] for x in acc]).min())
-                acc.clear()
+        for hook in ShivaDitBlockHook._get_shiva_hooks():
+            acc = hook.router_stats_accumulator
+            if acc:
+                total_mean.append(torch.stack([x["mean"] for x in acc]).mean())
+                total_std.append(torch.stack([x["std"] for x in acc]).mean())
+                total_min.append(torch.stack([x["min"] for x in acc]).min())
+            acc.clear()
 
         if total_mean:
             return {
@@ -725,22 +755,24 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             }
         else:
             return {}
-    
+
+    @staticmethod
+    @torch.no_grad()
+    def _weighted_avg(values, weights, default_val=0.0):
+        if not values or not weights:
+            return default_val, 0.0
+
+        total_weight = sum(weights)
+        if total_weight == 0:
+            return default_val, 0.0
+
+        weighted_sum = sum(v.item() * w for v, w in zip(values, weights))
+        return weighted_sum / total_weight, total_weight
+
     @staticmethod
     @torch.no_grad()
     def collect_fuser_stats(device: torch.device) -> tuple[dict, dict]:
-        
-        def _weighted_avg(values, weights, default_val=0.0):
-            if not values or not weights:
-                return default_val, 0.0
-            
-            total_weight = sum(weights)
-            if total_weight == 0:
-                return default_val, 0.0
-
-            weighted_sum = sum(v.item() * w for v, w in zip(values, weights))
-            return weighted_sum / total_weight, total_weight
-
+        _weighted_avg = ShivaDitBlockHook._weighted_avg
         metrics_global_lists = {
             "shiva/fuser/avg_discarded_norm": [],
             "shiva/fuser/avg_diff_norm": [],
@@ -752,12 +784,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             "shiva/fuser/per_layer_cos_sim": {},
         }
 
-        for hook in HookManager.get_all_hooks().values():
-            if not isinstance(hook, ShivaDitBlockHook):
-                continue
-            
+        for hook in ShivaDitBlockHook._get_shiva_hooks():
             layer_name = f"layer_{hook.layer_idx:02d}"
-            
+
             k_weights = hook.k_accumulator
             n_minus_k_weights = hook.n_minus_k_accumulator
 
@@ -801,10 +830,10 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             if not avg_weight_list:
                 final_metrics_global[key] = 0.0
                 continue
-                
+
             total_weighted_sum = sum(avg * weight for avg, weight in avg_weight_list)
             global_total_weight = sum(weight for _, weight in avg_weight_list)
-            
+
             if global_total_weight == 0:
                 final_metrics_global[key] = 0.0
             else:
