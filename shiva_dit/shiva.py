@@ -592,7 +592,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
     @staticmethod
     def _get_shiva_hooks():
-        if not HookManager.is_enabled():
+        if not HookManager._enabled:
             return
 
         for hook in HookManager.get_all_hooks().values():
