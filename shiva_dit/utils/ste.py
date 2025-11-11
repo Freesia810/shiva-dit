@@ -38,12 +38,14 @@ class ShivaTopkFunc(torch.autograd.Function):
             rest_idx.unsqueeze(-1).expand(B, N - k_int, D)
         )
 
-        ctx.save_for_backward(x, scores, k, topk_idx, rest_idx, T)
+        ranks = torch.argsort(idx_sorted, dim=-1).float()  # (B, N)
+
+        ctx.save_for_backward(x, k, topk_idx, rest_idx, ranks, T)
         return x_selected, x_rejected, topk_idx, rest_idx
 
     @staticmethod
     def backward(ctx, grad_sel, grad_rej, grad_topk_idx, grad_rest_idx):
-        x, scores, k, topk_idx, rest_idx, T = ctx.saved_tensors
+        x, k, topk_idx, rest_idx, ranks, T = ctx.saved_tensors
         B, N, D = x.shape
         k_int = topk_idx.size(1)
 
@@ -59,19 +61,18 @@ class ShivaTopkFunc(torch.autograd.Function):
             grad_rej,
         )
 
-        idx = torch.arange(N, device=x.device).float()
-        soft_mask = torch.sigmoid((k - idx) * T).view(1, N, 1)
+        ranks_expanded = ranks.unsqueeze(-1)  # (B, N, 1)
+        soft_mask = torch.sigmoid((k - ranks_expanded) * T)  # (B, N, 1)
 
-        # grad wrt scores
-        grad_scores = torch.sum(grad_x * x * soft_mask, dim=-1)
+        grad_L_wrt_soft_mask_scalar = torch.sum(grad_x * x, dim=-1)  # (B, N)
 
-        # grad wrt k
-        dsoft_dk = soft_mask * (1 - soft_mask) * T
-        grad_k = torch.sum((x * dsoft_dk) * grad_x)
+        grad_scores = grad_L_wrt_soft_mask_scalar * soft_mask.squeeze(-1)
 
-        # d(soft)/dT = (k - idx) * soft*(1-soft)
-        dsoft_dT = (k - idx).view(1, N, 1) * soft_mask * (1 - soft_mask)
-        grad_T = torch.sum((torch.sum(x * grad_x, dim=-1) * dsoft_dT.squeeze(-1)))
+        dsoft_dk = soft_mask * (1 - soft_mask) * T  # (B, N, 1)
+        grad_k = torch.sum(grad_L_wrt_soft_mask_scalar.unsqueeze(-1) * dsoft_dk)
+
+        dsoft_dT = (k - ranks_expanded) * soft_mask * (1 - soft_mask)  # (B, N, 1)
+        grad_T = torch.sum(grad_L_wrt_soft_mask_scalar.unsqueeze(-1) * dsoft_dT)
 
         return grad_x, grad_scores, grad_k, grad_T
 

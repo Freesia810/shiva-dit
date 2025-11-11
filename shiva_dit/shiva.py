@@ -369,8 +369,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.k_accumulator = []
         self.n_minus_k_accumulator = []
 
-        self.k_raw_logits = None
-
     def delegated_call(self, func, module_self, *args, **kwargs):
         sig = inspect.signature(func)
         bound = sig.bind_partial(module_self, *args, **kwargs)
@@ -408,10 +406,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         k = torch.min(k, torch.tensor(N, device=hidden_states.device))
 
         x_sel, x_rej, remaining_x, sel_idx = self._select_topk_and_remaining_tokens(hidden_states, token_scores, k, D)
-
-        self.k_raw_logits = torch.gather(
-            raw_logits.unsqueeze(-1), 1, sel_idx.unsqueeze(-1)
-        ).squeeze(-1) # (B, k)
         sel_rope = self._gather_rope(image_rotary_emb, sel_idx)
 
         if self.training:
@@ -560,11 +554,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         hidden_output: torch.Tensor,
         encoder_hidden_output: torch.Tensor = None,
     ):
-        if module_name == "ffn":
-            k_logits = self.k_raw_logits            
-            s_scale = (1.0 + torch.tanh(k_logits)).unsqueeze(2).to(hidden_output.dtype)
-            hidden_output = hidden_output * s_scale
-            self.k_raw_logits = None
 
         return super().hook_after_module(
             module_name, hidden_output, encoder_hidden_output
