@@ -45,7 +45,7 @@ trainer_config = {
     "num_epochs": 500,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16,
-    "learning_rate": 1e-4,
+    "learning_rate": 1e-6,
     "lora_learning_rate": 1e-6,
     "ratio_learning_rate": 1e-4,
     "optimizer": "AdamW",
@@ -71,7 +71,7 @@ trainer_config = {
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
     "hook_warmup_steps": 0,  # 2 epoch
     "extra_config": {
-        "anneal_steps": 0,  # 12 epoch
+        "anneal_steps": 3500,  # 12 epoch
         "ratio_loss_weight": 0.2,
         "target_ratio": 0.8,
         "schedule_steps": [10500, 26250],  # 6 epoch, 15 epoch
