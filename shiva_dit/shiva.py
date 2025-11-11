@@ -192,11 +192,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         if 'initial_kept_ratio' not in kwargs:
             kwargs['initial_kept_ratio'] = 1.0
 
-        kwargs.setdefault("gradient_proxy_mode", "scale")
         kwargs.setdefault("ratio_min", 0.1)
         kwargs.setdefault("ratio_max", 1.0)
         kwargs.setdefault("ratio_step", -0.1)
-        kwargs.setdefault("use_sorted_topk", False)
 
         model_dim = global_context.hidden_dim
         prompt_embed_dim = global_context.encoder_hidden_dim
@@ -320,13 +318,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         initial_kept_ratio: float = 0.5,
         use_gater_lut: bool = False,
         shared_gater_cache: torch.Tensor = None,
-        # --- 新增配置参数 ---
-        gradient_proxy_mode: str = "scale",
         ratio_min: float = 0.1,
         ratio_max: float = 1.0,
         ratio_step: float = -0.1,
-        use_sorted_topk: bool = False,
-        # --- 结束新增 ---
         **kwargs,
     ):
 
@@ -345,18 +339,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.use_gater_lut = use_gater_lut
         self.gater_cache = shared_gater_cache
 
-        # --- 新增配置存储 ---
-        self.gradient_proxy_mode = gradient_proxy_mode
         self.ratio_min = ratio_min
         self.ratio_max = ratio_max
-        self.use_sorted_topk = use_sorted_topk
-
-        if self.gradient_proxy_mode not in ["scale", "diffcr"]:
-            raise ValueError(f"Unknown gradient_proxy_mode: {gradient_proxy_mode}")
-
-        if self.gradient_proxy_mode == "diffcr":
-            self.register_buffer("kept_ratio_candidate", torch.arange(ratio_max, ratio_min, ratio_step).float())
-        # --- 结束新增 ---
+        self.register_buffer("kept_ratio_candidate", torch.arange(ratio_max, ratio_min, ratio_step).float())
 
         if self.use_gater_lut and self.gater_cache is None:
             raise ValueError(
@@ -374,9 +359,11 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.fuser_diff_norm_accumulator = []
         self.fuser_cos_sim_accumulator = []
 
+        self.k_accumulator = []
+        self.n_minus_k_accumulator = []
+
         self.k_raw_logits = None
-    
-    # --- 新增：DiffCR 辅助函数 ---
+
     def find_neighbour_bins(self, kept_ratio):
         differences = torch.abs(self.kept_ratio_candidate - kept_ratio)
         _, indices = torch.topk(differences, 2, largest=False)
@@ -395,7 +382,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             )
         else:
             return lw * lower_output + uw * upper_output
-    # --- 结束新增 ---
 
     def delegated_call(self, func, module_self, *args, **kwargs):
         sig = inspect.signature(func)
@@ -424,7 +410,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             hidden_states.to(dtype), pure_temb, pooled_encoder_vector, layer_emb_vector
         )
 
-        self._last_forward_scores = token_scores.detach()
         with torch.no_grad():
             sigmoid_scores = torch.sigmoid(token_scores)
             if self.training:
@@ -437,53 +422,46 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 self.router_stats_accumulator.clear()
 
         unclamped_ratio = self.shiva_ratio
-        # Clamp with min/max for stability, esp. for diffcr
+        # Clamp with min/max for stability
         clamped_ratio = torch.clamp(unclamped_ratio, min=self.ratio_min, max=self.ratio_max)
 
-        # --- 重构：梯度代理路由 ---
         if self.training:
-            if self.gradient_proxy_mode == "diffcr":
-                (lower_bin, upper_bin), _ = self.find_neighbour_bins(clamped_ratio)
-                # Add epsilon for numerical stability if lower_bin == upper_bin
-                lower_weight = (upper_bin - clamped_ratio) / (upper_bin - lower_bin + 1e-9)
-                upper_weight = 1.0 - lower_weight
+            (lower_bin, upper_bin), _ = self.find_neighbour_bins(clamped_ratio)
+            lower_weight = (upper_bin - clamped_ratio) / (upper_bin - lower_bin + 1e-9)
+            upper_weight = 1.0 - lower_weight
 
-                lower_output = self._process_forward(
-                    lower_bin, func, module_self, bound, token_scores,
-                    hidden_states, pruned_encoder_states, image_rotary_emb,
-                    pure_temb, layer_emb_vector
-                )
-                upper_output = self._process_forward(
-                    upper_bin, func, module_self, bound, token_scores,
-                    hidden_states, pruned_encoder_states, image_rotary_emb,
-                    pure_temb, layer_emb_vector
-                )
-                return self._blend_output(lower_output, upper_output, lower_weight, upper_weight)
-            
-            elif self.gradient_proxy_mode == "scale":
-                # 使用 clamped_ratio 进行前向传播
-                output = self._process_forward(
-                    clamped_ratio, func, module_self, bound, token_scores,
-                    hidden_states, pruned_encoder_states, image_rotary_emb,
-                    pure_temb, layer_emb_vector
-                )
-                
-                # 使用 unclamped_ratio 计算梯度代理
-                proxy_scale_ste = (unclamped_ratio - unclamped_ratio.detach()) + 1.0
+            lower_output_proxy = self._process_forward(
+                lower_bin, func, module_self, bound, token_scores,
+                hidden_states, pruned_encoder_states, image_rotary_emb,
+                pure_temb, layer_emb_vector,
+                prune_only_for_ratio_grad=True
+            )
+            upper_output_proxy = self._process_forward(
+                upper_bin, func, module_self, bound, token_scores,
+                hidden_states, pruned_encoder_states, image_rotary_emb,
+                pure_temb, layer_emb_vector,
+                prune_only_for_ratio_grad=True
+            )
+            blended_proxy_output = self._blend_output(
+                lower_output_proxy, upper_output_proxy, lower_weight, upper_weight
+            )
 
-                # 将代理应用于输出
-                if isinstance(output, tuple):
-                    processed_encoder_states, processed_hidden_states = output
-                    processed_hidden_states = processed_hidden_states * proxy_scale_ste
-                    return processed_encoder_states, processed_hidden_states
-                else:
-                    output = output * proxy_scale_ste
-                    return output
+            real_output = self._process_forward(
+                clamped_ratio.detach(), func, module_self, bound, token_scores,
+                hidden_states, pruned_encoder_states, image_rotary_emb,
+                pure_temb, layer_emb_vector,
+                prune_only_for_ratio_grad=False
+            )
             
+            if isinstance(real_output, tuple):
+                proxy_hidden_states = blended_proxy_output[1]
+                grad_proxy = proxy_hidden_states - proxy_hidden_states.detach()
+                final_hidden_states = real_output[1] + grad_proxy
+                return (real_output[0], final_hidden_states) + real_output[2:]
             else:
-                raise ValueError(f"Unknown gradient_proxy_mode: {self.gradient_proxy_mode}")
-
-        else: # 非 self.training (推理)
+                grad_proxy = blended_proxy_output - blended_proxy_output.detach()
+                return real_output + grad_proxy
+        else:
             self.gate_loss_accumulator.clear()
             self.prune_output_accumulator.clear()
             self.fuse_output_accumulator.clear()
@@ -492,19 +470,14 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             self.fuser_diff_norm_accumulator.clear()
             self.fuser_cos_sim_accumulator.clear()
 
-            if self.gradient_proxy_mode == "diffcr":
-                # 吸附到最近的离散 bin
-                final_kept_ratio = self.find_closest_bin(clamped_ratio)
-            else: # "scale" 模式
-                final_kept_ratio = clamped_ratio
+            final_kept_ratio = self.find_closest_bin(clamped_ratio)
 
             return self._process_forward(
                 final_kept_ratio, func, module_self, bound, token_scores,
                 hidden_states, pruned_encoder_states, image_rotary_emb,
-                pure_temb, layer_emb_vector
+                pure_temb, layer_emb_vector,
+                prune_only_for_ratio_grad=False
             )
-        # --- 结束重构 ---
-
 
     def _process_forward(
         self, 
@@ -517,10 +490,13 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         pruned_encoder_states: torch.Tensor,
         image_rotary_emb: torch.Tensor,
         pure_temb: torch.Tensor,
-        layer_emb_vector: torch.Tensor
+        layer_emb_vector: torch.Tensor,
+        prune_only_for_ratio_grad: bool = False
     ):
         """
-        Refactored main processing logic.
+        Main processing logic.
+        - if prune_only_for_ratio_grad=True, only runs pruner (Identity).
+        - if prune_only_for_ratio_grad=False, runs full Gater/Fuser logic.
         """
         
         dtype = hidden_states.dtype
@@ -535,7 +511,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             survivors,  # (B, k, D)
             remaining_x,  # (B, N, D)
             survivors_indices,  # (B, k)
-            self.index, # (B, k) or None
         ) = self._select_topk_and_remaining_tokens(hidden_states, token_scores, k, D)
 
         gather_index = survivors_indices.unsqueeze(-1)
@@ -552,44 +527,50 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         survivor_rope = self._gather_rope(image_rotary_emb, survivors_indices)
 
         if self.training:
-            gater_logits = self.gater(pure_temb, layer_emb_vector)  # (B, 2)
-            gating_weights = F.softmax(gater_logits, dim=-1)
-
-            # entropy = -(gating_weights * torch.log(gating_weights + 1e-10)).sum(dim=-1)
-            # self.gate_loss_accumulator.append(entropy.mean())
-
-            avg_gating_probs = gating_weights.mean(dim=0)  # (B, 2) -> (2)
-            num_experts = 2  # (pruner, fuser)
-            load_balancing_loss = num_experts * torch.sum(avg_gating_probs.pow(2))
-            self.gate_loss_accumulator.append(load_balancing_loss)
-
-            avg_fuse_prob = gating_weights[:, 1].mean()
-            self.gater_fuse_prob_accumulator.append(avg_fuse_prob)
-
-            g_prune = gating_weights[:, 0].unsqueeze(-1).unsqueeze(-1)
-            g_fuse = gating_weights[:, 1].unsqueeze(-1).unsqueeze(-1)
-
-            output_prune = self.prune_expert(survivors)
-            output_fuse = self.fuse_expert(survivors.to(dtype), discarded.to(dtype))
-
-            if discarded.shape[1] > 0:
-                global_info = torch.mean(discarded, dim=1, keepdim=True)
-                discarded_info_norm = torch.norm(global_info, p=2, dim=-1).mean().detach()
+            if prune_only_for_ratio_grad:
+                final_topk_states = self.prune_expert(survivors)
             else:
-                discarded_info_norm = torch.tensor(0.0, device=survivors.device, dtype=survivors.dtype)
-            
-            output_diff = output_fuse - output_prune
-            diff_norm = torch.norm(output_diff, p=2, dim=-1).mean().detach()
-            cos_sim = F.cosine_similarity(output_prune, output_fuse, dim=-1).mean().detach()
+                gater_logits = self.gater(pure_temb, layer_emb_vector)  # (B, 2)
+                gating_weights = F.softmax(gater_logits, dim=-1)
 
-            self.discarded_info_norm_accumulator.append(discarded_info_norm)
-            self.fuser_diff_norm_accumulator.append(diff_norm)
-            self.fuser_cos_sim_accumulator.append(cos_sim)
+                avg_gating_probs = gating_weights.mean(dim=0)  # (B, 2) -> (2)
+                num_experts = 2  # (pruner, fuser)
+                load_balancing_loss = num_experts * torch.sum(avg_gating_probs.pow(2))
+                self.gate_loss_accumulator.append(load_balancing_loss)
 
-            self.prune_output_accumulator.append(output_prune)
-            self.fuse_output_accumulator.append(output_fuse)
+                avg_fuse_prob = gating_weights[:, 1].mean()
+                self.gater_fuse_prob_accumulator.append(avg_fuse_prob)
 
-            final_topk_states = (g_prune * output_prune) + (g_fuse * output_fuse)
+                g_prune = gating_weights[:, 0].unsqueeze(-1).unsqueeze(-1)
+                g_fuse = gating_weights[:, 1].unsqueeze(-1).unsqueeze(-1)
+
+                output_prune = self.prune_expert(survivors)
+                output_fuse = self.fuse_expert(survivors.to(dtype), discarded.to(dtype))
+                
+                k_val = k.item()
+                n_minus_k_val = (N - k).item()
+
+                if discarded.shape[1] > 0:
+                    global_info = torch.mean(discarded, dim=1, keepdim=True)
+                    discarded_info_norm = torch.norm(global_info, p=2, dim=-1).mean().detach()
+                else:
+                    discarded_info_norm = torch.tensor(0.0, device=survivors.device, dtype=survivors.dtype)
+                
+                output_diff = output_fuse - output_prune
+                diff_norm = torch.norm(output_diff, p=2, dim=-1).mean().detach()
+                cos_sim = F.cosine_similarity(output_prune, output_fuse, dim=-1).mean().detach()
+
+                self.discarded_info_norm_accumulator.append(discarded_info_norm)
+                self.fuser_diff_norm_accumulator.append(diff_norm)
+                self.fuser_cos_sim_accumulator.append(cos_sim)
+                
+                self.k_accumulator.append(k_val)
+                self.n_minus_k_accumulator.append(n_minus_k_val)
+
+                self.prune_output_accumulator.append(output_prune)
+                self.fuse_output_accumulator.append(output_fuse)
+
+                final_topk_states = (g_prune * output_prune) + (g_fuse * output_fuse)
 
         else:
             if self.use_gater_lut:
@@ -631,37 +612,17 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         
         # (token_scores, k)
         token_scores_sigmoid = torch.sigmoid(token_scores)
+        token_scores_k, topk_indices = torch.topk(
+            token_scores_sigmoid, k=k, sorted=False
+        )
 
-        if self.use_sorted_topk:
-            # --- 新增：排序逻辑 (来自 DiffCR) ---
-            token_scores_k, topk_indices = torch.topk(token_scores_sigmoid, k=k, sorted=False)
-            sorted_indices, index = torch.sort(topk_indices, dim=1)
-            
-            # (B, k, C)
-            gather_index = sorted_indices.unsqueeze(-1).expand(-1, -1, C)
-            topk_x = torch.gather(x, dim=1, index=gather_index) # (B, k, C)
-            
-            remaining_x = x.clone()
-            remaining_x.scatter_(1, gather_index, 0.0)
-            
-            # 返回排序后的 token scores (B, k) 和 index (B, k)
-            token_scores_sorted = torch.gather(token_scores_sigmoid, dim=1, index=sorted_indices)
-            return token_scores_sorted, topk_x, remaining_x, sorted_indices, index
-            # --- 结束新增 ---
-        else:
-            # --- 原始逻辑 ---
-            token_scores_k, topk_indices = torch.topk(
-                token_scores_sigmoid, k=k, sorted=False
-            )
+        gather_index = topk_indices.unsqueeze(-1).expand(-1, -1, C)  # (B, k, C)
+        topk_x = torch.gather(x, dim=1, index=gather_index)  # (B, k, C)
+        
+        remaining_x = x.clone()
+        remaining_x.scatter_(1, gather_index, 0.0)
 
-            gather_index = topk_indices.unsqueeze(-1).expand(-1, -1, C)  # (B, k, C)
-            topk_x = torch.gather(x, dim=1, index=gather_index)  # (B, k, C)
-            
-            remaining_x = x.clone()
-            remaining_x.scatter_(1, gather_index, 0.0)
-
-            return token_scores_k, topk_x, remaining_x, topk_indices, None # 返回 None 作为 index
-            # --- 结束原始 ---
+        return token_scores_k, topk_x, remaining_x, topk_indices
 
     def _gather_rope(self, image_rotary_emb, survivors_indices):
         if image_rotary_emb is not None:
@@ -707,16 +668,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         encoder_hidden_output: torch.Tensor = None,
     ):
         if module_name == "ffn":
-            k_logits = self.k_raw_logits
-
-            if self.index is not None:
-                k_logits = k_logits.gather(dim=1, index=self.index)
-            
+            k_logits = self.k_raw_logits            
             s_scale = (1.0 + torch.tanh(k_logits)).unsqueeze(2).to(hidden_output.dtype)
-            
             hidden_output = hidden_output * s_scale
-
-            self.index = None
             self.k_raw_logits = None
 
         return super().hook_after_module(
@@ -888,6 +842,18 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
     @staticmethod
     @torch.no_grad()
     def collect_fuser_stats(device: torch.device) -> tuple[dict, dict]:
+        
+        def _weighted_avg(values, weights, default_val=0.0):
+            if not values or not weights:
+                return default_val, 0.0
+            
+            total_weight = sum(weights)
+            if total_weight == 0:
+                return default_val, 0.0
+
+            weighted_sum = sum(v.item() * w for v, w in zip(values, weights))
+            return weighted_sum / total_weight, total_weight
+
         metrics_global_lists = {
             "shiva/fuser/avg_discarded_norm": [],
             "shiva/fuser/avg_diff_norm": [],
@@ -904,38 +870,64 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 continue
             
             layer_name = f"layer_{hook.layer_idx:02d}"
+            
+            k_weights = hook.k_accumulator
+            n_minus_k_weights = hook.n_minus_k_accumulator
 
-            if hook.discarded_info_norm_accumulator:
-                val = torch.stack(hook.discarded_info_norm_accumulator).mean()
-                metrics_global_lists["shiva/fuser/avg_discarded_norm"].append(val)
-                metrics_per_layer["shiva/fuser/per_layer_discarded_norm"][layer_name] = val.item()
-                hook.discarded_info_norm_accumulator.clear()
+            # Discarded Norm (weighted by N-k, number of discarded tokens)
+            avg_discarded_norm, total_n_minus_k = _weighted_avg(
+                hook.discarded_info_norm_accumulator, n_minus_k_weights
+            )
+            metrics_global_lists["shiva/fuser/avg_discarded_norm"].append(
+                (avg_discarded_norm, total_n_minus_k)
+            )
+            metrics_per_layer["shiva/fuser/per_layer_discarded_norm"][layer_name] = avg_discarded_norm
 
-            if hook.fuser_diff_norm_accumulator:
-                val = torch.stack(hook.fuser_diff_norm_accumulator).mean()
-                metrics_global_lists["shiva/fuser/avg_diff_norm"].append(val)
-                metrics_per_layer["shiva/fuser/per_layer_diff_norm"][layer_name] = val.item()
-                hook.fuser_diff_norm_accumulator.clear()
+            # Diff Norm (weighted by k, number of survivor tokens)
+            avg_diff_norm, total_k = _weighted_avg(
+                hook.fuser_diff_norm_accumulator, k_weights
+            )
+            metrics_global_lists["shiva/fuser/avg_diff_norm"].append(
+                (avg_diff_norm, total_k)
+            )
+            metrics_per_layer["shiva/fuser/per_layer_diff_norm"][layer_name] = avg_diff_norm
 
-            if hook.fuser_cos_sim_accumulator:
-                val = torch.stack(hook.fuser_cos_sim_accumulator).mean()
-                metrics_global_lists["shiva/fuser/avg_cos_sim"].append(val)
-                metrics_per_layer["shiva/fuser/per_layer_cos_sim"][layer_name] = val.item()
-                hook.fuser_cos_sim_accumulator.clear()
+            # Cos Sim (weighted by k, number of survivor tokens)
+            avg_cos_sim, total_k_cos = _weighted_avg(
+                hook.fuser_cos_sim_accumulator, k_weights
+            )
+            metrics_global_lists["shiva/fuser/avg_cos_sim"].append(
+                (avg_cos_sim, total_k_cos)
+            )
+            metrics_per_layer["shiva/fuser/per_layer_cos_sim"][layer_name] = avg_cos_sim
 
+            # Clear accumulators
+            hook.discarded_info_norm_accumulator.clear()
+            hook.fuser_diff_norm_accumulator.clear()
+            hook.fuser_cos_sim_accumulator.clear()
+            hook.k_accumulator.clear()
+            hook.n_minus_k_accumulator.clear()
+
+        # Calculate global weighted average across all hooks
         final_metrics_global = {}
-        for key, val_list in metrics_global_lists.items():
-            if val_list:
-                final_metrics_global[key] = torch.stack(val_list).mean().item()
-            else:
+        for key, avg_weight_list in metrics_global_lists.items():
+            if not avg_weight_list:
                 final_metrics_global[key] = 0.0
+                continue
+                
+            total_weighted_sum = sum(avg * weight for avg, weight in avg_weight_list)
+            global_total_weight = sum(weight for _, weight in avg_weight_list)
+            
+            if global_total_weight == 0:
+                final_metrics_global[key] = 0.0
+            else:
+                final_metrics_global[key] = total_weighted_sum / global_total_weight
 
         return final_metrics_global, metrics_per_layer
 
-
 if __name__ == "__main__":
     from shiva_dit.utils import get_pipeline, process_quick_start
-    model_type = "sd3"
+    model_type = "pixart-sigma"
     pipe, model_attrs = get_pipeline(model_type)
 
     shiva_config = {
@@ -947,18 +939,9 @@ if __name__ == "__main__":
         "context_pruning_ratio": None,
         "initial_kept_ratio": 1.0,
         "use_gater_lut": False,
-
-        # "gradient_proxy_mode": "diffcr",
-        # "use_sorted_topk": True,
-        # "ratio_min": 0.1,
-        # "ratio_max": 1.0,
-        # "ratio_step": -0.1,
-
-        # "gradient_proxy_mode": "scale",
-        # "use_sorted_topk": True,
-
-        "gradient_proxy_mode": "scale",
-        "use_sorted_topk": False,
+        "ratio_min": 0.1,
+        "ratio_max": 1.0,
+        "ratio_step": -0.1,
     }
 
     HookManager.configure_hooks(

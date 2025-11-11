@@ -11,18 +11,9 @@ hook_config = {
     "use_gater_lut": False,
     "context_pruning_threshold": None,
     "context_pruning_ratio": None,      
-
-    # "gradient_proxy_mode": "diffcr",
-    # "use_sorted_topk": True,
-    # "ratio_min": 0.1,
-    # "ratio_max": 1.0,
-    # "ratio_step": -0.1,
-
-    "gradient_proxy_mode": "scale",
-    "use_sorted_topk": True,
-
-    # "gradient_proxy_mode": "scale",
-    # "use_sorted_topk": False,
+    "ratio_min": 0.1,
+    "ratio_max": 1.0,
+    "ratio_step": -0.1,
 }
 lora_config = {
     "enable": True,
@@ -76,14 +67,14 @@ trainer_config = {
     "inference_num_inference_steps": 30,
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
-    "hook_warmup_steps": 3500,  # 2 epoch
+    "hook_warmup_steps": 0,  # 2 epoch
     "extra_config": {
         "anneal_steps": 21000,  # 12 epoch
-        "ratio_loss_weight": 0.3,
+        "ratio_loss_weight": 0.1,
         "target_ratio": 0.8,
         "schedule_steps": [10500, 26250],  # 6 epoch, 15 epoch
-        "gate_schedule": [0.1, 0.05, 0.01],
-        "consistency_schedule": [1e-9, 1e-9, 0.01],
+        "gate_schedule": [0.01, 0.005, 0.001],
+        "consistency_schedule": [1e-6, 1e-4, 0.01],
     },
     "log_with_tensorboard": True,
     "log_with_wandb": True,
