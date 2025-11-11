@@ -395,17 +395,22 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         token_scores = self.router(
             hidden_states.to(dtype), pure_temb, pooled_encoder_vector, layer_emb_vector
         )
-        raw_logits = token_scores
         token_scores = torch.sigmoid(token_scores)
 
         unclamped_ratio = self.shiva_ratio
         # Clamp with min/max for stability
         clamped_ratio = torch.clamp(unclamped_ratio, min=1e-3, max=1.0)
 
-        k = ceil_ste(clamped_ratio * N).to(torch.int32)
-        k = torch.min(k, torch.tensor(N, device=hidden_states.device))
+        if self.training:
+            k_float_unclamped = ceil_ste(clamped_ratio * N)
+        else:
+            with torch.no_grad():
+                k_float_unclamped = torch.ceil(clamped_ratio * N)
 
-        x_sel, x_rej, remaining_x, sel_idx = self._select_topk_and_remaining_tokens(hidden_states, token_scores, k, D)
+        N_tensor_float = torch.tensor(N, device=k_float_unclamped.device, dtype=k_float_unclamped.dtype)
+        k_float = torch.clamp(k_float_unclamped, min=1.0, max=N_tensor_float)
+
+        x_sel, x_rej, remaining_x, sel_idx = self._select_topk_and_remaining_tokens(hidden_states, token_scores, k_float, D)
         sel_rope = self._gather_rope(image_rotary_emb, sel_idx)
 
         if self.training:
@@ -429,8 +434,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             ## metric collect
             self.gate_loss_accumulator.append(load_balancing_loss)
             self.gater_fuse_prob_accumulator.append(avg_fuse_prob)
-            k_val = k.item()
-            n_minus_k_val = (N - k).item()
+            k_val = int(k_float.item())
+            n_minus_k_val = N - k_val
             if x_rej.shape[1] > 0:
                 global_info = torch.mean(x_rej, dim=1, keepdim=True)
                 discarded_info_norm = torch.norm(global_info, p=2, dim=-1).mean().detach()

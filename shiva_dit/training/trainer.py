@@ -513,9 +513,9 @@ class DiffusionModelTrainer:
             print(f"Optimizing {len(base_lr_params)} other params with LR: {self.config.learning_rate}")
 
         optimizer_grouped_parameters = [
-            {"params": lora_params, "lr": self.config.lora_learning_rate},
-            {"params": ratio_params, "lr": self.config.ratio_learning_rate},
-            {"params": base_lr_params, "lr": self.config.learning_rate},
+            {"params": lora_params, "lr": self.config.lora_learning_rate, "weight_decay": self.config.weight_decay},
+            {"params": ratio_params, "lr": self.config.ratio_learning_rate, "weight_decay": 0.0},
+            {"params": base_lr_params, "lr": self.config.learning_rate, "weight_decay": self.config.weight_decay},
         ]
         
         optimizer_grouped_parameters = [g for g in optimizer_grouped_parameters if g["params"]]
@@ -527,7 +527,6 @@ class DiffusionModelTrainer:
         if self.config.optimizer == "AdamW":
             optimizer = torch.optim.AdamW(
                 optimizer_grouped_parameters,
-                weight_decay=self.config.weight_decay,
             )
         else:
             # TODO: add more optimizers if needed
