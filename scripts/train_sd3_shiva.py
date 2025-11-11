@@ -38,7 +38,6 @@ trainer_config = {
     "model_path": None,
     "output_dir": "./checkpoints/",
     "training_mode": "lora",  # "hook_only" "finetune" "lora"
-    "compile_model": True,
     "hook_only_steps": 0,
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
