@@ -68,10 +68,10 @@ trainer_config = {
     "inference_num_inference_steps": 30,
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
-    "hook_warmup_steps": 3500,  # 2 epoch
+    "hook_warmup_steps": 1750,  # 2 epoch
     "extra_config": {
         "anneal_steps": 3500,  # 2 epoch
-        "ratio_loss_weight": 0.8,
+        "ratio_loss_weight": 10,
         "target_ratio": 0.8,
         "schedule_steps": [10500, 26250],  # 6 epoch, 15 epoch
         "gate_schedule": [0.1, 0.05, 0.01],
