@@ -404,6 +404,12 @@ class DiffusionModelTrainer:
                 "shiva/router/std_score",
                 "shiva/router/min_score",
             ],
+            "shiva/pruner/temperature": [
+                "shiva/pruner/avg_T",
+                "shiva/pruner/std_T",
+                "shiva/pruner/min_T",
+                "shiva/pruner/max_T",
+            ],
             "shiva/fuser/behavior_norm": [
                 "shiva/fuser/avg_discarded_norm",
                 "shiva/fuser/avg_diff_norm",
@@ -769,9 +775,7 @@ class DiffusionModelTrainer:
 
         start_ratio = 1.0
         final_target_ratio = self.config.extra_config["target_ratio"]
-        current_target_ratio = (
-            start_ratio - (start_ratio - final_target_ratio) * anneal_factor
-        )
+        current_target_ratio = final_target_ratio
 
         return {
             "ratio_loss_weight": current_ratio_weight,
@@ -843,6 +847,10 @@ class DiffusionModelTrainer:
             fuser_stats_global, fuser_stats_per_layer = ShivaDitBlockHook.collect_fuser_stats(self.device)
             aggregated_metrics.update(fuser_stats_global)
             self.step_per_layer_metrics.update(fuser_stats_per_layer)
+
+            pruner_T_stats, pruner_T_stats_per_layer = ShivaDitBlockHook.collect_pruner_T_stats(self.device)
+            aggregated_metrics.update(pruner_T_stats)
+            self.step_per_layer_metrics.update(pruner_T_stats_per_layer)
 
         else:
             total_hook_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)

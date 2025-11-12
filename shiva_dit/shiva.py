@@ -758,6 +758,33 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
     @staticmethod
     @torch.no_grad()
+    def collect_pruner_T_stats(device: torch.device) -> dict:
+        t_values = []
+        t_metrics_per_layer = {}
+
+        for hook in ShivaDitBlockHook._get_shiva_hooks():
+            if hasattr(hook, "prune_expert") and hasattr(hook.prune_expert, "T"):
+                if isinstance(hook.prune_expert.T, torch.nn.Parameter):
+                    t_val = hook.prune_expert.T.item()
+                    t_values.append(t_val)
+
+                    layer_name = f"layer_{hook.layer_idx:02d}"
+                    t_metrics_per_layer[layer_name] = t_val
+
+        metrics = {}
+        if t_values:
+            t_tensor = torch.tensor(t_values, device=device)
+            metrics["shiva/pruner/avg_T"] = t_tensor.mean().item()
+            metrics["shiva/pruner/std_T"] = t_tensor.std().item()
+            metrics["shiva/pruner/min_T"] = t_tensor.min().item()
+            metrics["shiva/pruner/max_T"] = t_tensor.max().item()
+
+        return metrics, {
+            "shiva/pruner/per_layer_T": t_metrics_per_layer
+        }
+
+    @staticmethod
+    @torch.no_grad()
     def _weighted_avg(values, weights, default_val=0.0):
         if not values or not weights:
             return default_val, 0.0

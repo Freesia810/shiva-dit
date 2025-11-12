@@ -55,7 +55,7 @@ trainer_config = {
     "hook_loss_weight": 1.0,
     "seed": 42,
     "logging_steps": 5,
-    "save_steps": 3500,  # 1 epoch
+    "save_steps": 3500,  # 2 epoch
     "run_validation": True,
     "validation_steps": 875,  # 0.5 epoch
     "val_batch_size": None,
@@ -70,8 +70,8 @@ trainer_config = {
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
     "hook_warmup_steps": 3500,  # 2 epoch
     "extra_config": {
-        "anneal_steps": 0,  # 12 epoch
-        "ratio_loss_weight": 0.2,
+        "anneal_steps": 3500,  # 2 epoch
+        "ratio_loss_weight": 0.8,
         "target_ratio": 0.8,
         "schedule_steps": [10500, 26250],  # 6 epoch, 15 epoch
         "gate_schedule": [0.1, 0.05, 0.01],
