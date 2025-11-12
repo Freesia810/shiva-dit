@@ -882,7 +882,7 @@ if __name__ == "__main__":
         "context_pruning_ratio": None,
         "initial_kept_ratio": 1.0,
         "use_gater_lut": False,
-        "initial_T": 30.0,
+        "initial_T": 5.0,
         "learnable_T": True,
     }
 
