@@ -498,6 +498,7 @@ class DiffusionModelTrainer:
 
         lora_params = []
         ratio_params = []
+        T_params = []
         other_model_params = []
 
         for name, param in self.model.named_parameters():
@@ -508,6 +509,8 @@ class DiffusionModelTrainer:
                 lora_params.append(param)
             elif "ratio" in name:
                 ratio_params.append(param)
+            elif "shiva_T" in name:
+                T_params.append(param)
             else:
                 other_model_params.append(param)
 
@@ -516,11 +519,13 @@ class DiffusionModelTrainer:
         if self.accelerator.is_main_process:
             print(f"Optimizing {len(lora_params)} LoRA params with LR: {self.config.lora_learning_rate}")
             print(f"Optimizing {len(ratio_params)} Ratio params with LR: {self.config.ratio_learning_rate}")
+            print(f"Optimizing {len(T_params)} T params with LR: {self.config.temp_learning_rate}")
             print(f"Optimizing {len(base_lr_params)} other params with LR: {self.config.learning_rate}")
 
         optimizer_grouped_parameters = [
             {"params": lora_params, "lr": self.config.lora_learning_rate, "weight_decay": self.config.weight_decay},
             {"params": ratio_params, "lr": self.config.ratio_learning_rate, "weight_decay": 0.0},
+            {"params": T_params, "lr": self.config.temp_learning_rate, "weight_decay": 0.0},
             {"params": base_lr_params, "lr": self.config.learning_rate, "weight_decay": self.config.weight_decay},
         ]
         

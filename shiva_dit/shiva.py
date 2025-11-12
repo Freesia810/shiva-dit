@@ -172,15 +172,15 @@ class ShivaPrunerExpert(torch.nn.Module):
         super().__init__()
 
         if learnable_T:
-            self.T = torch.nn.Parameter(torch.tensor(float(initial_T)))
+            self.shiva_T = torch.nn.Parameter(torch.tensor(float(initial_T)))
         else:
-            self.register_buffer("T", torch.tensor(float(initial_T)))
+            self.register_buffer("shiva_T", torch.tensor(float(initial_T)))
 
     def forward(self, x, scores, k):
         """
         support both training and eval
         """
-        return ShivaTopkFunc.apply(x, scores, k, self.T)
+        return ShivaTopkFunc.apply(x, scores, k, self.shiva_T)
 
 
 class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
@@ -763,9 +763,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         t_metrics_per_layer = {}
 
         for hook in ShivaDitBlockHook._get_shiva_hooks():
-            if hasattr(hook, "prune_expert") and hasattr(hook.prune_expert, "T"):
-                if isinstance(hook.prune_expert.T, torch.nn.Parameter):
-                    t_val = hook.prune_expert.T.item()
+            if hasattr(hook, "prune_expert") and hasattr(hook.prune_expert, "shiva_T"):
+                if isinstance(hook.prune_expert.shiva_T, torch.nn.Parameter):
+                    t_val = hook.prune_expert.shiva_T.item()
                     t_values.append(t_val)
 
                     layer_name = f"layer_{hook.layer_idx:02d}"

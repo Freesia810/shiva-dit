@@ -11,7 +11,7 @@ hook_config = {
     "use_gater_lut": False,
     "context_pruning_threshold": None,
     "context_pruning_ratio": None,
-    "initial_T": 30.0,
+    "initial_T": 1.2,
     "learnable_T": True,
 }
 lora_config = {
@@ -47,6 +47,7 @@ trainer_config = {
     "learning_rate": 1e-4,
     "lora_learning_rate": 1e-4,
     "ratio_learning_rate": 1e-4,
+    "temp_learning_rate": 1e-4,
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
     "lr_scheduler": "cosine",  # "linear", "cosine", "constant"
@@ -68,10 +69,10 @@ trainer_config = {
     "inference_num_inference_steps": 30,
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
-    "hook_warmup_steps": 1750,  # 2 epoch
+    "hook_warmup_steps": 7000,  # 4 epoch
     "extra_config": {
-        "anneal_steps": 3500,  # 2 epoch
-        "ratio_loss_weight": 0.5,
+        "anneal_steps": 0,  # 2 epoch
+        "ratio_loss_weight": 0.3,
         "target_ratio": 0.8,
         "schedule_steps": [10500, 26250],  # 6 epoch, 15 epoch
         "gate_schedule": [0.1, 0.05, 0.01],
