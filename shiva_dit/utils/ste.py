@@ -66,13 +66,18 @@ class ShivaTopkFunc(torch.autograd.Function):
 
         grad_L_wrt_soft_mask_scalar = torch.sum(grad_x * x, dim=-1)  # (B, N)
 
-        grad_scores = grad_L_wrt_soft_mask_scalar * soft_mask.squeeze(-1)
+        grad_norm = (
+            torch.norm(grad_L_wrt_soft_mask_scalar, p=2, dim=-1, keepdim=True) + 1e-9
+        )
+        normalized_grad_scalar = grad_L_wrt_soft_mask_scalar / grad_norm
+
+        grad_scores = normalized_grad_scalar * soft_mask.squeeze(-1)
 
         dsoft_dk = soft_mask * (1 - soft_mask) * T  # (B, N, 1)
-        grad_k = torch.sum(grad_L_wrt_soft_mask_scalar.unsqueeze(-1) * dsoft_dk)
+        grad_k = torch.sum(normalized_grad_scalar.unsqueeze(-1) * dsoft_dk)
 
         dsoft_dT = (k - ranks_expanded) * soft_mask * (1 - soft_mask)  # (B, N, 1)
-        grad_T = torch.sum(grad_L_wrt_soft_mask_scalar.unsqueeze(-1) * dsoft_dT)
+        grad_T = torch.sum(normalized_grad_scalar.unsqueeze(-1) * dsoft_dT)
 
         return grad_x, grad_scores, grad_k, grad_T
 
