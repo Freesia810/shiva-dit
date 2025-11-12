@@ -11,7 +11,7 @@ hook_config = {
     "use_gater_lut": False,
     "context_pruning_threshold": None,
     "context_pruning_ratio": None,
-    "initial_T": 1.0,
+    "initial_T": 30.0,
     "learnable_T": True,
 }
 lora_config = {
@@ -71,7 +71,7 @@ trainer_config = {
     "hook_warmup_steps": 1750,  # 2 epoch
     "extra_config": {
         "anneal_steps": 3500,  # 2 epoch
-        "ratio_loss_weight": 10,
+        "ratio_loss_weight": 1,
         "target_ratio": 0.8,
         "schedule_steps": [10500, 26250],  # 6 epoch, 15 epoch
         "gate_schedule": [0.1, 0.05, 0.01],
