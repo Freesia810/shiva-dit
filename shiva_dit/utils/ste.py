@@ -71,12 +71,24 @@ class ShivaTopkFunc(torch.autograd.Function):
         )
         normalized_grad_scalar = grad_L_wrt_soft_mask_scalar / grad_norm
 
-        grad_scores = normalized_grad_scalar * soft_mask.squeeze(-1)
+        d_soft_d_logits = soft_mask * (1 - soft_mask)
 
-        dsoft_dk = soft_mask * (1 - soft_mask) * T  # (B, N, 1)
+        # (B, N, 1)
+        # d_soft_mask/d_ranks = d_soft_mask/d_logits * d_logits/d_ranks
+        # (d_logits/d_ranks = -T)
+        d_soft_d_ranks = d_soft_d_logits * (-T)
+
+        # STE: grad_scores = dL/d_ranks = (dL/d_soft_mask) * (d_soft_mask/d_ranks)
+        # (dL/d_soft_mask approximated by normalized_grad_scalar)
+        grad_scores = (normalized_grad_scalar.unsqueeze(-1) * d_soft_d_ranks).squeeze(
+            -1
+        )  # (B, N)
+
+        # --- The rest of the code is correct ---
+        dsoft_dk = d_soft_d_logits * T  # (B, N, 1)
         grad_k = torch.sum(normalized_grad_scalar.unsqueeze(-1) * dsoft_dk)
 
-        dsoft_dT = (k - ranks_expanded) * soft_mask * (1 - soft_mask)  # (B, N, 1)
+        dsoft_dT = (k - ranks_expanded) * d_soft_d_logits  # (B, N, 1)
         grad_T = torch.sum(normalized_grad_scalar.unsqueeze(-1) * dsoft_dT)
 
         return grad_x, grad_scores, grad_k, grad_T
