@@ -1051,13 +1051,10 @@ class DiffusionModelTrainer:
                         router_grad_norms.append(grad_norm)
                     elif "shiva_ratio" in name:
                         ratio_grad_norms.append(grad_norm)
-                        shiva_grad_metrics[f"grads_per_layer/ratio/{name}"] = grad_norm
                     elif "shiva_T_s" in name:
                         Ts_grad_norms.append(grad_norm)
-                        shiva_grad_metrics[f"grads_per_layer/T_s/{name}"] = grad_norm
                     elif "shiva_T_k" in name:
                         Tk_grad_norms.append(grad_norm)
-                        shiva_grad_metrics[f"grads_per_layer/T_k/{name}"] = grad_norm
 
                 if router_grad_norms:
                     shiva_grad_metrics["grads/router_avg_norm"] = sum(router_grad_norms) / len(router_grad_norms)
