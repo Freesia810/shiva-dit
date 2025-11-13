@@ -12,51 +12,6 @@ from shiva_dit.utils import ceil_ste, sigmoid_ste, global_context, ShivaTopkFunc
 from shiva_dit.utils.utils import join_image_rotary_emb, parse_image_rotary_emb
 
 
-class ShivaRouter(nn.Module):
-    def __init__(
-        self,
-        hidden_dim: int,
-        prompt_embed_dim: int,
-        layer_embed_dim: int,
-        bottleneck_dim: int = 64,
-        time_embed_dim: int = None,
-    ):
-        super().__init__()
-
-        if time_embed_dim is None:
-            time_embed_dim = hidden_dim
-
-        self.token_proj = nn.Linear(hidden_dim, bottleneck_dim)
-        self.prompt_proj = nn.Linear(prompt_embed_dim, bottleneck_dim, bias=False)
-        self.temb_proj = nn.Linear(time_embed_dim, bottleneck_dim, bias=False)
-        self.layer_proj = nn.Linear(layer_embed_dim, bottleneck_dim, bias=False)
-        self.router_head = nn.Linear(bottleneck_dim, 1, bias=True)
-
-    def forward(
-        self,
-        hidden_states,
-        pooled_encoder_states,
-        temb,
-        layer_emb,
-    ):
-        """
-        hidden_states: (B, seq_len, D_h)
-        temb: (B, D_t)
-        pooled_encoder_states: (B, D_p)
-        layer_emb: (B, D_l)
-        """
-
-        time_feat = self.temb_proj(temb).unsqueeze(1)
-        prompt_feat = self.prompt_proj(pooled_encoder_states).unsqueeze(1)
-        layer_feat = self.layer_proj(layer_emb).unsqueeze(1)
-        context_feat = time_feat + prompt_feat + layer_feat
-
-        token_feat = self.token_proj(hidden_states)  # (B, N, c)
-        fused_hidden = F.silu(token_feat + context_feat)
-        token_scores = self.router_head(fused_hidden)  # (B, N, 1)
-        return token_scores.squeeze(-1)  # (B, N)
-
-
 class ShivaContextPruner(nn.Module):
     """
     TODO: if the model has larger context length, we should propose a better pruning strategy
@@ -167,20 +122,78 @@ class ShivaFuserExpert(nn.Module):
         return fused_survivors
 
 
-class ShivaPrunerExpert(torch.nn.Module):
-    def __init__(self, initial_T=30.0, learnable_T=True):
+# class ShivaPrunerExpert(torch.nn.Module):
+#     def __init__(self, initial_Tk, initial_Ts, learnable_T=True):
+#         super().__init__()
+
+#         if learnable_T:
+#             self.shiva_Tk= torch.nn.Parameter(torch.tensor(float(initial_Tk)))
+#             self.shiva_Ts = torch.nn.Parameter(torch.tensor(float(initial_Ts)))
+#         else:
+#             self.register_buffer("shiva_Tk", torch.tensor(float(initial_T)))
+#             self.register_buffer("shiva_Ts", torch.tensor(float(initial_Ts)))
+
+#     def forward(self, x, scores, k):
+#         """
+#         support both training and eval
+#         """
+#         return ShivaTopkFunc.apply(x, scores, k, self.shiva_Tk, self.shiva_Ts)
+
+
+# --- 2. nn.Module 实现 ---
+
+class ShivaPrunerExpert(nn.Module):
+    def __init__(self, T_rank: float = 1.0, T_select: float = 10.0):
         super().__init__()
+        self.register_buffer('T_rank', torch.tensor(T_rank))
+        self.register_buffer('T_select', torch.tensor(T_select))
 
-        if learnable_T:
-            self.shiva_T = torch.nn.Parameter(torch.tensor(float(initial_T)))
-        else:
-            self.register_buffer("shiva_T", torch.tensor(float(initial_T)))
+    @staticmethod
+    def _differentiable_rank_descending(scores: torch.Tensor, 
+                                    temperature: torch.Tensor) -> torch.Tensor:
+        pairwise_diffs = scores.unsqueeze(0) - scores.unsqueeze(1)
+        soft_comparisons = torch.sigmoid(pairwise_diffs * temperature)
+        torch.fill_diagonal_(soft_comparisons, 0)
+        soft_ranks = 1 + soft_comparisons.sum(dim=1) 
+        
+        return soft_ranks
 
-    def forward(self, x, scores, k):
+    def forward(self, 
+                x: torch.Tensor, 
+                scores: torch.Tensor, 
+                k_continuous: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        support both training and eval
+        执行可微分的 "软" top-k 选择。
+        
+        Args:
+            x (torch.Tensor): 要被选择的张量, [N, D]
+            scores (torch.Tensor): 用于排名的分数, [N]
+            k_continuous (torch.Tensor): 连续的 "k" 值 (e.g., N * r), 0D 张量 (标量)
+            
+        Returns:
+            x_sel_soft (torch.Tensor): 软选择的 "x", [N, D]
+            x_rej_soft (torch.Tensor): 软拒绝的 "x", [N, D]
+            selection_probs (torch.Tensor): 选择的概率/掩码, [N]
         """
-        return ShivaTopkFunc.apply(x, scores, k, self.shiva_T)
+        
+        assert scores.dim() == 1, "Scores 必须是 1D 张量 [N]"
+        assert x.shape[0] == scores.shape[0], "x 和 scores 的 N 维度必须匹配"
+        assert k_continuous.dim() == 0, "k_continuous 必须是 0D 标量"
+        
+        soft_ranks = ShivaPrunerExpert._differentiable_rank_descending(scores, self.T_rank)
+
+        z = self.T_select * (k_continuous - soft_ranks)
+        selection_probs = torch.sigmoid(z)
+        prob_mask = selection_probs.unsqueeze(-1)
+        
+        x_sel_soft = x * prob_mask
+        x_rej_soft = x * (1.0 - prob_mask)
+        
+        return x_sel_soft, x_rej_soft, selection_probs
+
+    def set_temperatures(self, T_rank: float, T_select: float):
+        self.T_rank.data.fill_(T_rank)
+        self.T_select.data.fill_(T_select)
 
 
 class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
@@ -205,7 +218,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         if 'initial_kept_ratio' not in kwargs:
             kwargs['initial_kept_ratio'] = 1.0
 
-        kwargs.setdefault("initial_T", 30.0)
+        kwargs.setdefault("initial_Tk", 30.0)
+        kwargs.setdefault("initial_Ts", 30.0)
         kwargs.setdefault("learnable_T", True)
 
         model_dim = global_context.hidden_dim
@@ -330,7 +344,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         initial_kept_ratio: float = 0.5,
         use_gater_lut: bool = False,
         shared_gater_cache: torch.Tensor = None,
-        initial_T: float =30.0,
+        initial_Tk: float =30.0,
+        initial_Ts: float =30.0,
         learnable_T: bool = True,
         **kwargs,
     ):
@@ -344,7 +359,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.router = shared_router
         self.gater = shared_gater
         self.context_pruner = shared_pruner
-        self.prune_expert = ShivaPrunerExpert(initial_T=initial_T, learnable_T=learnable_T)
+        self.prune_expert = ShivaPrunerExpert(initial_Tk=initial_Tk, initial_Ts=initial_Ts, learnable_T=learnable_T)
         self.fuse_expert = shared_fuse_expert
 
         self.use_gater_lut = use_gater_lut
@@ -566,6 +581,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 "mean": token_scores.mean(),
                 "std": token_scores.std(),
                 "min": token_scores.min(),
+                "max": token_scores.max(),
             }
         )
 
@@ -738,6 +754,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         total_mean = []
         total_std = []
         total_min = []
+        total_max = []
 
         for hook in ShivaDitBlockHook._get_shiva_hooks():
             acc = hook.router_stats_accumulator
@@ -745,6 +762,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 total_mean.append(torch.stack([x["mean"] for x in acc]).mean())
                 total_std.append(torch.stack([x["std"] for x in acc]).mean())
                 total_min.append(torch.stack([x["min"] for x in acc]).min())
+                total_max.append(torch.stack([x["max"] for x in acc]).max())
             acc.clear()
 
         if total_mean:
@@ -752,6 +770,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 "shiva/router/mean_score": torch.stack(total_mean).mean(),
                 "shiva/router/std_score": torch.stack(total_std).mean(),
                 "shiva/router/min_score": torch.stack(total_min).min(),
+                "shiva/router/max_score": torch.stack(total_max).max(),
             }
         else:
             return {}
@@ -759,25 +778,42 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
     @staticmethod
     @torch.no_grad()
     def collect_pruner_T_stats(device: torch.device) -> dict:
-        t_values = []
+        tk_values = []
+        ts_values = []
         t_metrics_per_layer = {}
 
         for hook in ShivaDitBlockHook._get_shiva_hooks():
-            if hasattr(hook, "prune_expert") and hasattr(hook.prune_expert, "shiva_T"):
-                if isinstance(hook.prune_expert.shiva_T, torch.nn.Parameter):
-                    t_val = hook.prune_expert.shiva_T.item()
-                    t_values.append(t_val)
+            if hasattr(hook, "prune_expert") and hasattr(hook.prune_expert, "shiva_Tk"):
+                if isinstance(hook.prune_expert.shiva_Tk, torch.nn.Parameter):
+                    t_val = hook.prune_expert.shiva_Tk.item()
+                    tk_values.append(t_val)
 
-                    layer_name = f"layer_{hook.layer_idx:02d}"
+                    layer_name = f"layer_{hook.layer_idx:02d}_Tk"
+                    t_metrics_per_layer[layer_name] = t_val
+            
+            if hasattr(hook, "prune_expert") and hasattr(hook.prune_expert, "shiva_Ts"):
+                if isinstance(hook.prune_expert.shiva_Ts, torch.nn.Parameter):
+                    t_val = hook.prune_expert.shiva_Ts.item()
+                    ts_values.append(t_val)
+
+                    layer_name = f"layer_{hook.layer_idx:02d}_Ts"
                     t_metrics_per_layer[layer_name] = t_val
 
         metrics = {}
-        if t_values:
-            t_tensor = torch.tensor(t_values, device=device)
-            metrics["shiva/pruner/avg_T"] = t_tensor.mean().item()
-            metrics["shiva/pruner/std_T"] = t_tensor.std().item()
-            metrics["shiva/pruner/min_T"] = t_tensor.min().item()
-            metrics["shiva/pruner/max_T"] = t_tensor.max().item()
+        
+        if tk_values:
+            t_tensor_k = torch.tensor(tk_values, device=device)
+            metrics["shiva/pruner/avg_T_k"] = t_tensor_k.mean().item()
+            metrics["shiva/pruner/std_T_k"] = t_tensor_k.std().item()
+            metrics["shiva/pruner/min_T_k"] = t_tensor_k.min().item()
+            metrics["shiva/pruner/max_T_k"] = t_tensor_k.max().item()
+
+        if ts_values:
+            t_tensor_s = torch.tensor(ts_values, device=device)
+            metrics["shiva/pruner/avg_T_s"] = t_tensor_s.mean().item()
+            metrics["shiva/pruner/std_T_s"] = t_tensor_s.std().item()
+            metrics["shiva/pruner/min_T_s"] = t_tensor_s.min().item()
+            metrics["shiva/pruner/max_T_s"] = t_tensor_s.max().item()
 
         return metrics, {
             "shiva/pruner/per_layer_T": t_metrics_per_layer

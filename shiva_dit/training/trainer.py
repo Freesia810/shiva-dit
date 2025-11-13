@@ -403,12 +403,19 @@ class DiffusionModelTrainer:
                 "shiva/router/mean_score",
                 "shiva/router/std_score",
                 "shiva/router/min_score",
+                "shiva/router/max_score",
             ],
-            "shiva/pruner/temperature": [
-                "shiva/pruner/avg_T",
-                "shiva/pruner/std_T",
-                "shiva/pruner/min_T",
-                "shiva/pruner/max_T",
+            "shiva/pruner/temperature_K": [
+                "shiva/pruner/avg_T_k",
+                "shiva/pruner/std_T_k",
+                "shiva/pruner/min_T_k",
+                "shiva/pruner/max_T_k",
+            ],
+            "shiva/pruner/temperature_S": [
+                "shiva/pruner/avg_T_s",
+                "shiva/pruner/std_T_s",
+                "shiva/pruner/min_T_s",
+                "shiva/pruner/max_T_s",
             ],
             "shiva/fuser/behavior_norm": [
                 "shiva/fuser/avg_discarded_norm",
