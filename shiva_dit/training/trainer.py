@@ -426,7 +426,30 @@ class DiffusionModelTrainer:
             ],
             "shiva/fuser/gate_prob_avg": [
                 "shiva/fuser/avg_fuse_prob",
-            ]
+            ],
+            "shiva/autograd/soft_ranks": [
+                "shiva/autograd/soft_ranks_std",
+                "shiva/autograd/soft_ranks_mean",
+            ],
+            "shiva/autograd/z_stats": [
+                "shiva/autograd/z_std",
+                "shiva/autograd/z_mean",
+            ],
+            "shiva/autograd/grad_probs": [
+                "shiva/autograd/grad_probs_norm",
+                "shiva/autograd/grad_probs_sum",
+                "shiva/autograd/grad_probs_std",
+            ],
+            "shiva/autograd/sigmoid_prime": [
+                "shiva/autograd/sigmoid_prime_mean",
+                "shiva/autograd/sigmoid_prime_std",
+            ],
+            "grads/shiva_avg": [
+                "grads/router_avg_norm",
+                "grads/ratio_avg_norm",
+                "grads/T_s_avg_norm",
+                "grads/T_k_avg_norm",
+            ],
         }
 
         self.metric_manager = MetricManager(
@@ -863,6 +886,9 @@ class DiffusionModelTrainer:
             aggregated_metrics.update(pruner_T_stats)
             self.step_per_layer_metrics.update(pruner_T_stats_per_layer)
 
+            autograd_stats = shiva_metrics.collect_autograd_stats(self.device)
+            aggregated_metrics.update(autograd_stats)
+
         else:
             total_hook_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
 
@@ -1006,6 +1032,43 @@ class DiffusionModelTrainer:
                     "finetune/grad_norm": grad_norm, 
                     "finetune/param_delta": param_delta
                 })
+
+            if self.hook_type == "shiva":
+                shiva_grad_metrics = {}
+                router_grad_norms = []
+                ratio_grad_norms = []
+                Ts_grad_norms = []
+                Tk_grad_norms = []
+
+                unwrapped_model = self.accelerator.unwrap_model(self.model)
+                for name, param in unwrapped_model.named_parameters():
+                    if param.grad is None:
+                        continue
+
+                    grad_norm = torch.norm(param.grad.detach()).item()
+
+                    if "router." in name:
+                        router_grad_norms.append(grad_norm)
+                    elif "shiva_ratio" in name:
+                        ratio_grad_norms.append(grad_norm)
+                        shiva_grad_metrics[f"grads_per_layer/ratio/{name}"] = grad_norm
+                    elif "shiva_T_s" in name:
+                        Ts_grad_norms.append(grad_norm)
+                        shiva_grad_metrics[f"grads_per_layer/T_s/{name}"] = grad_norm
+                    elif "shiva_T_k" in name:
+                        Tk_grad_norms.append(grad_norm)
+                        shiva_grad_metrics[f"grads_per_layer/T_k/{name}"] = grad_norm
+
+                if router_grad_norms:
+                    shiva_grad_metrics["grads/router_avg_norm"] = sum(router_grad_norms) / len(router_grad_norms)
+                if ratio_grad_norms:
+                    shiva_grad_metrics["grads/ratio_avg_norm"] = sum(ratio_grad_norms) / len(ratio_grad_norms)
+                if Ts_grad_norms:
+                    shiva_grad_metrics["grads/T_s_avg_norm"] = sum(Ts_grad_norms) / len(Ts_grad_norms)
+                if Tk_grad_norms:
+                    shiva_grad_metrics["grads/T_k_avg_norm"] = sum(Tk_grad_norms) / len(Tk_grad_norms)
+
+                metrics_to_log.update(shiva_grad_metrics)
 
             metrics_to_log.update({
                 "train/total_loss": gathered_losses["total"].item(),

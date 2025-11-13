@@ -22,6 +22,11 @@ class SigmoidSTE(torch.autograd.Function):
 
 
 class ShivaTopkFunc(torch.autograd.Function):
+    _last_grad_probs_stats = {}
+    _last_soft_ranks_stats = {}
+    _last_z_stats = {}
+    _last_selection_probs_stats = {}
+
     @staticmethod
     def _differentiable_rank_descending(
         scores: torch.Tensor, temperature: torch.Tensor
@@ -111,6 +116,33 @@ class ShivaTopkFunc(torch.autograd.Function):
 
             z = T_select * (k_detached.unsqueeze(-1) - soft_ranks)
             selection_probs = torch.sigmoid(z)  # Shape: [B, N]
+
+            if torch.rand(1) < 0.05:
+                with torch.no_grad():
+                    ShivaTopkFunc._last_grad_probs_stats = {
+                        "norm": torch.norm(grad_probs).item(),
+                        "mean": grad_probs.mean().item(),
+                        "std": grad_probs.std().item(),
+                        "sum": grad_probs.sum().item(),
+                    }
+
+                    ShivaTopkFunc._last_soft_ranks_stats = {
+                        "mean": soft_ranks.mean().item(),
+                        "std": soft_ranks.std().item(),
+                        "min": soft_ranks.min().item(),
+                        "max": soft_ranks.max().item(),
+                    }
+
+                    ShivaTopkFunc._last_z_stats = {
+                        "mean": z.mean().item(),
+                        "std": z.std().item(),
+                    }
+
+                    sigmoid_prime = selection_probs * (1 - selection_probs)
+                    ShivaTopkFunc._last_selection_probs_stats = {
+                        "grad_mean": sigmoid_prime.mean().item(),
+                        "grad_std": sigmoid_prime.std().item(),
+                    }
 
         selection_probs.backward(gradient=grad_probs)
 

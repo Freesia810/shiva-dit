@@ -4,6 +4,7 @@ from typing import Any
 
 from shiva_dit.hook import HookManager
 from shiva_dit.shiva_hook import ShivaDitBlockHook
+from shiva_dit.utils import ShivaTopkFunc
 
 
 def _get_shiva_hooks():
@@ -151,6 +152,50 @@ def calculate_shiva_gate_prob(device: torch.device) -> tuple[torch.Tensor, dict]
     else:
         return torch.tensor(0.0, device=device), {}
 
+
+def collect_autograd_stats(device):
+    stats = {}
+    if (
+        hasattr(ShivaTopkFunc, "_last_grad_probs_stats")
+        and ShivaTopkFunc._last_grad_probs_stats
+    ):
+        stats["shiva/autograd/grad_probs_norm"] = ShivaTopkFunc._last_grad_probs_stats[
+            "norm"
+        ]
+        stats["shiva/autograd/grad_probs_sum"] = ShivaTopkFunc._last_grad_probs_stats[
+            "sum"
+        ]
+        stats["shiva/autograd/grad_probs_std"] = ShivaTopkFunc._last_grad_probs_stats[
+            "std"
+        ]
+
+    if (
+        hasattr(ShivaTopkFunc, "_last_soft_ranks_stats")
+        and ShivaTopkFunc._last_soft_ranks_stats
+    ):
+        stats["shiva/autograd/soft_ranks_std"] = ShivaTopkFunc._last_soft_ranks_stats[
+            "std"
+        ]
+        stats["shiva/autograd/soft_ranks_mean"] = ShivaTopkFunc._last_soft_ranks_stats[
+            "mean"
+        ]
+
+    if hasattr(ShivaTopkFunc, "_last_z_stats") and ShivaTopkFunc._last_z_stats:
+        stats["shiva/autograd/z_std"] = ShivaTopkFunc._last_z_stats["std"]
+        stats["shiva/autograd/z_mean"] = ShivaTopkFunc._last_z_stats["mean"]
+
+    if (
+        hasattr(ShivaTopkFunc, "_last_selection_probs_stats")
+        and ShivaTopkFunc._last_selection_probs_stats
+    ):
+        stats["shiva/autograd/sigmoid_prime_mean"] = (
+            ShivaTopkFunc._last_selection_probs_stats["grad_mean"]
+        )
+        stats["shiva/autograd/sigmoid_prime_std"] = (
+            ShivaTopkFunc._last_selection_probs_stats["grad_std"]
+        )
+
+    return stats
 
 @torch.no_grad()
 def collect_router_stats(device: torch.device) -> dict:
