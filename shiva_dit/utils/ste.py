@@ -1,5 +1,6 @@
 import torch
-
+import torch.nn as nn
+import torch.nn.functional as F
 
 class CeilSTE(torch.autograd.Function):
     @staticmethod
@@ -19,112 +20,107 @@ class SigmoidSTE(torch.autograd.Function):
     def backward(ctx, grad_output):
         return grad_output
 
+
 class ShivaTopkFunc(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, scores, k, Tk, Ts):
+    def _differentiable_rank_descending(
+        scores: torch.Tensor, temperature: torch.Tensor
+    ) -> torch.Tensor:
+        B, N = scores.shape
+        scores_rows = scores.unsqueeze(2)
+        scores_cols = scores.unsqueeze(1)
+        pairwise_diffs = scores_cols - scores_rows
+        soft_comparisons = torch.sigmoid(pairwise_diffs * temperature)
+
+        mask = torch.eye(N, device=scores.device, dtype=torch.bool).unsqueeze(0)
+        soft_comparisons_masked = torch.where(mask, 0.0, soft_comparisons)
+
+        soft_ranks = 1 + soft_comparisons_masked.sum(dim=2)
+        return soft_ranks
+
+    @staticmethod
+    def forward(ctx, x, scores, k_float, Ts, Tk):
         B, N, D = x.shape
-        k_int = int(k.item())
+
+        k_int = int(torch.ceil(k_float).long().item())
+        k_int = max(1, min(k_int, N))
 
         _, idx_sorted = torch.sort(scores, dim=-1, descending=True)
+
         topk_idx = idx_sorted[:, :k_int]
         rest_idx = idx_sorted[:, k_int:]
 
-        x_selected = torch.gather(
-            x, 1,
-            topk_idx.unsqueeze(-1).expand(B, k_int, D)
-        )
-        x_rejected = torch.gather(
-            x, 1,
-            rest_idx.unsqueeze(-1).expand(B, N - k_int, D)
-        )
+        x_selected = torch.gather(x, 1, topk_idx.unsqueeze(-1).expand(B, k_int, D))
+        x_rejected = torch.gather(x, 1, rest_idx.unsqueeze(-1).expand(B, N - k_int, D))
 
-        ranks = torch.argsort(idx_sorted, dim=-1).float()  # (B, N)
+        ctx.save_for_backward(x, scores, k_float, Ts, Tk, topk_idx, rest_idx)
 
-        ctx.save_for_backward(x, k, topk_idx, rest_idx, ranks, Tk, Ts)
-        return x_selected, x_rejected, topk_idx, rest_idx
+        return x_selected, x_rejected, topk_idx.detach(), rest_idx.detach()
 
     @staticmethod
-    def backward(ctx, grad_sel, grad_rej, grad_topk_idx, grad_rest_idx):
-        x, k, topk_idx, rest_idx, ranks, T_k, T_s = ctx.saved_tensors
+    def backward(ctx, grad_x_selected, grad_x_rejected, grad_topk_idx, grad_rest_idx):
+        x, scores, k_float, Ts, Tk, topk_idx, rest_idx = ctx.saved_tensors
         B, N, D = x.shape
-        k_int = topk_idx.size(1)
+        k_int = topk_idx.shape[1]
+
+        grad_x = None
+        grad_scores = None
+        grad_k = None
+        grad_Ts = None
+        grad_Tk = None
 
         grad_x = torch.zeros_like(x)
-        grad_x.scatter_(
-            1,
-            topk_idx.unsqueeze(-1).expand(B, k_int, D),
-            grad_sel,
+        grad_x.scatter_add_(
+            1, topk_idx.unsqueeze(-1).expand_as(grad_x_selected), grad_x_selected
         )
-        grad_x.scatter_(
-            1,
-            rest_idx.unsqueeze(-1).expand(B, N - k_int, D),
-            grad_rej,
+        grad_x.scatter_add_(
+            1, rest_idx.unsqueeze(-1).expand_as(grad_x_rejected), grad_x_rejected
         )
 
-        ranks_expanded = ranks.unsqueeze(-1)  # (B, N, 1)
+        # dL/dx_sel (B, N, D)
+        grad_x_sel_scattered = torch.zeros_like(x)
+        grad_x_sel_scattered.scatter_add_(
+            1, topk_idx.unsqueeze(-1).expand_as(grad_x_selected), grad_x_selected
+        )
 
-        grad_L_wrt_soft_mask_scalar = torch.sum(grad_x * x, dim=-1)  # (B, N)
-        grad_norm = torch.norm(grad_L_wrt_soft_mask_scalar, p=2, dim=-1, keepdim=True) + 1e-9
-        normalized_grad_scalar = grad_L_wrt_soft_mask_scalar / grad_norm
-        normalized_grad_scalar_expanded = normalized_grad_scalar.unsqueeze(-1) # (B, N, 1)
+        # dL/dx_rej (B, N, D)
+        grad_x_rej_scattered = torch.zeros_like(x)
+        if k_int < N and grad_x_rejected is not None:
+            grad_x_rej_scattered.scatter_add_(
+                1, rest_idx.unsqueeze(-1).expand_as(grad_x_rejected), grad_x_rejected
+            )
 
-        soft_mask_s = torch.sigmoid((k - ranks_expanded) * T_s)  # (B, N, 1)
-        d_soft_s_d_logits = soft_mask_s * (1 - soft_mask_s) # (B, N, 1)
-        d_soft_d_scores = T_s * d_soft_s_d_logits
-        grad_scores = (normalized_grad_scalar_expanded * d_soft_d_scores).squeeze(-1)  # (B, N)
+        # dL/dp = (dL/dx_sel - dL/dx_rej) * x
+        grad_probs = torch.sum(
+            (grad_x_sel_scattered - grad_x_rej_scattered) * x.detach(), dim=-1
+        )  # Shape: [B, N]
 
-        soft_mask_k = torch.sigmoid((k - ranks_expanded) * T_k) # (B, N, 1)
-        d_soft_k_d_logits = soft_mask_k * (1 - soft_mask_k) # (B, N, 1)
-        dsoft_dk = d_soft_k_d_logits * T_k
-        grad_k = torch.sum(normalized_grad_scalar_expanded * dsoft_dk)
+        # --- dL/d(scores), dL/d(k), dL/d(T) ---
+        scores_detached = scores.detach().requires_grad_(True)
+        k_detached = k_float.detach().requires_grad_(True)
+        Ts_detached = Ts.detach().requires_grad_(True)
+        Tk_detached = Tk.detach().requires_grad_(True)
 
-        dsoft_dk_dT = (k - ranks_expanded) * d_soft_k_d_logits
-        grad_T_k = torch.sum(normalized_grad_scalar_expanded * dsoft_dk_dT)
+        with torch.enable_grad():
+            T_rank = F.softplus(Ts_detached)
+            T_select = F.softplus(Tk_detached)
 
-        dsoft_ds_dT = (k - ranks_expanded) * d_soft_s_d_logits
-        grad_T_s = torch.sum(normalized_grad_scalar_expanded * dsoft_ds_dT)
+            soft_ranks = ShivaTopkFunc._differentiable_rank_descending(
+                scores_detached, T_rank
+            )
 
-        return grad_x, grad_scores, grad_k, grad_T_k, grad_T_s
+            z = T_select * (k_detached.unsqueeze(-1) - soft_ranks)
+            selection_probs = torch.sigmoid(z)  # Shape: [B, N]
 
-    # @staticmethod
-    # def backward(ctx, grad_sel, grad_rej, grad_topk_idx, grad_rest_idx):
-    #     x, k, topk_idx, rest_idx, ranks, T = ctx.saved_tensors
-    #     B, N, D = x.shape
-    #     k_int = topk_idx.size(1)
+        selection_probs.backward(gradient=grad_probs)
 
-    #     grad_x = torch.zeros_like(x)
-    #     grad_x.scatter_(
-    #         1,
-    #         topk_idx.unsqueeze(-1).expand(B, k_int, D),
-    #         grad_sel,
-    #     )
-    #     grad_x.scatter_(
-    #         1,
-    #         rest_idx.unsqueeze(-1).expand(B, N - k_int, D),
-    #         grad_rej,
-    #     )
+        grad_scores = scores_detached.grad
+        grad_k = k_detached.grad
+        grad_Ts = Ts_detached.grad
+        grad_Tk = Tk_detached.grad
 
-    #     ranks_expanded = ranks.unsqueeze(-1)  # (B, N, 1)
-    #     soft_mask = torch.sigmoid((k - ranks_expanded) * T)  # (B, N, 1)
+        return grad_x, grad_scores, grad_k, grad_Ts, grad_Tk
 
-    #     grad_L_wrt_soft_mask_scalar = torch.sum(grad_x * x, dim=-1)  # (B, N)
-    #     grad_norm = torch.norm(grad_L_wrt_soft_mask_scalar, p=2, dim=-1, keepdim=True) + 1e-9
-    #     normalized_grad_scalar = grad_L_wrt_soft_mask_scalar / grad_norm
-
-    #     # Derivative of sigmoid((k - ranks)*T)
-    #     d_soft_d_logits = soft_mask * (1 - soft_mask)
-    #     d_soft_d_scores = T * d_soft_d_logits
-
-    #     grad_scores = (normalized_grad_scalar.unsqueeze(-1) * d_soft_d_scores).squeeze(-1)  # (B, N)
-
-    #     # ---- Gradients wrt k and T ----
-    #     dsoft_dk = d_soft_d_logits * T
-    #     grad_k = torch.sum(normalized_grad_scalar.unsqueeze(-1) * dsoft_dk)
-
-    #     dsoft_dT = (k - ranks_expanded) * d_soft_d_logits
-    #     grad_T = torch.sum(normalized_grad_scalar.unsqueeze(-1) * dsoft_dT)
-
-    #     return grad_x, grad_scores, grad_k, grad_T
 
 ceil_ste = CeilSTE.apply
 sigmoid_ste = SigmoidSTE.apply

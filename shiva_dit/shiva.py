@@ -1,6 +1,5 @@
 import inspect
-import math
-from typing import Literal, Type
+from typing import Type
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,193 +7,9 @@ import torch.nn.functional as F
 from shiva_dit.hook.block_hook import BaseDiTBlockHook
 from shiva_dit.hook.delegate import BaseDelegator
 from shiva_dit.hook.hook_manager import HookManager
-from shiva_dit.utils import ceil_ste, sigmoid_ste, global_context, ShivaTopkFunc
+from shiva_dit.modules import ShivaGater, ShivaRouter, ShivaPrunerExpert, ShivaFuserExpert, ShivaContextPruner
+from shiva_dit.utils import ceil_ste, global_context
 from shiva_dit.utils.utils import join_image_rotary_emb, parse_image_rotary_emb
-
-
-class ShivaContextPruner(nn.Module):
-    """
-    TODO: if the model has larger context length, we should propose a better pruning strategy
-    Now we only use this module to pool the encoder states for the hidden's router
-    """
-    def __init__(self, threshold: int = None, ratio: float = None):
-        super().__init__()
-        if ratio is not None and not 0.0 < ratio <= 1.0:
-            raise ValueError(f"Pruning ratio must be between (0, 1], but got {ratio}")
-
-        self.threshold = threshold
-        self.ratio = ratio
-
-    @torch.no_grad()
-    def forward(self, encoder_hidden_states: torch.Tensor):
-        """
-        :param encoder_hidden_states: (B, C, D)
-        :return: (pruned_states, pooled_vector)
-                 pruned_states: (B, c_pruned, D) 或 (B, C, D)
-                 pooled_vector: (B, D)
-        """
-        B, C, D = encoder_hidden_states.shape
-
-        if self.threshold is None:
-            # default: mean pooling
-            pooled_vector = torch.mean(encoder_hidden_states, dim=1)
-            return encoder_hidden_states, pooled_vector
-
-        if C <= self.threshold or self.ratio == 1.0:
-            # default: mean pooling
-            pooled_vector = torch.mean(encoder_hidden_states, dim=1)
-            return encoder_hidden_states, pooled_vector
-
-        c_pruned = int(C * self.ratio)
-        c_pruned = max(c_pruned, 1)
-        if c_pruned == C:
-            pooled_vector = torch.mean(encoder_hidden_states, dim=1)
-            return encoder_hidden_states, pooled_vector
-
-        token_scores = torch.norm(
-            encoder_hidden_states.to(torch.float32), p=2, dim=-1
-        ).detach()
-        topk_indices = torch.topk(token_scores, k=c_pruned, dim=-1).indices
-        topk_indices_expanded = topk_indices.unsqueeze(-1).expand(-1, -1, D)
-        pruned_states = torch.gather(encoder_hidden_states, 1, topk_indices_expanded)
-        pooled_vector = torch.mean(pruned_states, dim=1)
-
-        return pruned_states, pooled_vector
-
-
-class ShivaGater(nn.Module):
-    """
-    During training, we use this module to gating the experts.
-    During inference, we can obtain the layer id and the timesteps offline, so we can directly use the gating logits.
-    """
-    def __init__(
-        self,
-        time_embed_dim: int,
-        layer_embed_dim: int,
-    ):
-        super().__init__()
-        fused_dim = time_embed_dim + layer_embed_dim
-        self.net = nn.Sequential(
-            nn.Linear(fused_dim, 64),
-            nn.SiLU(),
-            nn.Linear(64, 2),  # Prune, Fuse
-        )
-
-    def forward(self, temb: torch.Tensor, layer_emb: torch.Tensor):
-        """
-        :param temb: (B, time_embed_dim)
-        :param layer_emb: (B, layer_embed_dim)
-        :return: (B, 2)
-        """
-        fused_input = torch.cat([temb, layer_emb], dim=-1)
-        return self.net(fused_input)  # [B, 2]
-
-
-class ShivaFuserExpert(nn.Module):
-    def __init__(self, hidden_dim: int, ffn_mult: int = 2):
-        super().__init__()
-        self.fusion_ffn = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * ffn_mult),
-            nn.SiLU(),
-            nn.Linear(hidden_dim * ffn_mult, hidden_dim)
-        )
-
-    def forward(self, survivors, discarded):
-        """
-        survivors: (B, k, D)
-        discarded: (B, N-k, D)
-        """
-        if discarded.shape[1] > 0:
-            global_info = torch.mean(discarded, dim=1, keepdim=True) # (B, 1, D)
-            projected_info = self.fusion_ffn(global_info) # (B, 1, D)
-            fused_survivors = survivors + projected_info # (B, k, D)
-        else:
-            fused_survivors = survivors
-            if self.training:
-                dummy_output = self.fusion_ffn(
-                    torch.zeros(
-                        survivors.shape[0], 1, survivors.shape[2],
-                        device=survivors.device, dtype=survivors.dtype
-                    )
-                )
-                fused_survivors = fused_survivors + (dummy_output * 0.0)
-
-        return fused_survivors
-
-
-# class ShivaPrunerExpert(torch.nn.Module):
-#     def __init__(self, initial_Tk, initial_Ts, learnable_T=True):
-#         super().__init__()
-
-#         if learnable_T:
-#             self.shiva_Tk= torch.nn.Parameter(torch.tensor(float(initial_Tk)))
-#             self.shiva_Ts = torch.nn.Parameter(torch.tensor(float(initial_Ts)))
-#         else:
-#             self.register_buffer("shiva_Tk", torch.tensor(float(initial_T)))
-#             self.register_buffer("shiva_Ts", torch.tensor(float(initial_Ts)))
-
-#     def forward(self, x, scores, k):
-#         """
-#         support both training and eval
-#         """
-#         return ShivaTopkFunc.apply(x, scores, k, self.shiva_Tk, self.shiva_Ts)
-
-
-# --- 2. nn.Module 实现 ---
-
-class ShivaPrunerExpert(nn.Module):
-    def __init__(self, T_rank: float = 1.0, T_select: float = 10.0):
-        super().__init__()
-        self.register_buffer('T_rank', torch.tensor(T_rank))
-        self.register_buffer('T_select', torch.tensor(T_select))
-
-    @staticmethod
-    def _differentiable_rank_descending(scores: torch.Tensor, 
-                                    temperature: torch.Tensor) -> torch.Tensor:
-        pairwise_diffs = scores.unsqueeze(0) - scores.unsqueeze(1)
-        soft_comparisons = torch.sigmoid(pairwise_diffs * temperature)
-        torch.fill_diagonal_(soft_comparisons, 0)
-        soft_ranks = 1 + soft_comparisons.sum(dim=1) 
-        
-        return soft_ranks
-
-    def forward(self, 
-                x: torch.Tensor, 
-                scores: torch.Tensor, 
-                k_continuous: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        执行可微分的 "软" top-k 选择。
-        
-        Args:
-            x (torch.Tensor): 要被选择的张量, [N, D]
-            scores (torch.Tensor): 用于排名的分数, [N]
-            k_continuous (torch.Tensor): 连续的 "k" 值 (e.g., N * r), 0D 张量 (标量)
-            
-        Returns:
-            x_sel_soft (torch.Tensor): 软选择的 "x", [N, D]
-            x_rej_soft (torch.Tensor): 软拒绝的 "x", [N, D]
-            selection_probs (torch.Tensor): 选择的概率/掩码, [N]
-        """
-        
-        assert scores.dim() == 1, "Scores 必须是 1D 张量 [N]"
-        assert x.shape[0] == scores.shape[0], "x 和 scores 的 N 维度必须匹配"
-        assert k_continuous.dim() == 0, "k_continuous 必须是 0D 标量"
-        
-        soft_ranks = ShivaPrunerExpert._differentiable_rank_descending(scores, self.T_rank)
-
-        z = self.T_select * (k_continuous - soft_ranks)
-        selection_probs = torch.sigmoid(z)
-        prob_mask = selection_probs.unsqueeze(-1)
-        
-        x_sel_soft = x * prob_mask
-        x_rej_soft = x * (1.0 - prob_mask)
-        
-        return x_sel_soft, x_rej_soft, selection_probs
-
-    def set_temperatures(self, T_rank: float, T_select: float):
-        self.T_rank.data.fill_(T_rank)
-        self.T_select.data.fill_(T_select)
-
 
 class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
     """
@@ -218,9 +33,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         if 'initial_kept_ratio' not in kwargs:
             kwargs['initial_kept_ratio'] = 1.0
 
-        kwargs.setdefault("initial_Tk", 30.0)
-        kwargs.setdefault("initial_Ts", 30.0)
-        kwargs.setdefault("learnable_T", True)
+        kwargs.setdefault("init_Ts", 30.0)
+        kwargs.setdefault("init_Tk", 30.0)
 
         model_dim = global_context.hidden_dim
         prompt_embed_dim = global_context.encoder_hidden_dim
@@ -344,9 +158,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         initial_kept_ratio: float = 0.5,
         use_gater_lut: bool = False,
         shared_gater_cache: torch.Tensor = None,
-        initial_Tk: float =30.0,
-        initial_Ts: float =30.0,
-        learnable_T: bool = True,
+        init_Ts: float = 30.0,
+        init_Tk: float = 30.0,
         **kwargs,
     ):
 
@@ -359,7 +172,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.router = shared_router
         self.gater = shared_gater
         self.context_pruner = shared_pruner
-        self.prune_expert = ShivaPrunerExpert(initial_Tk=initial_Tk, initial_Ts=initial_Ts, learnable_T=learnable_T)
+        self.prune_expert = ShivaPrunerExpert(init_Ts=init_Ts, init_Tk=init_Tk)
         self.fuse_expert = shared_fuse_expert
 
         self.use_gater_lut = use_gater_lut
@@ -413,7 +226,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         token_scores = torch.sigmoid(token_scores)
 
         unclamped_ratio = self.shiva_ratio
-        # Clamp with min/max for stability
         clamped_ratio = torch.clamp(unclamped_ratio, min=1e-3, max=1.0)
 
         if self.training:
@@ -425,7 +237,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         N_tensor_float = torch.tensor(N, device=k_float_unclamped.device, dtype=k_float_unclamped.dtype)
         k_float = torch.clamp(k_float_unclamped, min=1.0, max=N_tensor_float)
 
-        x_sel, x_rej, remaining_x, sel_idx = self._select_topk_and_remaining_tokens(hidden_states, token_scores, k_float, D)
+        x_sel, x_rej, remaining_x, sel_idx = self._select_topk(hidden_states, token_scores, k_float, D)
         sel_rope = self._gather_rope(image_rotary_emb, sel_idx)
 
         if self.training:
@@ -494,13 +306,12 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         else:
             return final_hidden_states
 
-    def _select_topk_and_remaining_tokens(self, x, token_scores, k, C):
+    def _select_topk(self, x, token_scores, k, C):
         x_sel, x_rej, sel_idx, rej_idx = self.prune_expert(x, token_scores, k)
         # x_selected: (B, k, C)
         # x_rejected: (B, N-k, C)
 
         # Create remaining_x = original tensor but survivors removed
-        B, N, _ = x.shape
         remaining_x = torch.zeros_like(x)
         remaining_x.scatter_(
             1, rej_idx.unsqueeze(-1).expand(-1, -1, C),
@@ -790,7 +601,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
                     layer_name = f"layer_{hook.layer_idx:02d}_Tk"
                     t_metrics_per_layer[layer_name] = t_val
-            
+
             if hasattr(hook, "prune_expert") and hasattr(hook.prune_expert, "shiva_Ts"):
                 if isinstance(hook.prune_expert.shiva_Ts, torch.nn.Parameter):
                     t_val = hook.prune_expert.shiva_Ts.item()
@@ -800,7 +611,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                     t_metrics_per_layer[layer_name] = t_val
 
         metrics = {}
-        
+
         if tk_values:
             t_tensor_k = torch.tensor(tk_values, device=device)
             metrics["shiva/pruner/avg_T_k"] = t_tensor_k.mean().item()
@@ -918,8 +729,8 @@ if __name__ == "__main__":
         "context_pruning_ratio": None,
         "initial_kept_ratio": 1.0,
         "use_gater_lut": False,
-        "initial_T": 5.0,
-        "learnable_T": True,
+        "init_Ts": 5.0,
+        "init_Tk": 5.0,
     }
 
     HookManager.configure_hooks(
