@@ -7,7 +7,7 @@ from shiva_dit.hook.delegate import BaseDelegator
 from shiva_dit.hook.block_hook import BaseDiTBlockHook
 from shiva_dit.utils import global_context
 from shiva_dit.utils.ste import ceil_ste
-from shiva_dit.utils.token_utils import parse_image_rotary_emb, join_image_rotary_emb
+from shiva_dit.utils import parse_image_rotary_emb, join_image_rotary_emb
 
 from shiva_dit.modules.router import ShivaRouter
 from shiva_dit.modules.gater import ShivaGater
