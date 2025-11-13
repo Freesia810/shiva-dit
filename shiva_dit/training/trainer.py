@@ -18,7 +18,6 @@ from baselines.diffcr import DiffCRDitBlockHook
 from baselines.dy_dit import DynamicDiTBlockHook
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from shiva_dit.hook import HookManager
-from shiva_dit.shiva import ShivaDitBlockHook
 from shiva_dit.utils import get_pipeline
 from shiva_dit.training.input_preparers import get_input_preparer
 from shiva_dit.training.config import TrainerConfig
@@ -26,6 +25,7 @@ from shiva_dit.training.dataset import ImageTextDataset, collate_fn
 from shiva_dit.training.logging import NoOpLogger
 from shiva_dit.training.metric_manager import MetricManager
 from shiva_dit.utils import global_context
+import shiva_dit.shiva_metrics as shiva_metrics
 
 
 class DiffusionModelTrainer:
@@ -445,7 +445,7 @@ class DiffusionModelTrainer:
             if self.accelerator.is_main_process:
                 print("Training mode: hook_only (only training Hook parameters)")
             self.model.requires_grad_(False)
-            
+
             hook_param_found = False
             for hook in HookManager.get_all_hooks().values():
                 if isinstance(hook, nn.Module):
@@ -462,7 +462,7 @@ class DiffusionModelTrainer:
                     raise ValueError(
                         "No trainable Hook parameters found in 'hook_only' mode."
                     )
-        
+
         elif self.config.training_mode == "finetune":
             if self.accelerator.is_main_process:
                 print("Training mode: finetune (training all DiT parameters)")
@@ -470,7 +470,7 @@ class DiffusionModelTrainer:
             for hook in HookManager.get_all_hooks().values():
                 if isinstance(hook, nn.Module):
                     hook.requires_grad_(True)
-        
+
         elif self.config.training_mode == "lora":
             if self.accelerator.is_main_process:
                 print("Training mode: lora (applying LoRA to DiT model)")
@@ -483,7 +483,7 @@ class DiffusionModelTrainer:
             for hook in HookManager.get_all_hooks().values():
                 if isinstance(hook, nn.Module):
                     hook.requires_grad_(False)
-            
+
             lora_conf = self.config.lora_config
             peft_config = PeftLoraConfig(
                 r=lora_conf.rank,
@@ -493,7 +493,7 @@ class DiffusionModelTrainer:
                 bias="none",
             )
             self.model = get_peft_model(self.model, peft_config)
-            
+
             if self.accelerator.is_main_process:
                 self.model.print_trainable_parameters()
 
@@ -511,7 +511,7 @@ class DiffusionModelTrainer:
         for name, param in self.model.named_parameters():
             if not param.requires_grad:
                 continue
-            
+
             if "lora" in name:
                 lora_params.append(param)
             elif "ratio" in name:
@@ -535,13 +535,12 @@ class DiffusionModelTrainer:
             {"params": T_params, "lr": self.config.temp_learning_rate, "weight_decay": 0.0},
             {"params": base_lr_params, "lr": self.config.learning_rate, "weight_decay": self.config.weight_decay},
         ]
-        
-        optimizer_grouped_parameters = [g for g in optimizer_grouped_parameters if g["params"]]
-        
-        if not optimizer_grouped_parameters:
-             raise ValueError("No trainable parameters found for the optimizer.")
 
-        
+        optimizer_grouped_parameters = [g for g in optimizer_grouped_parameters if g["params"]]
+
+        if not optimizer_grouped_parameters:
+            raise ValueError("No trainable parameters found for the optimizer.")
+
         if self.config.optimizer == "AdamW":
             optimizer = torch.optim.AdamW(
                 optimizer_grouped_parameters,
@@ -823,14 +822,14 @@ class DiffusionModelTrainer:
         elif self.hook_type == "shiva":
             loss_config = self._get_shiva_loss_config(global_step)
 
-            consistency_loss, c_metrics = ShivaDitBlockHook.calculate_consistency_loss(
+            consistency_loss, c_metrics = shiva_metrics.calculate_consistency_loss(
                 loss_config, self.device
             )
-            gate_loss, g_metrics = ShivaDitBlockHook.calculate_gate_loss(
+            gate_loss, g_metrics = shiva_metrics.calculate_gate_loss(
                 loss_config, self.device
             )
-            ratio_loss, r_metrics, per_layer_ratios = ShivaDitBlockHook.calculate_ratio_loss(
-                loss_config, self.device
+            ratio_loss, r_metrics, per_layer_ratios = (
+                shiva_metrics.calculate_ratio_loss(loss_config, self.device)
             )
 
             if is_hook_warmup:
@@ -845,7 +844,7 @@ class DiffusionModelTrainer:
             aggregated_metrics["shiva/ratio/target_ratio"] = loss_config["target_ratio"]
 
             avg_fuse_prob, per_layer_probs = (
-                ShivaDitBlockHook.calculate_shiva_gate_prob(self.device)
+                shiva_metrics.calculate_shiva_gate_prob(self.device)
             )
             aggregated_metrics["shiva/fuser/avg_fuse_prob"] = avg_fuse_prob.item()
             self.step_per_layer_metrics.update({
@@ -853,14 +852,14 @@ class DiffusionModelTrainer:
                 "shiva/ratio/per_layer_ratios": per_layer_ratios,
             })
 
-            router_stats = ShivaDitBlockHook.collect_router_stats(self.device)
+            router_stats = shiva_metrics.collect_router_stats(self.device)
             aggregated_metrics.update(router_stats)
 
-            fuser_stats_global, fuser_stats_per_layer = ShivaDitBlockHook.collect_fuser_stats(self.device)
+            fuser_stats_global, fuser_stats_per_layer = shiva_metrics.collect_fuser_stats(self.device)
             aggregated_metrics.update(fuser_stats_global)
             self.step_per_layer_metrics.update(fuser_stats_per_layer)
 
-            pruner_T_stats, pruner_T_stats_per_layer = ShivaDitBlockHook.collect_pruner_T_stats(self.device)
+            pruner_T_stats, pruner_T_stats_per_layer = shiva_metrics.collect_pruner_T_stats(self.device)
             aggregated_metrics.update(pruner_T_stats)
             self.step_per_layer_metrics.update(pruner_T_stats_per_layer)
 
