@@ -11,8 +11,8 @@ hook_config = {
     "use_gater_lut": False,
     "context_pruning_threshold": None,
     "context_pruning_ratio": None,
-    "init_Ts": 1.0,
-    "init_Tk": 0.2,
+    "init_Ts": 30.0,
+    "init_Tk": -7.0,
 }
 lora_config = {
     "enable": True,
@@ -69,7 +69,7 @@ trainer_config = {
     "inference_num_inference_steps": 30,
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
-    "hook_warmup_steps": 0,  # 4 epoch
+    "hook_warmup_steps": 3500,  # 4 epoch
     "extra_config": {
         "anneal_steps": 0,  # 2 epoch
         "ratio_loss_weight": 0.5,
