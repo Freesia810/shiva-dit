@@ -1,5 +1,5 @@
 from shiva_dit.training import DiffusionModelTrainer, LoraConfig, TrainerConfig
-from shiva_dit.shiva import ShivaDitBlockHook
+from shiva_dit.shiva_hook import ShivaDitBlockHook
 
 HookType = ShivaDitBlockHook
 hook_config = {

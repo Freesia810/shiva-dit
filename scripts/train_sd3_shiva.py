@@ -1,5 +1,5 @@
 from shiva_dit.training import DiffusionModelTrainer, LoraConfig, TrainerConfig
-from shiva_dit.shiva import ShivaDitBlockHook
+from shiva_dit.shiva_hook import ShivaDitBlockHook
 
 HookType = ShivaDitBlockHook
 hook_config = {
@@ -11,9 +11,8 @@ hook_config = {
     "use_gater_lut": False,
     "context_pruning_threshold": None,
     "context_pruning_ratio": None,
-    "initial_Tk": 0.2,
-    "initial_Ts": 1.0,
-    "learnable_T": True,
+    "init_Ts": 1.0,
+    "init_Tk": 0.2,
 }
 lora_config = {
     "enable": True,
