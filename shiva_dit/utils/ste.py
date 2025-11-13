@@ -65,34 +65,23 @@ class ShivaTopkFunc(torch.autograd.Function):
         soft_mask = torch.sigmoid((k - ranks_expanded) * T)  # (B, N, 1)
 
         grad_L_wrt_soft_mask_scalar = torch.sum(grad_x * x, dim=-1)  # (B, N)
-
-        grad_norm = (
-            torch.norm(grad_L_wrt_soft_mask_scalar, p=2, dim=-1, keepdim=True) + 1e-9
-        )
+        grad_norm = torch.norm(grad_L_wrt_soft_mask_scalar, p=2, dim=-1, keepdim=True) + 1e-9
         normalized_grad_scalar = grad_L_wrt_soft_mask_scalar / grad_norm
 
+        # Derivative of sigmoid((k - ranks)*T)
         d_soft_d_logits = soft_mask * (1 - soft_mask)
+        d_soft_d_scores = T * d_soft_d_logits
 
-        # (B, N, 1)
-        # d_soft_mask/d_ranks = d_soft_mask/d_logits * d_logits/d_ranks
-        # (d_logits/d_ranks = -T)
-        d_soft_d_ranks = d_soft_d_logits * (-T)
+        grad_scores = (normalized_grad_scalar.unsqueeze(-1) * d_soft_d_scores).squeeze(-1)  # (B, N)
 
-        # STE: grad_scores = dL/d_ranks = (dL/d_soft_mask) * (d_soft_mask/d_ranks)
-        # (dL/d_soft_mask approximated by normalized_grad_scalar)
-        grad_scores = (normalized_grad_scalar.unsqueeze(-1) * d_soft_d_ranks).squeeze(
-            -1
-        )  # (B, N)
-
-        # --- The rest of the code is correct ---
-        dsoft_dk = d_soft_d_logits * T  # (B, N, 1)
+        # ---- Gradients wrt k and T ----
+        dsoft_dk = d_soft_d_logits * T
         grad_k = torch.sum(normalized_grad_scalar.unsqueeze(-1) * dsoft_dk)
 
-        dsoft_dT = (k - ranks_expanded) * d_soft_d_logits  # (B, N, 1)
+        dsoft_dT = (k - ranks_expanded) * d_soft_d_logits
         grad_T = torch.sum(normalized_grad_scalar.unsqueeze(-1) * dsoft_dT)
 
         return grad_x, grad_scores, grad_k, grad_T
-
 
 ceil_ste = CeilSTE.apply
 sigmoid_ste = SigmoidSTE.apply
