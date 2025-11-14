@@ -102,9 +102,20 @@ class DiffusionModelTrainer:
 
         # Shiva ratio loss annealing
         self.scaled_hook_warmup_steps = self._scale_steps(config.hook_warmup_steps)
-        self.scaled_anneal_steps = self._scale_steps(
-            config.extra_config.get("anneal_steps", 0)
+        self.scaled_ratio_anneal_steps = self._scale_steps(
+            config.extra_config.get("ratio_anneal_steps", 0)
         )
+
+        # Shiva Temperature annealing
+        anneal_duration = config.extra_config.get("temp_anneal_steps", 0)
+        if 0 < anneal_duration <= 1.0:
+            anneal_duration_steps = int(anneal_duration * self.num_training_steps)
+        else:
+            anneal_duration_steps = int(anneal_duration)
+        if anneal_duration_steps <= 0:
+            anneal_duration_steps = self.num_training_steps
+        anneal_duration_steps = max(1, anneal_duration_steps)
+        self.scaled_temp_anneal_steps = self._scale_steps(anneal_duration_steps)
 
         # Hook-only phase
         self.scaled_hook_only_steps = self._scale_steps(config.hook_only_steps)
@@ -405,50 +416,42 @@ class DiffusionModelTrainer:
                 "shiva/router/min_score",
                 "shiva/router/max_score",
             ],
-            "shiva/pruner/temperature_K": [
-                "shiva/pruner/avg_T_k",
-                "shiva/pruner/std_T_k",
-                "shiva/pruner/min_T_k",
-                "shiva/pruner/max_T_k",
+            "shiva/pruner/temperature": [
+                "shiva/pruner/T_s",
+                "shiva/pruner/T_k",
             ],
-            "shiva/pruner/temperature_S": [
-                "shiva/pruner/avg_T_s",
-                "shiva/pruner/std_T_s",
-                "shiva/pruner/min_T_s",
-                "shiva/pruner/max_T_s",
+            "fuser/behavior_norm": [
+                "fuser/avg_discarded_norm",
+                "fuser/avg_diff_norm",
             ],
-            "shiva/fuser/behavior_norm": [
-                "shiva/fuser/avg_discarded_norm",
-                "shiva/fuser/avg_diff_norm",
+            "fuser/cosine_sim": [
+                "fuser/avg_cos_sim",
             ],
-            "shiva/fuser/cosine_sim": [
-                "shiva/fuser/avg_cos_sim",
+            "gater/gate_prob_avg": [
+                "gater/avg_fuse_prob",
             ],
-            "shiva/fuser/gate_prob_avg": [
-                "shiva/fuser/avg_fuse_prob",
+            "topkgrads/soft_ranks": [
+                "topkgrads/soft_ranks_std",
+                "topkgrads/soft_ranks_mean",
+                "topkgrads/soft_ranks_min",
+                "topkgrads/soft_ranks_max",
             ],
-            "shiva/autograd/soft_ranks": [
-                "shiva/autograd/soft_ranks_std",
-                "shiva/autograd/soft_ranks_mean",
+            "topkgrads/z_stats": [
+                "topkgrads/z_std",
+                "topkgrads/z_mean",
             ],
-            "shiva/autograd/z_stats": [
-                "shiva/autograd/z_std",
-                "shiva/autograd/z_mean",
+            "topkgrads/grad_probs": [
+                "topkgrads/grad_probs_norm",
+                "topkgrads/grad_probs_sum",
+                "topkgrads/grad_probs_std",
             ],
-            "shiva/autograd/grad_probs": [
-                "shiva/autograd/grad_probs_norm",
-                "shiva/autograd/grad_probs_sum",
-                "shiva/autograd/grad_probs_std",
+            "topkgrads/sigmoid_prime": [
+                "topkgrads/sigmoid_prime_mean",
+                "topkgrads/sigmoid_prime_std",
             ],
-            "shiva/autograd/sigmoid_prime": [
-                "shiva/autograd/sigmoid_prime_mean",
-                "shiva/autograd/sigmoid_prime_std",
-            ],
-            "grads/shiva_avg": [
-                "grads/router_avg_norm",
-                "grads/ratio_avg_norm",
-                "grads/T_s_avg_norm",
-                "grads/T_k_avg_norm",
+            "topkgrads/module": [
+                "topkgrads/router_avg_norm",
+                "topkgrads/ratio_avg_norm",
             ],
         }
 
@@ -528,7 +531,6 @@ class DiffusionModelTrainer:
 
         lora_params = []
         ratio_params = []
-        T_params = []
         other_model_params = []
 
         for name, param in self.model.named_parameters():
@@ -539,8 +541,6 @@ class DiffusionModelTrainer:
                 lora_params.append(param)
             elif "ratio" in name:
                 ratio_params.append(param)
-            elif "shiva_T" in name:
-                T_params.append(param)
             else:
                 other_model_params.append(param)
 
@@ -549,13 +549,11 @@ class DiffusionModelTrainer:
         if self.accelerator.is_main_process:
             print(f"Optimizing {len(lora_params)} LoRA params with LR: {self.config.lora_learning_rate}")
             print(f"Optimizing {len(ratio_params)} Ratio params with LR: {self.config.ratio_learning_rate}")
-            print(f"Optimizing {len(T_params)} T params with LR: {self.config.temp_learning_rate}")
             print(f"Optimizing {len(base_lr_params)} other params with LR: {self.config.learning_rate}")
 
         optimizer_grouped_parameters = [
             {"params": lora_params, "lr": self.config.lora_learning_rate, "weight_decay": self.config.weight_decay},
             {"params": ratio_params, "lr": self.config.ratio_learning_rate, "weight_decay": 0.0},
-            {"params": T_params, "lr": self.config.temp_learning_rate, "weight_decay": 0.0},
             {"params": base_lr_params, "lr": self.config.learning_rate, "weight_decay": self.config.weight_decay},
         ]
 
@@ -801,7 +799,7 @@ class DiffusionModelTrainer:
             return min(1.0, progress)
 
         anneal_factor = get_annealing_weight(
-            global_step, self.scaled_hook_warmup_steps, self.scaled_anneal_steps
+            global_step, self.scaled_hook_warmup_steps, self.scaled_ratio_anneal_steps
         )
 
         base_lambda = self.config.extra_config["ratio_loss_weight"]
@@ -869,9 +867,9 @@ class DiffusionModelTrainer:
             avg_fuse_prob, per_layer_probs = (
                 shiva_metrics.calculate_shiva_gate_prob(self.device)
             )
-            aggregated_metrics["shiva/fuser/avg_fuse_prob"] = avg_fuse_prob.item()
+            aggregated_metrics["gater/avg_fuse_prob"] = avg_fuse_prob.item()
             self.step_per_layer_metrics.update({
-                "shiva/fuser/per_layer_fuse_prob": per_layer_probs,
+                "gater/per_layer_fuse_prob": per_layer_probs,
                 "shiva/ratio/per_layer_ratios": per_layer_ratios,
             })
 
@@ -882,9 +880,8 @@ class DiffusionModelTrainer:
             aggregated_metrics.update(fuser_stats_global)
             self.step_per_layer_metrics.update(fuser_stats_per_layer)
 
-            pruner_T_stats, pruner_T_stats_per_layer = shiva_metrics.collect_pruner_T_stats(self.device)
+            pruner_T_stats = shiva_metrics.collect_pruner_T_stats(self.device)
             aggregated_metrics.update(pruner_T_stats)
-            self.step_per_layer_metrics.update(pruner_T_stats_per_layer)
 
             autograd_stats = shiva_metrics.collect_autograd_stats(self.device)
             aggregated_metrics.update(autograd_stats)
@@ -1051,19 +1048,11 @@ class DiffusionModelTrainer:
                         router_grad_norms.append(grad_norm)
                     elif "shiva_ratio" in name:
                         ratio_grad_norms.append(grad_norm)
-                    elif "shiva_T_s" in name:
-                        Ts_grad_norms.append(grad_norm)
-                    elif "shiva_T_k" in name:
-                        Tk_grad_norms.append(grad_norm)
 
                 if router_grad_norms:
-                    shiva_grad_metrics["grads/router_avg_norm"] = sum(router_grad_norms) / len(router_grad_norms)
+                    shiva_grad_metrics["topkgrads/router_avg_norm"] = sum(router_grad_norms) / len(router_grad_norms)
                 if ratio_grad_norms:
-                    shiva_grad_metrics["grads/ratio_avg_norm"] = sum(ratio_grad_norms) / len(ratio_grad_norms)
-                if Ts_grad_norms:
-                    shiva_grad_metrics["grads/T_s_avg_norm"] = sum(Ts_grad_norms) / len(Ts_grad_norms)
-                if Tk_grad_norms:
-                    shiva_grad_metrics["grads/T_k_avg_norm"] = sum(Tk_grad_norms) / len(Tk_grad_norms)
+                    shiva_grad_metrics["topkgrads/ratio_avg_norm"] = sum(ratio_grad_norms) / len(ratio_grad_norms)
 
                 metrics_to_log.update(shiva_grad_metrics)
 
@@ -1450,6 +1439,20 @@ class DiffusionModelTrainer:
                     self.optimizer.step()
                     self.lr_scheduler.step()
                     self.global_step += 1
+
+                    if self.hook_type == "shiva":
+                        final_Ts = self.config.extra_config.get("final_Ts", 1.0)
+                        final_Tk = self.config.extra_config.get("final_Tk", 1.0)
+                        anneal_schedule = self.config.extra_config.get("temp_anneal_schedule", "cosine")
+                        for hook in HookManager.get_all_hooks().values():
+                            if hook.__class__.__name__ == "ShivaDitBlockHook":
+                                hook.step_annealing(
+                                    current_step=self.global_step,
+                                    total_steps=self.scaled_temp_anneal_steps,
+                                    final_Ts=final_Ts,
+                                    final_Tk=final_Tk,
+                                    schedule=anneal_schedule
+                                )
 
                     self._trigger_phase()
 

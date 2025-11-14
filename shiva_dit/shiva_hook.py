@@ -42,6 +42,10 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.prune_expert = ShivaPrunerExpert(init_Ts=init_Ts, init_Tk=init_Tk)
         self.fuse_expert = shared_fuse_expert
 
+        # for annealing
+        self.init_Ts = float(init_Ts)
+        self.init_Tk = float(init_Tk)
+
         self.use_gater_lut = use_gater_lut
         self.gater_cache = shared_gater_cache
 
@@ -63,6 +67,33 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         self.k_accumulator = []
         self.n_minus_k_accumulator = []
+    
+    @torch.no_grad()
+    def step_annealing(
+        self,
+        current_step: int,
+        total_steps: int,
+        final_Ts: float = 1.0,
+        final_Tk: float = 1.0,
+        schedule: str = "cosine"
+    ):
+        if current_step > total_steps:
+            current_step = total_steps
+        
+        if schedule == "linear":
+            ratio = current_step / total_steps
+        elif schedule == "cosine":
+            # Cosine annealing
+            ratio = 0.5 * (1.0 + torch.cos(torch.tensor(torch.pi * current_step / total_steps)))
+            ratio = 1.0 - ratio 
+        else:
+            raise ValueError(f"Unknown annealing schedule: {schedule}")
+
+        new_Ts = self.init_Ts + (final_Ts - self.init_Ts) * ratio
+        new_Tk = self.init_Tk + (final_Tk - self.init_Tk) * ratio
+
+        self.prune_expert.shiva_Ts.fill_(new_Ts)
+        self.prune_expert.shiva_Tk.fill_(new_Tk)
 
     def delegated_call(self, func, module_self, *args, **kwargs):
         (
@@ -132,7 +163,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         token_scores = torch.sigmoid(token_scores)
 
         unclamped_ratio = self.shiva_ratio
-        clamped_ratio = torch.clamp(unclamped_ratio, min=1e-3, max=1.0)
+        clamped_ratio = torch.clamp(unclamped_ratio, min=1e-3)
 
         if self.training:
             k_float_unclamped = ceil_ste(clamped_ratio * N)
@@ -143,7 +174,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         N_tensor_float = torch.tensor(
             N, device=k_float_unclamped.device, dtype=k_float_unclamped.dtype
         )
-        k_float = torch.clamp(k_float_unclamped, min=1.0, max=N_tensor_float)
+        k_float = torch.clamp(k_float_unclamped, min=1.0)
 
         x_sel, x_rej, remaining_x, sel_idx = self._select_topk(
             hidden_states, token_scores, k_float, D

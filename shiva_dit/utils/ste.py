@@ -103,8 +103,8 @@ class ShivaTopkFunc(torch.autograd.Function):
         # --- dL/d(scores), dL/d(k), dL/d(T) ---
         scores_detached = scores.detach().requires_grad_(True)
         k_detached = k_float.detach().requires_grad_(True)
-        Ts_detached = Ts.detach().requires_grad_(True)
-        Tk_detached = Tk.detach().requires_grad_(True)
+        Ts_detached = Ts
+        Tk_detached = Tk
 
         with torch.enable_grad():
             T_rank = F.softplus(Ts_detached)
@@ -144,12 +144,15 @@ class ShivaTopkFunc(torch.autograd.Function):
                         "grad_std": sigmoid_prime.std().item(),
                     }
 
-        selection_probs.backward(gradient=grad_probs)
+        grads = torch.autograd.grad(
+            outputs=selection_probs,
+            inputs=[scores_detached, k_detached],
+            grad_outputs=grad_probs,
+            allow_unused=True
+        )
 
-        grad_scores = scores_detached.grad
-        grad_k = k_detached.grad
-        grad_Ts = Ts_detached.grad
-        grad_Tk = Tk_detached.grad
+        grad_scores = grads[0]
+        grad_k = grads[1]
 
         return grad_x, grad_scores, grad_k, grad_Ts, grad_Tk
 

@@ -3,7 +3,7 @@ from shiva_dit.shiva_hook import ShivaDitBlockHook
 
 HookType = ShivaDitBlockHook
 hook_config = {
-    "initial_kept_ratio": 0.99,
+    "initial_kept_ratio": 0.8,
     "num_router_groups": 4,
     "bottleneck_dim": 64,
     "layer_embed_dim": 64,
@@ -11,7 +11,7 @@ hook_config = {
     "use_gater_lut": False,
     "context_pruning_threshold": None,
     "context_pruning_ratio": None,
-    "init_Ts": 30.0,
+    "init_Ts": 1.0,
     "init_Tk": -7.0,
 }
 lora_config = {
@@ -69,17 +69,22 @@ trainer_config = {
     "inference_num_inference_steps": 30,
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
-    "hook_warmup_steps": 3500,  # 4 epoch
+    "hook_warmup_steps": 1750,  # 4 epoch
     "extra_config": {
-        "anneal_steps": 0,  # 2 epoch
+        "ratio_anneal_steps": 0,  # 2 epoch
         "ratio_loss_weight": 0.3,
         "target_ratio": 0.8,
         "schedule_steps": [10500, 26250],  # 6 epoch, 15 epoch
         "gate_schedule": [0.1, 0.05, 0.01],
         "consistency_schedule": [1e-9, 1e-4, 0.01],
+        
+        "temp_anneal_steps": 87500,
+        "temp_anneal_schedule": "cosine",
+        "final_Ts": 30.0,
+        "final_Tk": 30.0,
     },
     "log_with_tensorboard": True,
-    "log_with_wandb": True,
+    "log_with_wandb": False,
     "wandb_project": "shiva-dit",
     "wandb_run_name": "sd3-shiva",
     "log_with_mlflow": False,
