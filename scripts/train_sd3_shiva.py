@@ -11,7 +11,7 @@ hook_config = {
     "use_gater_lut": False,
     "context_pruning_threshold": None,
     "context_pruning_ratio": None,
-    "init_Ts": 1.0,
+    "init_Ts": 0.0,
     "init_Tk": -7.0,
 }
 lora_config = {
@@ -84,7 +84,7 @@ trainer_config = {
         "final_Tk": 30.0,
     },
     "log_with_tensorboard": True,
-    "log_with_wandb": False,
+    "log_with_wandb": True,
     "wandb_project": "shiva-dit",
     "wandb_run_name": "sd3-shiva",
     "log_with_mlflow": False,
