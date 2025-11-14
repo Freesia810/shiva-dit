@@ -3,7 +3,7 @@ from shiva_dit.shiva_hook import ShivaDitBlockHook
 
 HookType = ShivaDitBlockHook
 hook_config = {
-    "initial_kept_ratio": 1.0,
+    "initial_kept_ratio": 0.99,
     "num_router_groups": 4,
     "bottleneck_dim": 64,
     "layer_embed_dim": 64,
@@ -72,7 +72,7 @@ trainer_config = {
     "hook_warmup_steps": 3500,  # 4 epoch
     "extra_config": {
         "anneal_steps": 0,  # 2 epoch
-        "ratio_loss_weight": 0.5,
+        "ratio_loss_weight": 0.3,
         "target_ratio": 0.8,
         "schedule_steps": [10500, 26250],  # 6 epoch, 15 epoch
         "gate_schedule": [0.1, 0.05, 0.01],
