@@ -47,7 +47,6 @@ trainer_config = {
     "learning_rate": 1e-4,
     "lora_learning_rate": 1e-4,
     "ratio_learning_rate": 1e-4,
-    "temp_learning_rate": 1e-4,
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
     "lr_scheduler": "cosine",  # "linear", "cosine", "constant"
