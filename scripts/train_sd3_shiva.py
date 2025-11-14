@@ -3,7 +3,7 @@ from shiva_dit.shiva_hook import ShivaDitBlockHook
 
 HookType = ShivaDitBlockHook
 hook_config = {
-    "initial_kept_ratio": 0.8,
+    "initial_kept_ratio": 0.999,
     "num_router_groups": 4,
     "bottleneck_dim": 64,
     "layer_embed_dim": 64,
@@ -41,7 +41,7 @@ trainer_config = {
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
     "caption_dropout_rate": 0.25,
-    "num_epochs": 500,
+    "num_epochs": 50,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16,
     "learning_rate": 1e-4,
@@ -69,10 +69,10 @@ trainer_config = {
     "inference_num_inference_steps": 30,
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
-    "hook_warmup_steps": 1750,  # 4 epoch
+    "hook_warmup_steps": 0,  # 4 epoch
     "extra_config": {
-        "ratio_anneal_steps": 0,  # 2 epoch
-        "ratio_loss_weight": 0.3,
+        "ratio_anneal_steps": 3500,  # 2 epoch
+        "ratio_loss_weight": 0.5,
         "target_ratio": 0.8,
         "schedule_steps": [10500, 26250],  # 6 epoch, 15 epoch
         "gate_schedule": [0.1, 0.05, 0.01],
