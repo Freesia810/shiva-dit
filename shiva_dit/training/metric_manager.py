@@ -24,14 +24,17 @@ class MetricManager:
         self.grouping_rules = grouping_rules if grouping_rules is not None else {}
         self.metrics_cache = {}
 
-    def update(self, metrics_dict: dict):
-        try:
-            gathered_metrics = self.accelerator.gather_for_metrics(metrics_dict)
-        except Exception as e:
-            if self.accelerator.is_main_process:
-                print(
-                    f"Warning: Metric gathering failed (Error: {e}). Logging main process metrics only."
-                )
+    def update(self, metrics_dict: dict, gather: bool = False):
+        if gather:
+            try:
+                gathered_metrics = self.accelerator.gather_for_metrics(metrics_dict)
+            except Exception as e:
+                if self.accelerator.is_main_process:
+                    print(
+                        f"Warning: Metric gathering failed (Error: {e}). Logging main process metrics only."
+                    )
+                gathered_metrics = metrics_dict
+        else:
             gathered_metrics = metrics_dict
 
         if not self.accelerator.is_main_process:

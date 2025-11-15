@@ -977,7 +977,7 @@ class DiffusionModelTrainer:
 
             metrics_to_log_tensors.update(shiva_grad_metrics)
 
-        self.metric_manager.update(metrics_to_log_tensors)
+        self.metric_manager.update(metrics_to_log_tensors, gather=True)
 
         if self.accelerator.is_main_process:
             stateful_metrics_to_log = {}
