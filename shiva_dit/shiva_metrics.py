@@ -146,7 +146,7 @@ def calculate_shiva_gate_prob(device: torch.device) -> tuple[torch.Tensor, dict]
             gate_probs_per_hook.append(avg_prob_for_hook)
 
             layer_name = f"layer_{hook.layer_idx:02d}"
-            gate_probs_per_layer[layer_name] = avg_prob_for_hook.item()
+            gate_probs_per_layer[layer_name] = avg_prob_for_hook
 
         hook.gater_fuse_prob_accumulator.clear()
 
