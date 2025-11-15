@@ -858,8 +858,7 @@ class DiffusionModelTrainer:
         )
         self.accelerator.backward(total_loss)
 
-        if self.accelerator.is_main_process:
-            self.step_metrics = hook_metrics
+        self.step_metrics = hook_metrics
 
         return (
             total_loss.detach(),
@@ -902,30 +901,91 @@ class DiffusionModelTrainer:
         if save_trigger and self.global_step % save_trigger == 0:
             self.maybe_save_periodically()
 
-        if self.accelerator.is_main_process:
-            metrics_to_log = self.step_metrics.copy()
+        metrics_to_log_tensors = self.step_metrics.copy()
 
-            if self.config.training_mode == 'lora':
-                lora_params = [
-                    p for n, p in self.model.named_parameters() if "lora_" in n
-                ]
+        metrics_to_log_tensors.update({
+            "train/total_loss": gathered_losses["total"],
+            "train/main_loss": gathered_losses["main"],
+            "train/extra_loss": gathered_losses["hook"],
+            "train/distill_loss": gathered_losses["distill"],
+            "train/lr": torch.tensor(self.lr_scheduler.get_last_lr()[0], device=self.device),
+        })
 
+        if self.config.training_mode == 'lora':
+            lora_params = [
+                p for n, p in self.model.named_parameters() if "lora_" in n
+            ]
+            if lora_params:
                 lora_norm = torch.norm(
                     torch.stack([torch.norm(p.detach()) for p in lora_params])
-                ).item()
-
+                )
                 lora_grads = [
                     torch.norm(p.grad.detach())
                     for p in lora_params
                     if p.grad is not None
                 ]
+                lora_grad_norm = torch.norm(torch.stack(lora_grads)) if lora_grads else torch.tensor(0.0, device=self.device)
+                metrics_to_log_tensors.update({
+                    "lora/param_norm": lora_norm, 
+                    "lora/grad_norm": lora_grad_norm, 
+                })
+        elif self.config.training_mode == "finetune":
+            all_trainable_params = [
+                p for p in self.model.parameters() if p.requires_grad
+            ]
+            if all_trainable_params:
+                param_norm = torch.norm(
+                    torch.stack([torch.norm(p.detach()) for p in all_trainable_params])
+                )
+                param_grads = [
+                    torch.norm(p.grad.detach())
+                    for p in all_trainable_params
+                    if p.grad is not None
+                ]
+                grad_norm = torch.norm(torch.stack(param_grads)) if param_grads else torch.tensor(0.0, device=self.device)
+                metrics_to_log_tensors.update({
+                    "finetune/param_norm": param_norm, 
+                    "finetune/grad_norm": grad_norm, 
+                })
 
-                if len(lora_grads) > 0:
-                    lora_grad_norm = torch.norm(torch.stack(lora_grads)).item()
-                else:
-                    lora_grad_norm = 0.0
+        if self.hook_type == "shiva":
+            shiva_grad_metrics = {}
+            router_grad_norms = []
+            gater_policy_grad_norms = []
+            ratio_policy_grad_norms = []
 
-                if self.prev_lora_state is not None:
+            unwrapped_model = self.accelerator.unwrap_model(self.model)
+            for name, param in unwrapped_model.named_parameters():
+                if param.grad is None:
+                    continue
+                
+                grad_norm_tensor = torch.norm(param.grad.detach())
+
+                if "router." in name:
+                    router_grad_norms.append(grad_norm_tensor)
+                elif "gater_policy." in name:
+                    gater_policy_grad_norms.append(grad_norm_tensor)
+                elif "ratio_policy." in name:
+                    ratio_policy_grad_norms.append(grad_norm_tensor)
+
+            if router_grad_norms:
+                shiva_grad_metrics["topkgrads/router_avg_norm"] = torch.stack(router_grad_norms).mean()
+            if gater_policy_grad_norms:
+                shiva_grad_metrics["topkgrads/gater_policy_avg_norm"] = torch.stack(gater_policy_grad_norms).mean()
+            if ratio_policy_grad_norms:
+                shiva_grad_metrics["topkgrads/ratio_policy_avg_norm"] = torch.stack(ratio_policy_grad_norms).mean()
+
+            metrics_to_log_tensors.update(shiva_grad_metrics)
+
+        self.metric_manager.update(metrics_to_log_tensors)
+
+        if self.accelerator.is_main_process:
+            stateful_metrics_to_log = {}
+            if self.config.training_mode == 'lora':
+                lora_params = [
+                    p for n, p in self.model.named_parameters() if "lora_" in n
+                ]
+                if self.prev_lora_state is not None and lora_params:
                     deltas = [
                         torch.norm(p.detach().cpu() - self.prev_lora_state[i])
                         for i, p in enumerate(lora_params)
@@ -934,27 +994,14 @@ class DiffusionModelTrainer:
                 else:
                     lora_delta = 0.0
                 self.prev_lora_state = [p.detach().cpu().clone() for p in lora_params]
-                metrics_to_log.update({
-                    "lora/param_norm": lora_norm, 
-                    "lora/grad_norm": lora_grad_norm, 
+                stateful_metrics_to_log.update({
                     "lora/param_delta": lora_delta
                 })
             elif self.config.training_mode == "finetune":
                 all_trainable_params = [
                     p for p in self.model.parameters() if p.requires_grad
                 ]
-                param_norm = torch.norm(
-                    torch.stack([torch.norm(p.detach()) for p in all_trainable_params])
-                ).item()
-                param_grads = [
-                    torch.norm(p.grad.detach())
-                    for p in all_trainable_params
-                    if p.grad is not None
-                ]
-                grad_norm = (
-                    torch.norm(torch.stack(param_grads)).item() if param_grads else 0.0
-                )
-                if self.prev_finetune_state is not None:
+                if self.prev_finetune_state is not None and all_trainable_params:
                     deltas = [
                         torch.norm(p.detach().cpu() - self.prev_finetune_state[i])
                         for i, p in enumerate(all_trainable_params)
@@ -966,52 +1013,14 @@ class DiffusionModelTrainer:
                 self.prev_finetune_state = [
                     p.detach().cpu().clone() for p in all_trainable_params
                 ]
-                metrics_to_log.update({
-                    "finetune/param_norm": param_norm, 
-                    "finetune/grad_norm": grad_norm, 
+                stateful_metrics_to_log.update({
                     "finetune/param_delta": param_delta
                 })
 
-            if self.hook_type == "shiva":
-                shiva_grad_metrics = {}
-                router_grad_norms = []
-
-                gater_policy_grad_norms = []
-                ratio_policy_grad_norms = []
-
-                unwrapped_model = self.accelerator.unwrap_model(self.model)
-                for name, param in unwrapped_model.named_parameters():
-                    if param.grad is None:
-                        continue
-
-                    grad_norm = torch.norm(param.grad.detach()).item()
-
-                    if "router." in name:
-                        router_grad_norms.append(grad_norm)
-                    elif "gater_policy." in name:
-                        gater_policy_grad_norms.append(grad_norm)
-                    elif "ratio_policy." in name:
-                        ratio_policy_grad_norms.append(grad_norm)
-
-                if router_grad_norms:
-                    shiva_grad_metrics["topkgrads/router_avg_norm"] = sum(router_grad_norms) / len(router_grad_norms)
-                if gater_policy_grad_norms:
-                    shiva_grad_metrics["topkgrads/gater_policy_avg_norm"] = sum(gater_policy_grad_norms) / len(gater_policy_grad_norms)
-                if ratio_policy_grad_norms:
-                    shiva_grad_metrics["topkgrads/ratio_policy_avg_norm"] = sum(ratio_policy_grad_norms) / len(ratio_policy_grad_norms)
-
-                metrics_to_log.update(shiva_grad_metrics)
-
-            metrics_to_log.update({
-                "train/total_loss": gathered_losses["total"].item(),
-                "train/main_loss": gathered_losses["main"].item(),
-                "train/extra_loss": gathered_losses["hook"].item(),
-                "train/distill_loss": gathered_losses["distill"].item(),
-                "train/lr": self.lr_scheduler.get_last_lr()[0],
-            })
-
-            self.metric_manager.update(metrics_to_log)
+            if stateful_metrics_to_log:
+                self.metric_manager.update(stateful_metrics_to_log)
             self.metric_manager.log_step(self.global_step)
+            
             if hasattr(self, "step_per_layer_metrics"):
                 for key, value_dict in self.step_per_layer_metrics.items():
                     if value_dict:
@@ -1019,16 +1028,16 @@ class DiffusionModelTrainer:
 
             if self.global_step % log_trigger == 0:
                 postfix_dict = {
-                    "loss": f"{gathered_losses['total'].item():.4f}",
-                    "main_loss": f"{gathered_losses['main'].item():.4f}",
-                    "extra_loss": f"{gathered_losses['hook'].item():.4f}",
-                    "distill_loss": f"{gathered_losses['distill'].item():.4f}",
-                    "lr": f"{self.lr_scheduler.get_last_lr()[0]:.2e}",
+                    "loss": f"{self.metric_manager.get_metric('train/total_loss'):.4f}",
+                    "main_loss": f"{self.metric_manager.get_metric('train/main_loss'):.4f}",
+                    "extra_loss": f"{self.metric_manager.get_metric('train/extra_loss'):.4f}",
+                    "distill_loss": f"{self.metric_manager.get_metric('train/distill_loss'):.4f}",
+                    "lr": f"{self.metric_manager.get_metric('train/lr'):.2e}",
                     "step": self.global_step,
                 }
 
                 if self.hook_type == "shiva":
-                    postfix_dict["ratio_loss"] = f"{self.metric_manager.get_metric('shiva/ratio/ratio_loss'):.4f}"
+                    postfix_dict["ratio_loss"] = f"{self.metric_manager.get_metric('loss/ratio/ratio_loss', 0.0):.4f}"
 
                 progress_bar.set_postfix(postfix_dict)
 
