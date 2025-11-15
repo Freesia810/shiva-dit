@@ -124,7 +124,7 @@ def calculate_ratio_loss(
 
         metrics = {
             "adaptive_ratio/avg_ratio": avg_ratio_metric,
-            "adaptive_ratio/target_ratio": current_target_ratio,
+            "adaptive_ratio/target_ratio": target_ratio_tensor,
             "loss/ratio/ratio_loss_raw": mse_loss,
             "loss/ratio/ratio_loss": final_loss,
         }
