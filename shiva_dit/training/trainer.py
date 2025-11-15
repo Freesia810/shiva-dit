@@ -811,20 +811,27 @@ class DiffusionModelTrainer:
 
         router_stats = shiva_metrics.collect_router_stats(self.device)
         aggregated_metrics.update(router_stats)
-        
+
         autograd_stats = shiva_metrics.collect_autograd_stats(self.device)
         aggregated_metrics.update(autograd_stats)
-        
+
+        per_t_layer_ratios = [{} for _ in range(10)]
+        per_t_layer_fuse_probs = [{} for _ in range(10)]
         try:
             t_int = int(timestep[0].item())
             t_group = min(t_int // 100, 9)
-            
+
             for layer_id, ratio_val in per_layer_ratios.items():
-                aggregated_metrics[f"policy/adaptive_ratio/t_group_{t_group}_layer_{layer_id}"] = ratio_val
+                per_t_layer_ratios[t_group][layer_id] = ratio_val
             for layer_id, prob_val in per_layer_probs.items():
-                aggregated_metrics[f"policy/adaptive_fuse_prob/t_group_{t_group}_layer_{layer_id}"] = prob_val
+                per_t_layer_fuse_probs[t_group][layer_id] = prob_val
         except Exception:
             pass
+        for i in range(10):
+            self.step_per_layer_metrics.update({
+                f"policy/adaptive_ratio/t_group_{i}": per_t_layer_ratios[i],
+                f"policy/adaptive_fuse_prob/t_group_{i}": per_t_layer_fuse_probs[i],
+            })
 
         return total_hook_loss, aggregated_metrics
 
@@ -1139,7 +1146,7 @@ class DiffusionModelTrainer:
                 if "validation/policy/adaptive_ratio/avg_ratio" in val_metrics_to_log:
                     print(f"  Avg Ratio (Val): {val_metrics_to_log['validation/policy/adaptive_ratio/avg_ratio']:.4f}")
                 if "validation/policy/adaptive_fuse_prob/avg_fuse_prob" in val_metrics_to_log:
-                     print(f"  Avg Fuse Prob (Val): {val_metrics_to_log['validation/policy/adaptive_fuse_prob/avg_fuse_prob']:.4f}")
+                    print(f"  Avg Fuse Prob (Val): {val_metrics_to_log['validation/policy/adaptive_fuse_prob/avg_fuse_prob']:.4f}")
                 print(f"--------------------------------------")
 
                 self.logger.log_scalars(
@@ -1154,7 +1161,7 @@ class DiffusionModelTrainer:
 
                 if val_metrics_to_log:
                     self.logger.log_scalars(val_metrics_to_log, step=global_step)
-                    
+
                 if hasattr(self, "step_per_layer_metrics"):
                     for key, value_dict in self.step_per_layer_metrics.items():
                         if value_dict:
