@@ -39,7 +39,7 @@ class MetricManager:
 
         for k, v in gathered_metrics.items():
             if isinstance(v, torch.Tensor):
-                self.metrics_cache[k] = v.detach().item()
+                self.metrics_cache[k] = v.mean().detach().item()
             elif isinstance(v, (float, int)):
                 self.metrics_cache[k] = v
 
