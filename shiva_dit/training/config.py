@@ -51,16 +51,14 @@ class TrainerConfig:
     lora_learning_rate: float = field(
         default=1e-6, metadata={"help": "Learning rate for LoRA parameters."}
     )
-    ratio_learning_rate: float = field(
-        default=1e-4, metadata={"help": "Learning rate for ratio parameters (merge/prune)."}
+    policy_learning_rate: float = field(
+        default=1e-4,
+        metadata={"help": "Learning rate for policy parameters (ratio/gate)."},
     )
     optimizer: str = "AdamW" # "Adam", "AdamW", "SGD"
     weight_decay: float = 1e-2
     lr_scheduler: str = "cosine" # "linear", "cosine", "constant"
-    num_warmup_steps: int = None
-
-    main_loss_weight: float = 1.0
-    hook_loss_weight: float = 0.1
+    scheduler_num_warmup_steps: int = None
 
     seed: int = 42
     logging_steps: int = 50

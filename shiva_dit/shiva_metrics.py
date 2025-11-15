@@ -16,48 +16,6 @@ def _get_shiva_hooks():
             yield hook
 
 
-def calculate_consistency_loss(config: dict, device: torch.device) -> torch.Tensor:
-    consistency_loss = []
-
-    for hook in _get_shiva_hooks():
-        prune_list = hook.prune_output_accumulator
-        fuse_list = hook.fuse_output_accumulator
-
-        if prune_list and fuse_list:
-            assert len(prune_list) == len(
-                fuse_list
-            ), "Prune/Fuse accumulator length mismatch"
-
-            micro_batch_losses = []
-            for prune_out, fuse_out in zip(prune_list, fuse_list):
-                loss = F.mse_loss(
-                    prune_out.detach().to(torch.float32),
-                    fuse_out.to(torch.float32),
-                )
-                micro_batch_losses.append(loss)
-
-            if micro_batch_losses:
-                avg_loss_for_hook = torch.stack(micro_batch_losses).mean()
-                consistency_loss.append(avg_loss_for_hook)
-                device = avg_loss_for_hook.device
-
-        hook.prune_output_accumulator.clear()
-        hook.fuse_output_accumulator.clear()
-
-    metrics = {
-        "shiva/gater/consistency_loss_raw": 0.0,
-        "shiva/gater/consistency_loss": 0.0,
-    }
-    loss_weight = config["consistency_loss_weight"]
-    if consistency_loss:
-        raw_loss = torch.stack(consistency_loss).mean()
-        final_loss = raw_loss * loss_weight
-        metrics["shiva/gater/consistency_loss_raw"] = raw_loss.item()
-        metrics["shiva/gater/consistency_loss"] = final_loss.item()
-        return final_loss, metrics
-    else:
-        return torch.tensor(0.0, device=device), metrics
-
 def calculate_diversity_loss(config: dict, device: torch.device) -> torch.Tensor:
     diversity_losses = []
 
@@ -72,17 +30,17 @@ def calculate_diversity_loss(config: dict, device: torch.device) -> torch.Tensor
         hook.diversity_loss_accumulator.clear()
 
     metrics = {
-        "shiva/router/diversity_loss_raw": 0.0,
-        "shiva/router/diversity_loss": 0.0,
+        "loss/router/diversity_loss_raw": 0.0,
+        "loss/router/diversity_loss": 0.0,
     }
-    
+
     loss_weight = config.get("diversity_loss_weight", 0.0)
-    
+
     if diversity_losses:
         raw_loss = torch.stack(diversity_losses).mean()
         final_loss = raw_loss * loss_weight
-        metrics["shiva/router/diversity_loss_raw"] = raw_loss.item()
-        metrics["shiva/router/diversity_loss"] = final_loss.item()
+        metrics["loss/router/diversity_loss_raw"] = raw_loss.item()
+        metrics["loss/router/diversity_loss"] = final_loss.item()
         return final_loss, metrics
     else:
         return torch.tensor(0.0, device=device), metrics
@@ -101,79 +59,79 @@ def calculate_gate_loss(config: dict, device: torch.device) -> torch.Tensor:
         hook.gate_loss_accumulator.clear()
 
     metrics = {
-        "shiva/gater/gate_loss_raw": 0.0,
-        "shiva/gater/gate_loss": 0.0,
+        "loss/gater/gate_loss_raw": 0.0,
+        "loss/gater/gate_loss": 0.0,
     }
     loss_weight = config["gate_loss_weight"]
     if gate_losses:
         raw_loss = torch.stack(gate_losses).mean()
         final_loss = raw_loss * loss_weight
-        metrics["shiva/gater/gate_loss_raw"] = raw_loss.item()
-        metrics["shiva/gater/gate_loss"] = final_loss.item()
+        metrics["loss/gater/gate_loss_raw"] = raw_loss.item()
+        metrics["loss/gater/gate_loss"] = final_loss.item()
         return final_loss, metrics
     else:
         return torch.tensor(0.0, device=device), metrics
 
-
 def calculate_ratio_loss(
     config: dict, device: torch.device
-) -> tuple[torch.Tensor, dict]:
-    
+) -> tuple[torch.Tensor, dict, dict]:
+
     ratios_per_layer = {}
     ratios_for_loss = []
     ratios_for_logging = []
 
     for hook in _get_shiva_hooks():
         layer_name = f"layer_{hook.layer_idx:02d}"
-        
-        current_ratio_unclamped = hook.shiva_ratio 
-        ratios_for_loss.append(current_ratio_unclamped)
 
-        current_ratio_clamped = torch.clamp(current_ratio_unclamped.detach(), min=1e-9, max=1.0)
-        ratios_per_layer[layer_name] = current_ratio_clamped.item()
-        ratios_for_logging.append(current_ratio_clamped)
+        accumulator = hook.ratio_accumulator
 
+        if accumulator:
+            avg_ratio_for_hook = torch.stack(accumulator).mean()
+            ratios_for_loss.append(avg_ratio_for_hook)
+
+            avg_ratio_item = avg_ratio_for_hook.detach().item()
+            ratios_per_layer[layer_name] = avg_ratio_item
+            ratios_for_logging.append(avg_ratio_item)
+
+        hook.ratio_accumulator.clear()
 
     metrics = {
-        "shiva/ratio/avg_ratio": 0.0,
-        "shiva/ratio/std_ratio": 0.0,
-        "shiva/ratio/ratio_loss_raw": 0.0,
-        "shiva/ratio/ratio_loss": 0.0,
+        "policy/adaptive_ratio/avg_ratio": 0.0,
+        "policy/adaptive_ratio/target_ratio": 0.0,
+        "loss/ratio/ratio_loss_raw": 0.0,
+        "loss/ratio/ratio_loss": 0.0,
     }
 
     loss_weight = config["ratio_loss_weight"]
     current_target_ratio = config["target_ratio"]
-    
+
     if ratios_for_loss:
         ratios_tensor_loss = torch.stack(ratios_for_loss)
         avg_ratio_loss = torch.mean(ratios_tensor_loss)
-        
+
         target_ratio_tensor = torch.tensor(
             current_target_ratio, device=device, dtype=avg_ratio_loss.dtype
         )
         mse_loss = F.mse_loss(avg_ratio_loss, target_ratio_tensor)
         final_loss = mse_loss * loss_weight
-        
+
         with torch.no_grad():
-            if not ratios_for_logging:
-                ratios_tensor_logging = ratios_tensor_loss.detach()
+            if ratios_for_logging:
+                ratios_tensor_logging = torch.tensor(ratios_for_logging, device=device)
+                avg_ratio_metric = torch.mean(ratios_tensor_logging)
             else:
-                ratios_tensor_logging = torch.stack(ratios_for_logging)
-                
-            avg_ratio_metric = torch.mean(ratios_tensor_logging)
-            std_ratio_metric = torch.std(ratios_tensor_logging)
+                avg_ratio_metric = avg_ratio_loss.detach()
 
         metrics = {
-            "shiva/ratio/avg_ratio": avg_ratio_metric.item(),
-            "shiva/ratio/std_ratio": std_ratio_metric.item(),
-            "shiva/ratio/ratio_loss_raw": mse_loss.item(),
-            "shiva/ratio/ratio_loss": final_loss.item(),
+            "policy/adaptive_ratio/avg_ratio": avg_ratio_metric.item(),
+            "policy/adaptive_ratio/target_ratio": current_target_ratio,
+            "loss/ratio/ratio_loss_raw": mse_loss.item(),
+            "loss/ratio/ratio_loss": final_loss.item(),
         }
 
         return final_loss, metrics, ratios_per_layer
     else:
         return torch.tensor(0.0, device=device), metrics, ratios_per_layer
-
 
 @torch.no_grad()
 def calculate_shiva_gate_prob(device: torch.device) -> tuple[torch.Tensor, dict]:
@@ -197,7 +155,6 @@ def calculate_shiva_gate_prob(device: torch.device) -> tuple[torch.Tensor, dict]
         return global_avg_prob, gate_probs_per_layer
     else:
         return torch.tensor(0.0, device=device), {}
-
 
 def collect_autograd_stats(device):
     stats = {}
@@ -282,125 +239,15 @@ def collect_router_stats(device: torch.device) -> dict:
 
     if total_mean:
         return {
-            "shiva/router/mean_score": torch.stack(total_mean).mean(),
-            "shiva/router/std_score": torch.stack(total_std).mean(),
-            "shiva/router/min_score": torch.stack(total_min).min(),
-            "shiva/router/max_score": torch.stack(total_max).max(),
-            "shiva/router/s_scale_mean": torch.stack(total_s_scale_mean).mean(),
-            "shiva/router/s_scale_std": torch.stack(total_s_scale_std).mean(),
-            "shiva/router/p25_score": torch.stack(total_p25).mean(),
-            "shiva/router/p50_score": torch.stack(total_p50).mean(),
-            "shiva/router/p75_score": torch.stack(total_p75).mean(),
+            "router/mean_score": torch.stack(total_mean).mean(),
+            "router/std_score": torch.stack(total_std).mean(),
+            "router/min_score": torch.stack(total_min).min(),
+            "router/max_score": torch.stack(total_max).max(),
+            "router/s_scale_mean": torch.stack(total_s_scale_mean).mean(),
+            "router/s_scale_std": torch.stack(total_s_scale_std).mean(),
+            "router/p25_score": torch.stack(total_p25).mean(),
+            "router/p50_score": torch.stack(total_p50).mean(),
+            "router/p75_score": torch.stack(total_p75).mean(),
         }
     else:
         return {}
-
-
-@torch.no_grad()
-def collect_pruner_T_stats(device: torch.device) -> dict:
-    metrics = {}
-    
-    for hook in _get_shiva_hooks():
-        if hasattr(hook, "prune_expert"):
-            
-            if hasattr(hook.prune_expert, "shiva_Tk"):
-                try:
-                    metrics["shiva/pruner/T_k"] = hook.prune_expert.shiva_Tk.item()
-                except Exception as e:
-                    print(f"Warning: Could not get shiva_Tk value. Error: {e}")
-                    
-            if hasattr(hook.prune_expert, "shiva_Ts"):
-                try:
-                    metrics["shiva/pruner/T_s"] = hook.prune_expert.shiva_Ts.item()
-                except Exception as e:
-                    print(f"Warning: Could not get shiva_Ts value. Error: {e}")
-            if metrics:
-                break
-
-    return metrics
-
-
-@torch.no_grad()
-def _weighted_avg(values, weights, default_val=0.0):
-    if not values or not weights:
-        return default_val, 0.0
-
-    total_weight = sum(weights)
-    if total_weight == 0:
-        return default_val, 0.0
-
-    weighted_sum = sum(v.item() * w for v, w in zip(values, weights))
-    return weighted_sum / total_weight, total_weight
-
-
-@torch.no_grad()
-def collect_fuser_stats(device: torch.device) -> tuple[dict, dict]:
-    metrics_global_lists = {
-        "fuser/avg_discarded_norm": [],
-        "fuser/avg_diff_norm": [],
-        "fuser/avg_cos_sim": [],
-    }
-    metrics_per_layer = {
-        "fuser/per_layer_discarded_norm": {},
-        "fuser/per_layer_diff_norm": {},
-        "fuser/per_layer_cos_sim": {},
-    }
-
-    for hook in _get_shiva_hooks():
-        layer_name = f"layer_{hook.layer_idx:02d}"
-
-        k_weights = hook.k_accumulator
-        n_minus_k_weights = hook.n_minus_k_accumulator
-
-        # Discarded Norm (weighted by N-k, number of discarded tokens)
-        avg_discarded_norm, total_n_minus_k = _weighted_avg(
-            hook.discarded_info_norm_accumulator, n_minus_k_weights
-        )
-        metrics_global_lists["fuser/avg_discarded_norm"].append(
-            (avg_discarded_norm, total_n_minus_k)
-        )
-        metrics_per_layer["fuser/per_layer_discarded_norm"][
-            layer_name
-        ] = avg_discarded_norm
-
-        # Diff Norm (weighted by k, number of survivor tokens)
-        avg_diff_norm, total_k = _weighted_avg(
-            hook.fuser_diff_norm_accumulator, k_weights
-        )
-        metrics_global_lists["fuser/avg_diff_norm"].append(
-            (avg_diff_norm, total_k)
-        )
-        metrics_per_layer["fuser/per_layer_diff_norm"][layer_name] = avg_diff_norm
-
-        # Cos Sim (weighted by k, number of survivor tokens)
-        avg_cos_sim, total_k_cos = _weighted_avg(
-            hook.fuser_cos_sim_accumulator, k_weights
-        )
-        metrics_global_lists["fuser/avg_cos_sim"].append(
-            (avg_cos_sim, total_k_cos)
-        )
-        metrics_per_layer["fuser/per_layer_cos_sim"][layer_name] = avg_cos_sim
-
-        # Clear accumulators
-        hook.discarded_info_norm_accumulator.clear()
-        hook.fuser_diff_norm_accumulator.clear()
-        hook.fuser_cos_sim_accumulator.clear()
-        hook.k_accumulator.clear()
-        hook.n_minus_k_accumulator.clear()
-
-    # Calculate global weighted average across all hooks
-    final_metrics_global = {}
-    for key, avg_weight_list in metrics_global_lists.items():
-        if not avg_weight_list:
-            final_metrics_global[key] = 0.0
-            continue
-
-        total_weighted_sum = sum(avg * weight for avg, weight in avg_weight_list)
-        global_total_weight = sum(weight for _, weight in avg_weight_list)
-
-        if global_total_weight == 0:
-            final_metrics_global[key] = 0.0
-        else:
-            final_metrics_global[key] = total_weighted_sum / global_total_weight
-
-    return final_metrics_global, metrics_per_layer

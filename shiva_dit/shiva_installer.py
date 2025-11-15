@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 from typing import Type
 
@@ -5,8 +6,8 @@ from shiva_dit.hook.hook_manager import HookManager
 from shiva_dit.utils import global_context
 
 from shiva_dit.modules.router import ShivaRouter
-from shiva_dit.modules.gater import ShivaGater
-from shiva_dit.modules.pruner import ShivaContextPruner
+from shiva_dit.modules.gater import ShivaGaterPolicy, ShivaRatioPolicy
+from shiva_dit.modules.pruner import ShivaContextPruner, ShivaPrunerExpert
 from shiva_dit.modules.fuser import ShivaFuserExpert
 from shiva_dit.shiva_hook import ShivaDitBlockHook
 
@@ -25,11 +26,8 @@ def install_shiva_hooks(
     fuse_expert_ffn_mult = kwargs.pop("fuse_expert_ffn_mult", 2)
     context_pruning_threshold = kwargs.pop("context_pruning_threshold", None)
     context_pruning_ratio = kwargs.pop("context_pruning_ratio", None)
-    if "initial_kept_ratio" not in kwargs:
-        kwargs["initial_kept_ratio"] = 1.0
-
-    kwargs.setdefault("init_Ts", 30.0)
-    kwargs.setdefault("init_Tk", 30.0)
+    init_Ts = kwargs.pop("init_Ts", 30.0)
+    init_Tk = kwargs.pop("init_Tk", 30.0)
 
     model_dim = global_context.hidden_dim
     prompt_embed_dim = global_context.encoder_hidden_dim
@@ -70,12 +68,16 @@ def install_shiva_hooks(
     )
 
     shared_layer_embedder = nn.Embedding(num_layers, layer_embed_dim).to(device, dtype)
-    shared_gater = ShivaGater(
+    shared_gater_policy = ShivaGaterPolicy(
         time_embed_dim=time_embed_dim, layer_embed_dim=layer_embed_dim
     ).to(device, dtype)
-    shared_pruner = ShivaContextPruner(
+    shared_ratio_policy = ShivaRatioPolicy(
+        time_embed_dim=time_embed_dim, layer_embed_dim=layer_embed_dim
+    ).to(device, dtype)
+    shared_context_pruner = ShivaContextPruner(
         threshold=context_pruning_threshold, ratio=context_pruning_ratio
     )
+    shared_pruner_expert = ShivaPrunerExpert(init_Ts=init_Ts, init_Tk=init_Tk).to(device, dtype)
     shared_fuse_expert = ShivaFuserExpert(
         hidden_dim=model_dim, ffn_mult=fuse_expert_ffn_mult
     ).to(device, dtype)
@@ -93,12 +95,13 @@ def install_shiva_hooks(
     ).to(device, dtype)
 
     ## initialization: keep parameters to reasonable values
-    nn.init.constant_(shared_gater.net[-1].bias, 0.0)
-
-    fuser_last_layer = shared_fuse_expert.fusion_ffn[-1]
-    nn.init.zeros_(fuser_last_layer.weight)
-    if fuser_last_layer.bias is not None:
-        nn.init.zeros_(fuser_last_layer.bias)
+    nn.init.constant_(shared_gater_policy.net[-1].bias, 0.0)
+    try:
+        logit_bias = 10.0
+        nn.init.constant_(shared_ratio_policy.net[-1].bias, logit_bias)
+        nn.init.zeros_(shared_ratio_policy.net[-1].weight)
+    except Exception as e:
+        print(f"WARN: Failed to initialize ShivaRatioPolicy bias. {e}")
 
     for router in grouped_routers:
         nn.init.zeros_(router.router_head.weight)
@@ -114,8 +117,10 @@ def install_shiva_hooks(
         hook_kwargs = {
             "shared_layer_embedder": shared_layer_embedder,
             "shared_router": injected_router,
-            "shared_gater": shared_gater,
-            "shared_pruner": shared_pruner,
+            "shared_gater_policy": shared_gater_policy,
+            "shared_ratio_policy": shared_ratio_policy,
+            "shared_pruner": shared_pruner_expert,
+            "shared_context_pruner": shared_context_pruner,
             "shared_fuse_expert": shared_fuse_expert,
             **kwargs,
         }
@@ -150,7 +155,6 @@ if __name__ == "__main__":
         "fuse_expert_ffn_mult": 2,
         "context_pruning_threshold": None,
         "context_pruning_ratio": None,
-        "initial_kept_ratio": 1.0,
         "use_gater_lut": False,
         "init_Ts": 5.0,
         "init_Tk": 5.0,

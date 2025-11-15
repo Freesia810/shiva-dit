@@ -10,6 +10,13 @@ class ShivaFuserExpert(nn.Module):
             nn.Linear(hidden_dim * ffn_mult, hidden_dim),
         )
 
+        self.gate_mlp = nn.Sequential(
+           nn.Linear(hidden_dim, hidden_dim),
+           nn.SiLU(),
+           nn.Linear(hidden_dim, hidden_dim),
+           nn.Sigmoid()
+        )
+
     def forward(self, survivors, discarded):
         """
         survivors: (B, k, D)
@@ -18,7 +25,9 @@ class ShivaFuserExpert(nn.Module):
         if discarded.shape[1] > 0:
             global_info = torch.mean(discarded, dim=1, keepdim=True)  # (B, 1, D)
             projected_info = self.fusion_ffn(global_info)  # (B, 1, D)
-            fused_survivors = survivors + projected_info  # (B, k, D)
+
+            gate = self.gate_mlp(survivors) # (B, k, D)
+            fused_survivors = survivors + (gate * projected_info)
         else:
             fused_survivors = survivors
             if self.training:
