@@ -116,9 +116,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         gate_logits = self.gater_policy(pure_temb, layer_emb_vector)
         predicted_ratio_logits = self.ratio_policy(pure_temb, layer_emb_vector)
-        predicted_ratio = torch.sigmoid(predicted_ratio_logits).squeeze(-1)  # Shape [B]
+        predicted_ratio = torch.sigmoid(predicted_ratio_logits).squeeze(-1).mean()
 
-        clamped_ratio = predicted_ratio.mean().clamp(min=0.01, max=1.0)
+        clamped_ratio = predicted_ratio.clamp(min=0.01)
         if self.training:
             k_float = ceil_ste(clamped_ratio * N)
         else:
