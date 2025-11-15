@@ -97,7 +97,7 @@ def install_shiva_hooks(
     ## initialization: keep parameters to reasonable values
     nn.init.constant_(shared_gater_policy.net[-1].bias, 0.0)
     try:
-        logit_bias = 10.0
+        logit_bias = 5.0
         nn.init.constant_(shared_ratio_policy.net[-1].bias, logit_bias)
         nn.init.zeros_(shared_ratio_policy.net[-1].weight)
     except Exception as e:
