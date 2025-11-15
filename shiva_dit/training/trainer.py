@@ -804,10 +804,12 @@ class DiffusionModelTrainer:
             shiva_metrics.calculate_shiva_gate_prob(self.device)
         )
         aggregated_metrics["adaptive_fuse_prob/avg_fuse_prob"] = avg_fuse_prob
-        self.step_per_layer_metrics.update({
-            "adaptive_ratio/per_layer_fuse_prob": per_layer_probs,
-            "adaptive_fuse_prob/per_layer_ratios": per_layer_ratios,
-        })
+        self.step_per_layer_metrics.update(
+            {
+                "adaptive_fuse_prob/per_layer_fuse_prob": per_layer_probs,
+                "adaptive_ratio/per_layer_ratios": per_layer_ratios,
+            }
+        )
 
         router_stats = shiva_metrics.collect_router_stats(self.device)
         aggregated_metrics.update(router_stats)
@@ -958,7 +960,7 @@ class DiffusionModelTrainer:
             for name, param in unwrapped_model.named_parameters():
                 if param.grad is None:
                     continue
-                
+
                 grad_norm_tensor = torch.norm(param.grad.detach())
 
                 if "router." in name:
@@ -1020,7 +1022,7 @@ class DiffusionModelTrainer:
             if stateful_metrics_to_log:
                 self.metric_manager.update(stateful_metrics_to_log)
             self.metric_manager.log_step(self.global_step)
-            
+
             if hasattr(self, "step_per_layer_metrics"):
                 for key, value_dict in self.step_per_layer_metrics.items():
                     if value_dict:
