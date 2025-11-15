@@ -25,10 +25,19 @@ class MetricManager:
         self.metrics_cache = {}
 
     def update(self, metrics_dict: dict):
+        try:
+            gathered_metrics = self.accelerator.gather_for_metrics(metrics_dict)
+        except Exception as e:
+            if self.accelerator.is_main_process:
+                print(
+                    f"Warning: Metric gathering failed (Error: {e}). Logging main process metrics only."
+                )
+            gathered_metrics = metrics_dict
+
         if not self.accelerator.is_main_process:
             return
-        
-        for k, v in metrics_dict.items():
+
+        for k, v in gathered_metrics.items():
             if isinstance(v, torch.Tensor):
                 self.metrics_cache[k] = v.detach().item()
             elif isinstance(v, (float, int)):
@@ -49,7 +58,7 @@ class MetricManager:
                     simple_name = key.split('/')[-1]
                     group_dict[simple_name] = scalars_to_log_individually[key]
                     processed_keys.add(key)
-            
+
             if group_dict:
                 self.logger.add_scalars(group_name, group_dict, global_step)
 
@@ -57,10 +66,10 @@ class MetricManager:
         for key, value in scalars_to_log_individually.items():
             if key not in processed_keys:
                 individual_metrics_to_log[key] = value
-        
+
         if individual_metrics_to_log:
             self.logger.log_scalars(individual_metrics_to_log, step=global_step)
-        
+
         self.metrics_cache.clear()
 
     def get_metric(self, key: str, default=0.0):

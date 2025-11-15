@@ -389,13 +389,13 @@ class DiffusionModelTrainer:
                 "router/s_scale_std",
             ],
             "adaptive_ratio": [
-                "policy/adaptive_ratio/target_ratio",
-                "policy/adaptive_ratio/avg_ratio",
-                *[f"policy/adaptive_ratio/t_group_{i}" for i in range(10)]
+                "adaptive_ratio/target_ratio",
+                "adaptive_ratio/avg_ratio",
+                *[f"adaptive_ratio/t_group_{i}" for i in range(10)]
             ],
             "adaptive_fuse_prob": [
-                "policy/adaptive_fuse_prob/avg_fuse_prob",
-                *[f"policy/adaptive_fuse_prob/t_group_{i}" for i in range(10)]
+                "adaptive_fuse_prob/avg_fuse_prob",
+                *[f"adaptive_fuse_prob/t_group_{i}" for i in range(10)]
             ],
             "topkgrads/soft_ranks": [
                 "topkgrads/soft_ranks_std",
@@ -803,10 +803,10 @@ class DiffusionModelTrainer:
         avg_fuse_prob, per_layer_probs = (
             shiva_metrics.calculate_shiva_gate_prob(self.device)
         )
-        aggregated_metrics["policy/adaptive_fuse_prob/avg_fuse_prob"] = avg_fuse_prob.item()
+        aggregated_metrics["adaptive_fuse_prob/avg_fuse_prob"] = avg_fuse_prob.item()
         self.step_per_layer_metrics.update({
-            "policy/adaptive_ratio/per_layer_fuse_prob": per_layer_probs,
-            "policy/adaptive_fuse_prob/per_layer_ratios": per_layer_ratios,
+            "adaptive_ratio/per_layer_fuse_prob": per_layer_probs,
+            "adaptive_fuse_prob/per_layer_ratios": per_layer_ratios,
         })
 
         router_stats = shiva_metrics.collect_router_stats(self.device)
@@ -829,8 +829,8 @@ class DiffusionModelTrainer:
             pass
         for i in range(10):
             self.step_per_layer_metrics.update({
-                f"policy/adaptive_ratio/t_group_{i}": per_t_layer_ratios[i],
-                f"policy/adaptive_fuse_prob/t_group_{i}": per_t_layer_fuse_probs[i],
+                f"adaptive_ratio/t_group_{i}": per_t_layer_ratios[i],
+                f"adaptive_fuse_prob/t_group_{i}": per_t_layer_fuse_probs[i],
             })
 
         return total_hook_loss, aggregated_metrics
@@ -1143,10 +1143,10 @@ class DiffusionModelTrainer:
                         except Exception:
                             pass
                     val_metrics_to_log.update(avg_hook_metrics)
-                if "validation/policy/adaptive_ratio/avg_ratio" in val_metrics_to_log:
-                    print(f"  Avg Ratio (Val): {val_metrics_to_log['validation/policy/adaptive_ratio/avg_ratio']:.4f}")
-                if "validation/policy/adaptive_fuse_prob/avg_fuse_prob" in val_metrics_to_log:
-                    print(f"  Avg Fuse Prob (Val): {val_metrics_to_log['validation/policy/adaptive_fuse_prob/avg_fuse_prob']:.4f}")
+                if "validation/adaptive_ratio/avg_ratio" in val_metrics_to_log:
+                    print(f"  Avg Ratio (Val): {val_metrics_to_log['validation/adaptive_ratio/avg_ratio']:.4f}")
+                if "validation/adaptive_fuse_prob/avg_fuse_prob" in val_metrics_to_log:
+                    print(f"  Avg Fuse Prob (Val): {val_metrics_to_log['validation/adaptive_fuse_prob/avg_fuse_prob']:.4f}")
                 print(f"--------------------------------------")
 
                 self.logger.log_scalars(

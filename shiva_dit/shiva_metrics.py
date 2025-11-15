@@ -39,8 +39,8 @@ def calculate_diversity_loss(config: dict, device: torch.device) -> torch.Tensor
     if diversity_losses:
         raw_loss = torch.stack(diversity_losses).mean()
         final_loss = raw_loss * loss_weight
-        metrics["loss/router/diversity_loss_raw"] = raw_loss.item()
-        metrics["loss/router/diversity_loss"] = final_loss.item()
+        metrics["loss/router/diversity_loss_raw"] = raw_loss
+        metrics["loss/router/diversity_loss"] = final_loss
         return final_loss, metrics
     else:
         return torch.tensor(0.0, device=device), metrics
@@ -66,8 +66,8 @@ def calculate_gate_loss(config: dict, device: torch.device) -> torch.Tensor:
     if gate_losses:
         raw_loss = torch.stack(gate_losses).mean()
         final_loss = raw_loss * loss_weight
-        metrics["loss/gater/gate_loss_raw"] = raw_loss.item()
-        metrics["loss/gater/gate_loss"] = final_loss.item()
+        metrics["loss/gater/gate_loss_raw"] = raw_loss
+        metrics["loss/gater/gate_loss"] = final_loss
         return final_loss, metrics
     else:
         return torch.tensor(0.0, device=device), metrics
@@ -96,8 +96,8 @@ def calculate_ratio_loss(
         hook.ratio_accumulator.clear()
 
     metrics = {
-        "policy/adaptive_ratio/avg_ratio": 0.0,
-        "policy/adaptive_ratio/target_ratio": 0.0,
+        "adaptive_ratio/avg_ratio": 0.0,
+        "adaptive_ratio/target_ratio": 0.0,
         "loss/ratio/ratio_loss_raw": 0.0,
         "loss/ratio/ratio_loss": 0.0,
     }
@@ -123,10 +123,10 @@ def calculate_ratio_loss(
                 avg_ratio_metric = avg_ratio_loss.detach()
 
         metrics = {
-            "policy/adaptive_ratio/avg_ratio": avg_ratio_metric.item(),
-            "policy/adaptive_ratio/target_ratio": current_target_ratio,
-            "loss/ratio/ratio_loss_raw": mse_loss.item(),
-            "loss/ratio/ratio_loss": final_loss.item(),
+            "adaptive_ratio/avg_ratio": avg_ratio_metric,
+            "adaptive_ratio/target_ratio": current_target_ratio,
+            "loss/ratio/ratio_loss_raw": mse_loss,
+            "loss/ratio/ratio_loss": final_loss,
         }
 
         return final_loss, metrics, ratios_per_layer
