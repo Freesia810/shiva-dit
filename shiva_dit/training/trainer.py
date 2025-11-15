@@ -803,7 +803,7 @@ class DiffusionModelTrainer:
         avg_fuse_prob, per_layer_probs = (
             shiva_metrics.calculate_shiva_gate_prob(self.device)
         )
-        aggregated_metrics["adaptive_fuse_prob/avg_fuse_prob"] = avg_fuse_prob.item()
+        aggregated_metrics["adaptive_fuse_prob/avg_fuse_prob"] = avg_fuse_prob
         self.step_per_layer_metrics.update({
             "adaptive_ratio/per_layer_fuse_prob": per_layer_probs,
             "adaptive_fuse_prob/per_layer_ratios": per_layer_ratios,
@@ -990,7 +990,7 @@ class DiffusionModelTrainer:
                         torch.norm(p.detach().cpu() - self.prev_lora_state[i])
                         for i, p in enumerate(lora_params)
                     ]
-                    lora_delta = torch.mean(torch.stack(deltas)).item()
+                    lora_delta = torch.mean(torch.stack(deltas))
                 else:
                     lora_delta = 0.0
                 self.prev_lora_state = [p.detach().cpu().clone() for p in lora_params]
@@ -1006,7 +1006,7 @@ class DiffusionModelTrainer:
                         torch.norm(p.detach().cpu() - self.prev_finetune_state[i])
                         for i, p in enumerate(all_trainable_params)
                     ]
-                    param_delta = torch.mean(torch.stack(deltas)).item()
+                    param_delta = torch.mean(torch.stack(deltas))
                 else:
                     param_delta = 0.0
 
