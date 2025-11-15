@@ -52,20 +52,20 @@ trainer_config = {
     "scheduler_num_warmup_steps": 0,
     "seed": 42,
     "logging_steps": 5,
-    "save_steps": 3500,  # 2 epoch
+    "save_steps": 438,  # 2 epoch
     "run_validation": True,
-    "validation_steps": 875,  # 0.5 epoch
+    "validation_steps": 110,  # 0.5 epoch
     "val_batch_size": None,
     "val_metadata_file": "../dataset/MJHQ-30K/val.jsonl",
     "val_image_dir": "../dataset/MJHQ-30K/",
     "run_inference_validation": True,
-    "inference_steps": 1750,  # 1 epoch
+    "inference_steps": 219,  # 1 epoch
     "inference_metadata_file": "../dataset/MJHQ-30K/test.jsonl",
     "inference_seed": 42,
     "inference_num_inference_steps": 30,
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
-    "hook_warmup_steps": 1750,  # 4 epoch
+    "hook_warmup_steps": 438,  # 4 epoch
     "extra_config": {
         "target_ratio": 0.8,
         "ratio_loss_weights": [1.0, 0.5],
