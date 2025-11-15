@@ -3,7 +3,6 @@ from shiva_dit.shiva_hook import ShivaDitBlockHook
 
 HookType = ShivaDitBlockHook
 hook_config = {
-    "initial_kept_ratio": 0.999,
     "num_router_groups": 24,
     "bottleneck_dim": 64,
     "layer_embed_dim": 64,
@@ -66,15 +65,15 @@ trainer_config = {
     "inference_num_inference_steps": 30,
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
-    "hook_warmup_steps": 0,  # 4 epoch
+    "hook_warmup_steps": 3500,  # 4 epoch
     "extra_config": {
         "target_ratio": 0.8,
-        "ratio_loss_weights": [1.0, 0.1],
+        "ratio_loss_weights": [0.0, 0.5],
         "gate_loss_weights": [0.1, 0.01],
         "diversity_loss_weight": 0.5,
     },
     "log_with_tensorboard": True,
-    "log_with_wandb": True,
+    "log_with_wandb": False,
     "wandb_project": "shiva-dit",
     "wandb_run_name": "sd3-shiva",
     "log_with_mlflow": False,

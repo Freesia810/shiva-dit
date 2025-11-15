@@ -391,11 +391,11 @@ class DiffusionModelTrainer:
             "policy/adaptive_ratio": [
                 "policy/adaptive_ratio/target_ratio",
                 "policy/adaptive_ratio/avg_ratio",
-                f"policy/adaptive_ratio/t_group_{i}" for i in range(10)
+                *[f"policy/adaptive_ratio/t_group_{i}" for i in range(10)]
             ],
             "policy/adaptive_fuse_prob": [
                 "policy/adaptive_fuse_prob/avg_fuse_prob",
-                f"policy/adaptive_fuse_prob/t_group_{i}" for i in range(10)
+                *[f"policy/adaptive_fuse_prob/t_group_{i}" for i in range(10)]
             ],
             "topkgrads/soft_ranks": [
                 "topkgrads/soft_ranks_std",
@@ -758,7 +758,7 @@ class DiffusionModelTrainer:
 
         main_loss = F.mse_loss(
             noise_pred.float(), noise_target.float(), reduction="mean"
-        ) * self.config.main_loss_weight
+        )
 
         return main_loss
 
