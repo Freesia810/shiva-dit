@@ -404,17 +404,24 @@ class DiffusionModelTrainer:
                 "shiva/ratio/ratio_loss",
                 "shiva/gater/gate_loss",
                 "shiva/gater/consistency_loss",
+                "shiva/router/diversity_loss",
             ],
             "shiva/losses_raw": [
                 "shiva/ratio/ratio_loss_raw",
                 "shiva/gater/gate_loss_raw",
                 "shiva/gater/consistency_loss_raw",
+                "shiva/router/diversity_loss_raw",
             ],
             "shiva/router/scores": [
                 "shiva/router/mean_score",
                 "shiva/router/std_score",
                 "shiva/router/min_score",
                 "shiva/router/max_score",
+                "shiva/router/p25_score",
+                "shiva/router/p50_score",
+                "shiva/router/p75_score",
+                "shiva/router/s_scale_mean",
+                "shiva/router/s_scale_std",
             ],
             "shiva/pruner/temperature": [
                 "shiva/pruner/T_s",
@@ -809,11 +816,14 @@ class DiffusionModelTrainer:
         final_target_ratio = self.config.extra_config["target_ratio"]
         current_target_ratio = final_target_ratio
 
+        current_diversity_loss_weight = self.config.extra_config["diversity_loss_weight"]
+
         return {
             "ratio_loss_weight": current_ratio_weight,
             "target_ratio": current_target_ratio,
             "consistency_loss_weight": current_consistency_weight,
             "gate_loss_weight": current_gate_weight,
+            "diversity_loss_weight": current_diversity_loss_weight,
         }
 
     def _calculate_hook_loss(self, global_step: int):
@@ -846,6 +856,9 @@ class DiffusionModelTrainer:
             consistency_loss, c_metrics = shiva_metrics.calculate_consistency_loss(
                 loss_config, self.device
             )
+            diversity_loss, d_metrics = shiva_metrics.calculate_diversity_loss(
+                loss_config, self.device
+            )
             gate_loss, g_metrics = shiva_metrics.calculate_gate_loss(
                 loss_config, self.device
             )
@@ -857,9 +870,10 @@ class DiffusionModelTrainer:
                 consistency_loss = consistency_loss * 1e-9
                 ratio_loss = ratio_loss * 1e-9
 
-            total_hook_loss = consistency_loss + gate_loss + ratio_loss
+            total_hook_loss = consistency_loss + diversity_loss + gate_loss + ratio_loss
 
             aggregated_metrics.update(c_metrics)
+            aggregated_metrics.update(d_metrics)
             aggregated_metrics.update(g_metrics)
             aggregated_metrics.update(r_metrics)
             aggregated_metrics["shiva/ratio/target_ratio"] = loss_config["target_ratio"]

@@ -58,6 +58,34 @@ def calculate_consistency_loss(config: dict, device: torch.device) -> torch.Tens
     else:
         return torch.tensor(0.0, device=device), metrics
 
+def calculate_diversity_loss(config: dict, device: torch.device) -> torch.Tensor:
+    diversity_losses = []
+
+    for hook in _get_shiva_hooks():
+        accumulator = hook.diversity_loss_accumulator
+
+        if accumulator:
+            avg_loss_for_hook = torch.stack(accumulator).mean()
+            diversity_losses.append(avg_loss_for_hook)
+            device = avg_loss_for_hook.device
+
+        hook.diversity_loss_accumulator.clear()
+
+    metrics = {
+        "shiva/router/diversity_loss_raw": 0.0,
+        "shiva/router/diversity_loss": 0.0,
+    }
+    
+    loss_weight = config.get("diversity_loss_weight", 0.0)
+    
+    if diversity_losses:
+        raw_loss = torch.stack(diversity_losses).mean()
+        final_loss = raw_loss * loss_weight
+        metrics["shiva/router/diversity_loss_raw"] = raw_loss.item()
+        metrics["shiva/router/diversity_loss"] = final_loss.item()
+        return final_loss, metrics
+    else:
+        return torch.tensor(0.0, device=device), metrics
 
 def calculate_gate_loss(config: dict, device: torch.device) -> torch.Tensor:
     gate_losses = []
@@ -227,6 +255,13 @@ def collect_router_stats(device: torch.device) -> dict:
     total_std = []
     total_min = []
     total_max = []
+    total_p25 = []
+    total_p50 = []
+    total_p75 = []
+    q_tensor = torch.tensor([0.25, 0.50, 0.75], device=device)
+
+    total_s_scale_mean = []
+    total_s_scale_std = []
 
     for hook in _get_shiva_hooks():
         acc = hook.router_stats_accumulator
@@ -235,6 +270,14 @@ def collect_router_stats(device: torch.device) -> dict:
             total_std.append(torch.stack([x["std"] for x in acc]).mean())
             total_min.append(torch.stack([x["min"] for x in acc]).min())
             total_max.append(torch.stack([x["max"] for x in acc]).max())
+            total_s_scale_mean.append(torch.stack([x["s_scale_mean"] for x in acc]).mean())
+            total_s_scale_std.append(torch.stack([x["s_scale_std"] for x in acc]).mean())
+
+            all_scores = torch.stack([x["scores_tensor"] for x in acc]) 
+            quantiles = torch.quantile(all_scores.to(torch.float32), q_tensor.to(torch.float32), dim=None) 
+            total_p25.append(quantiles[0])
+            total_p50.append(quantiles[1])
+            total_p75.append(quantiles[2])
         acc.clear()
 
     if total_mean:
@@ -243,6 +286,11 @@ def collect_router_stats(device: torch.device) -> dict:
             "shiva/router/std_score": torch.stack(total_std).mean(),
             "shiva/router/min_score": torch.stack(total_min).min(),
             "shiva/router/max_score": torch.stack(total_max).max(),
+            "shiva/router/s_scale_mean": torch.stack(total_s_scale_mean).mean(),
+            "shiva/router/s_scale_std": torch.stack(total_s_scale_std).mean(),
+            "shiva/router/p25_score": torch.stack(total_p25).mean(),
+            "shiva/router/p50_score": torch.stack(total_p50).mean(),
+            "shiva/router/p75_score": torch.stack(total_p75).mean(),
         }
     else:
         return {}

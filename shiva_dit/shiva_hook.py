@@ -2,6 +2,7 @@ import inspect
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Literal
 
 from shiva_dit.hook.delegate import BaseDelegator
 from shiva_dit.hook.block_hook import BaseDiTBlockHook
@@ -67,6 +68,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         self.k_accumulator = []
         self.n_minus_k_accumulator = []
+        self.diversity_loss_accumulator = []
     
     @torch.no_grad()
     def step_annealing(
@@ -108,14 +110,17 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             N,
             D,
             k_float,
-            token_scores,
+            token_scores_logits,
             pure_temb,
             layer_emb_vector,
         ) = self._prepare_inputs(func, module_self, *args, **kwargs)
 
+        self.token_scores_logits = token_scores_logits
+        self.sel_idx = sel_idx
+
         if self.training:
             final_topk_states = self._forward_train(
-                x_sel, x_rej, pure_temb, layer_emb_vector, token_scores, k_float, N
+                x_sel, x_rej, pure_temb, layer_emb_vector, token_scores_logits, k_float, N
             )
         else:
             final_topk_states = self._forward_eval(
@@ -130,6 +135,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             pruned_encoder_states,
             remaining_x,
             sel_idx,
+            token_scores_logits,
         )
 
         return processed_output
@@ -157,10 +163,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         ).expand(B)
         layer_emb_vector = self.layer_embedder(layer_id_tensor).to(dtype)
 
-        token_scores = self.router(
+        token_scores_logits = self.router(
             hidden_states.to(dtype), pure_temb, pooled_encoder_vector, layer_emb_vector
         )
-        token_scores = torch.sigmoid(token_scores)
 
         unclamped_ratio = self.shiva_ratio
         clamped_ratio = torch.clamp(unclamped_ratio, min=1e-3)
@@ -177,7 +182,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         k_float = torch.clamp(k_float_unclamped, min=1.0)
 
         x_sel, x_rej, remaining_x, sel_idx = self._select_topk(
-            hidden_states, token_scores, k_float, D
+            hidden_states, token_scores_logits, k_float, D
         )
         sel_rope = self._gather_rope(image_rotary_emb, sel_idx)
 
@@ -193,13 +198,13 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             N,
             D,
             k_float,
-            token_scores,
+            token_scores_logits,
             pure_temb,
             layer_emb_vector,
         )
 
     def _forward_train(
-        self, x_sel, x_rej, pure_temb, layer_emb_vector, token_scores, k_float, N
+        self, x_sel, x_rej, pure_temb, layer_emb_vector, token_scores_logits, k_float, N
     ):
         dtype = x_sel.dtype
         gater_logits = self.gater(pure_temb, layer_emb_vector)
@@ -209,6 +214,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         num_experts = 2
         load_balancing_loss = num_experts * torch.sum(avg_gating_probs.pow(2))
         avg_fuse_prob = gating_weights[:, 1].mean()
+
+        router_diversity_loss = (1.0 - torch.tanh(token_scores_logits.detach()).abs()).mean()
 
         g_prune = gating_weights[:, 0].unsqueeze(-1).unsqueeze(-1)
         g_fuse = gating_weights[:, 1].unsqueeze(-1).unsqueeze(-1)
@@ -220,8 +227,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         self._collect_training_metrics(
             load_balancing_loss=load_balancing_loss,
+            router_diversity_loss=router_diversity_loss,
             avg_fuse_prob=avg_fuse_prob,
-            token_scores=token_scores,
+            token_scores_logits=token_scores_logits,
             k_float=k_float,
             N=N,
             x_rej=x_rej,
@@ -256,6 +264,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         pruned_encoder_states,
         remaining_x,
         sel_idx,
+        token_scores_logits,
     ):
         bound.arguments["hidden_states"] = final_topk_states
         bound.arguments["image_rotary_emb"] = sel_rope
@@ -277,8 +286,22 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         else:
             return final_hidden_states
 
-    def _select_topk(self, x, token_scores, k, C):
-        x_sel, x_rej, sel_idx, rej_idx = self.prune_expert(x, token_scores, k)
+    def hook_after_module(
+        self, 
+        module_name: Literal["self-attn", "cross-attn", "ffn"],
+        hidden_output: torch.Tensor,
+        encoder_hidden_output: torch.Tensor = None,
+    ):
+        if module_name == "ffn":
+            # gate with topk scores, to maintain the grad
+            selected_logits = torch.gather(self.token_scores_logits, 1, self.sel_idx)
+            s_scale = (1.0 + torch.tanh(selected_logits)).to(hidden_output.dtype)
+            hidden_output = hidden_output * s_scale.unsqueeze(2)
+            self.token_scores_logits = self.sel_idx = None
+        return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
+
+    def _select_topk(self, x, token_scores_logits, k, C):
+        x_sel, x_rej, sel_idx, rej_idx = self.prune_expert(x, token_scores_logits, k)
         remaining_x = torch.zeros_like(x)
         remaining_x.scatter_(1, rej_idx.unsqueeze(-1).expand(-1, -1, C), x_rej)
         return x_sel, x_rej, remaining_x, sel_idx
@@ -329,6 +352,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.discarded_info_norm_accumulator.clear()
         self.fuser_diff_norm_accumulator.clear()
         self.fuser_cos_sim_accumulator.clear()
+        self.diversity_loss_accumulator.clear()
         self.k_accumulator.clear()
         self.n_minus_k_accumulator.clear()
 
@@ -336,8 +360,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
     def _collect_training_metrics(
         self,
         load_balancing_loss,
+        router_diversity_loss,
         avg_fuse_prob,
-        token_scores,
+        token_scores_logits,
         k_float,
         N,
         x_rej,
@@ -345,17 +370,27 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         output_fuse,
     ):
         self.gate_loss_accumulator.append(load_balancing_loss)
+        self.diversity_loss_accumulator.append(router_diversity_loss)
         self.gater_fuse_prob_accumulator.append(avg_fuse_prob)
 
         self.prune_output_accumulator.append(output_prune)
         self.fuse_output_accumulator.append(output_fuse)
 
+        token_scores = torch.sigmoid(token_scores_logits)
+
+        s_scale = (1.0 + torch.tanh(token_scores_logits))
+        s_scale_mean = s_scale.mean()
+        s_scale_std = s_scale.std()
+
         self.router_stats_accumulator.append(
             {
+                "scores_tensor": token_scores,
                 "mean": token_scores.mean(),
                 "std": token_scores.std(),
                 "min": token_scores.min(),
                 "max": token_scores.max(),
+                "s_scale_mean": s_scale_mean,
+                "s_scale_std": s_scale_std,
             }
         )
 

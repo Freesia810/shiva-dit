@@ -100,9 +100,9 @@ def install_shiva_hooks(
     if fuser_last_layer.bias is not None:
         nn.init.zeros_(fuser_last_layer.bias)
 
-    # for router in grouped_routers:
-    #     nn.init.zeros_(router.router_head.weight)
-    #     nn.init.zeros_(router.router_head.bias)
+    for router in grouped_routers:
+        nn.init.zeros_(router.router_head.weight)
+        nn.init.constant_(router.router_head.bias, 1e-5)
 
     layers_per_group = num_layers // num_router_groups
 

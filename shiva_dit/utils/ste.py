@@ -44,9 +44,9 @@ class ShivaTopkFunc(torch.autograd.Function):
         return soft_ranks
 
     @staticmethod
-    def forward(ctx, x, scores, k_float, Ts, Tk):
+    def forward(ctx, x, logits, k_float, Ts, Tk):
         B, N, D = x.shape
-
+        scores = torch.sigmoid(logits) 
         k_int = int(torch.ceil(k_float).long().item())
         k_int = max(1, min(k_int, N))
 
@@ -57,19 +57,17 @@ class ShivaTopkFunc(torch.autograd.Function):
 
         x_selected = torch.gather(x, 1, topk_idx.unsqueeze(-1).expand(B, k_int, D))
         x_rejected = torch.gather(x, 1, rest_idx.unsqueeze(-1).expand(B, N - k_int, D))
-
-        ctx.save_for_backward(x, scores, k_float, Ts, Tk, topk_idx, rest_idx)
-
+        ctx.save_for_backward(x, logits, k_float, Ts, Tk, topk_idx, rest_idx)
         return x_selected, x_rejected, topk_idx.detach(), rest_idx.detach()
 
     @staticmethod
     def backward(ctx, grad_x_selected, grad_x_rejected, grad_topk_idx, grad_rest_idx):
-        x, scores, k_float, Ts, Tk, topk_idx, rest_idx = ctx.saved_tensors
+        x, logits, k_float, Ts, Tk, topk_idx, rest_idx = ctx.saved_tensors
         B, N, D = x.shape
         k_int = topk_idx.shape[1]
 
         grad_x = None
-        grad_scores = None
+        grad_logits = None
         grad_k = None
         grad_Ts = None
         grad_Tk = None
@@ -98,10 +96,10 @@ class ShivaTopkFunc(torch.autograd.Function):
         # dL/dp = (dL/dx_sel - dL/dx_rej) * x
         grad_probs = torch.sum(
             (grad_x_sel_scattered - grad_x_rej_scattered) * x.detach(), dim=-1
-        )  # Shape: [B, N]
+        )
 
-        # --- dL/d(scores), dL/d(k), dL/d(T) ---
-        scores_detached = scores.detach().requires_grad_(True)
+        # --- dL/d(logits), dL/d(k), dL/d(T) ---
+        logits_detached = logits.detach().requires_grad_(True)
         k_detached = k_float.detach().requires_grad_(True)
         Ts_detached = Ts
         Tk_detached = Tk
@@ -109,13 +107,17 @@ class ShivaTopkFunc(torch.autograd.Function):
         with torch.enable_grad():
             T_rank = F.softplus(Ts_detached)
             T_select = F.softplus(Tk_detached)
+            
+            scores_for_soft_rank = torch.sigmoid(logits_detached)
+            noise = torch.randn_like(logits_detached) * 1e-5
+            scores_for_soft_rank = scores_for_soft_rank + noise
 
             soft_ranks = ShivaTopkFunc._differentiable_rank_descending(
-                scores_detached, T_rank
+                scores_for_soft_rank, T_rank
             )
 
             z = T_select * (k_detached.unsqueeze(-1) - soft_ranks)
-            selection_probs = torch.sigmoid(z)  # Shape: [B, N]
+            selection_probs = torch.sigmoid(z)
 
             if torch.rand(1) < 0.05:
                 with torch.no_grad():
@@ -146,16 +148,15 @@ class ShivaTopkFunc(torch.autograd.Function):
 
         grads = torch.autograd.grad(
             outputs=selection_probs,
-            inputs=[scores_detached, k_detached],
+            inputs=[logits_detached, k_detached],
             grad_outputs=grad_probs,
             allow_unused=True
         )
 
-        grad_scores = grads[0]
+        grad_logits = grads[0]
         grad_k = grads[1]
 
-        return grad_x, grad_scores, grad_k, grad_Ts, grad_Tk
-
+        return grad_x, grad_logits, grad_k, grad_Ts, grad_Tk
 
 ceil_ste = CeilSTE.apply
 sigmoid_ste = SigmoidSTE.apply

@@ -4,14 +4,14 @@ from shiva_dit.shiva_hook import ShivaDitBlockHook
 HookType = ShivaDitBlockHook
 hook_config = {
     "initial_kept_ratio": 0.999,
-    "num_router_groups": 4,
+    "num_router_groups": 24,
     "bottleneck_dim": 64,
     "layer_embed_dim": 64,
     "fuse_expert_ffn_mult": 2,
     "use_gater_lut": False,
     "context_pruning_threshold": None,
     "context_pruning_ratio": None,
-    "init_Ts": 0.0,
+    "init_Ts": 10.0,
     "init_Tk": -7.0,
 }
 lora_config = {
@@ -76,6 +76,8 @@ trainer_config = {
         "schedule_steps": [10500, 26250],  # 6 epoch, 15 epoch
         "gate_schedule": [0.1, 0.05, 0.01],
         "consistency_schedule": [1e-9, 1e-4, 0.01],
+
+        "diversity_loss_weight": 0.5,
         
         "temp_anneal_steps": 87500,
         "temp_anneal_schedule": "cosine",
