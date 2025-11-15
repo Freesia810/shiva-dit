@@ -312,7 +312,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.n_minus_k_accumulator.clear()
         self.ratio_accumulator.clear()
 
-    @torch.no_grad()
     def _collect_training_metrics(
         self,
         load_balancing_loss,
