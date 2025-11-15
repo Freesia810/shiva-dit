@@ -388,12 +388,12 @@ class DiffusionModelTrainer:
                 "router/s_scale_mean",
                 "router/s_scale_std",
             ],
-            "policy/adaptive_ratio": [
+            "adaptive_ratio": [
                 "policy/adaptive_ratio/target_ratio",
                 "policy/adaptive_ratio/avg_ratio",
                 *[f"policy/adaptive_ratio/t_group_{i}" for i in range(10)]
             ],
-            "policy/adaptive_fuse_prob": [
+            "adaptive_fuse_prob": [
                 "policy/adaptive_fuse_prob/avg_fuse_prob",
                 *[f"policy/adaptive_fuse_prob/t_group_{i}" for i in range(10)]
             ],

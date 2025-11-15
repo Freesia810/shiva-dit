@@ -42,7 +42,7 @@ trainer_config = {
     "caption_dropout_rate": 0.25,
     "num_epochs": 50,
     "train_batch_size": 1,
-    "gradient_accumulation_steps": 16,
+    "gradient_accumulation_steps": 128,
     "learning_rate": 1e-4,
     "lora_learning_rate": 1e-4,
     "policy_learning_rate": 1e-4,
@@ -65,10 +65,10 @@ trainer_config = {
     "inference_num_inference_steps": 30,
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
-    "hook_warmup_steps": 3500,  # 4 epoch
+    "hook_warmup_steps": 1750,  # 4 epoch
     "extra_config": {
         "target_ratio": 0.8,
-        "ratio_loss_weights": [0.0, 0.5],
+        "ratio_loss_weights": [1.0, 0.5],
         "gate_loss_weights": [0.1, 0.01],
         "diversity_loss_weight": 0.5,
     },
