@@ -91,7 +91,32 @@ class DiffusionModelTrainer:
         """
         config = self.config
 
-        self.scaled_hook_warmup_steps = self._scale_steps(config.hook_warmup_steps)
+        self.processed_stage_schedule = []
+        current_step_threshold = 0
+        if 'stage_schedule' not in self.config.extra_config:
+            self.processed_stage_schedule.append({
+                "threshold": float('inf'),
+                "weights": {"ratio": 0.5, "gate": 0.1, "diversity": 0.1}
+            })
+        else:
+            for i, stage in enumerate(self.config.extra_config['stage_schedule']):
+                stage_duration = stage["steps"]
+                if (
+                    stage_duration < 0
+                    or i == len(self.config.extra_config["stage_schedule"]) - 1
+                ):
+                    current_step_threshold = float('inf')
+                else:
+                    scaled_duration = self._scale_steps(stage_duration)
+                    current_step_threshold += scaled_duration
+
+                self.processed_stage_schedule.append({
+                    "threshold": current_step_threshold,
+                    "weights": stage["weights"]
+                })
+
+                if current_step_threshold == float('inf'):
+                    break
 
         self.scaled_hook_only_steps = self._scale_steps(config.hook_only_steps)
         self.log_trigger = self._scale_steps(config.logging_steps)
@@ -763,14 +788,18 @@ class DiffusionModelTrainer:
         return main_loss
 
     def _get_shiva_loss_config(self, global_step: int) -> dict:
-        config = {}
-        extra_config = self.config.extra_config
+        current_weights = {}
 
-        is_warmup = global_step < self.scaled_hook_warmup_steps
-        config["ratio_loss_weight"] = extra_config["ratio_loss_weights"][0] if is_warmup else extra_config["ratio_loss_weights"][1]
-        config["gate_loss_weight"] = extra_config["gate_loss_weights"][0] if is_warmup else extra_config["gate_loss_weights"][1]
-        config["diversity_loss_weight"] = extra_config["diversity_loss_weight"]
-        config["target_ratio"] = extra_config["target_ratio"]
+        for stage in self.processed_stage_schedule:
+            current_weights = stage["weights"]
+            if global_step < stage["threshold"]:
+                break
+
+        config = {}
+        config["ratio_loss_weight"] = current_weights.get("ratio", 0.0)
+        config["gate_loss_weight"] = current_weights.get("gate", 0.0)
+        config["diversity_loss_weight"] = current_weights.get("diversity", 0.0)
+        config["target_ratio"] = self.config.extra_config['target_ratio']
 
         return config
 
@@ -1153,7 +1182,7 @@ class DiffusionModelTrainer:
                 print(f"  Avg Hook Loss:  {avg_hook_loss:.4f}")
                 print(f"  Avg Distill Loss: {avg_distill_loss:.4f}")
                 print(f"--------------------------------------")
-                
+
                 val_metrics_to_log = {}
                 if all_hook_metrics:
                     keys_to_log = [
@@ -1163,7 +1192,7 @@ class DiffusionModelTrainer:
                         "adaptive_ratio/avg_ratio",
                         "adaptive_fuse_prob/avg_fuse_prob"
                     ]
-                    
+
                     avg_hook_metrics = {}
                     for key in keys_to_log:
                         if key in all_hook_metrics[0]: 

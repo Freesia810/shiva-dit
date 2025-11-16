@@ -65,12 +65,17 @@ trainer_config = {
     "inference_num_inference_steps": 30,
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
-    "hook_warmup_steps": 7000,  # 4 epoch
     "extra_config": {
         "target_ratio": 0.8,
-        "ratio_loss_weights": [1.0, 0.5],
-        "gate_loss_weights": [0.5, 0.1],
-        "diversity_loss_weight": 0.5,
+        "stage_schedule": [
+            {"steps": 1750, "weights": {"ratio": 1.0, "gate": 0.0, "diversity": 0.0}},
+            {"steps": 10500, "weights": {"ratio": 0.5, "gate": 0.0, "diversity": 0.5}},
+            {"steps": 10500, "weights": {"ratio": 0.5, "gate": 0.5, "diversity": 0.1}},
+            {
+                "steps": -1,
+                "weights": {"ratio": 0.5, "gate": 0.1, "diversity": 0.1},
+            },
+        ],
     },
     "log_with_tensorboard": True,
     "log_with_wandb": False,

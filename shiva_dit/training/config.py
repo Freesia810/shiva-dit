@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Literal, Optional, Tuple, Any, Dict
+from typing import List, Literal, Optional, Tuple, Any, Dict
 
 TrainingMode = Literal["hook_only", "finetune", "lora"]
 
@@ -37,8 +37,6 @@ class TrainerConfig:
     trainable_hook_config: Tuple[type, Dict[str, Any]] = None 
     compile_model: bool = True
 
-    # 0 -> hook_warmup_steps -> hook_only_steps
-    hook_warmup_steps: int = 0
     hook_only_steps: int = 0
 
     caption_dropout_rate: float = 0.25
