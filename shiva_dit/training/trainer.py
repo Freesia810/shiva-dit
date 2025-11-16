@@ -402,16 +402,18 @@ class DiffusionModelTrainer:
             ],
             "router/scores": [
                 "router/mean_score",
-                "router/std_score",
                 "router/min_score",
                 "router/max_score",
                 "router/p25_score",
                 "router/p50_score",
                 "router/p75_score",
             ],
+            "router/distribution": [
+                "router/std_score",
+                "router/s_scale_std",
+            ],
             "router/s_scale": [
                 "router/s_scale_mean",
-                "router/s_scale_std",
             ],
             "adaptive_ratio": [
                 "adaptive_ratio/target_ratio",
