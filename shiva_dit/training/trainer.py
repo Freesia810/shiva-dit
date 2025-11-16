@@ -836,7 +836,7 @@ class DiffusionModelTrainer:
         for i in range(10):
             self.step_per_layer_metrics.update({
                 f"adaptive_ratio/t_group_{i}": per_t_layer_ratios[i],
-                f"adaptive_fuse_prob/t_group_{i}": per_t_layer_fuse_probs[i],
+                # f"adaptive_fuse_prob/t_group_{i}": per_t_layer_fuse_probs[i],
             })
 
         return total_hook_loss, aggregated_metrics
