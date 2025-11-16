@@ -380,9 +380,9 @@ class DiffusionModelTrainer:
                 "router/std_score",
                 "router/min_score",
                 "router/max_score",
-                "router/p25_score",
-                "router/p50_score",
-                "router/p75_score",
+                # "router/p25_score",
+                # "router/p50_score",
+                # "router/p75_score",
             ],
             "router/s_scale": [
                 "router/s_scale_mean",
@@ -395,7 +395,7 @@ class DiffusionModelTrainer:
             ],
             "adaptive_fuse_prob": [
                 "adaptive_fuse_prob/avg_fuse_prob",
-                *[f"adaptive_fuse_prob/t_group_{i}" for i in range(10)]
+                # *[f"adaptive_fuse_prob/t_group_{i}" for i in range(10)]
             ],
             "topkgrads/soft_ranks": [
                 "topkgrads/soft_ranks_std",
@@ -403,19 +403,19 @@ class DiffusionModelTrainer:
                 "topkgrads/soft_ranks_min",
                 "topkgrads/soft_ranks_max",
             ],
-            "topkgrads/z_stats": [
-                "topkgrads/z_std",
-                "topkgrads/z_mean",
-            ],
-            "topkgrads/grad_probs": [
-                "topkgrads/grad_probs_norm",
-                "topkgrads/grad_probs_sum",
-                "topkgrads/grad_probs_std",
-            ],
-            "topkgrads/sigmoid_prime": [
-                "topkgrads/sigmoid_prime_mean",
-                "topkgrads/sigmoid_prime_std",
-            ],
+            # "topkgrads/z_stats": [
+            #     "topkgrads/z_std",
+            #     "topkgrads/z_mean",
+            # ],
+            # "topkgrads/grad_probs": [
+            #     "topkgrads/grad_probs_norm",
+            #     "topkgrads/grad_probs_sum",
+            #     "topkgrads/grad_probs_std",
+            # ],
+            # "topkgrads/sigmoid_prime": [
+            #     "topkgrads/sigmoid_prime_mean",
+            #     "topkgrads/sigmoid_prime_std",
+            # ],
             "topkgrads/module": [
                 "topkgrads/router_avg_norm",
                 "topkgrads/gater_policy_avg_norm",
