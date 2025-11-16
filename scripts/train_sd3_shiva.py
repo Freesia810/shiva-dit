@@ -69,7 +69,7 @@ trainer_config = {
     "extra_config": {
         "target_ratio": 0.8,
         "ratio_loss_weights": [1.0, 0.5],
-        "gate_loss_weights": [0.1, 0.01],
+        "gate_loss_weights": [0.5, 0.1],
         "diversity_loss_weight": 0.5,
     },
     "log_with_tensorboard": True,
