@@ -405,9 +405,9 @@ class DiffusionModelTrainer:
                 "router/std_score",
                 "router/min_score",
                 "router/max_score",
-                # "router/p25_score",
-                # "router/p50_score",
-                # "router/p75_score",
+                "router/p25_score",
+                "router/p50_score",
+                "router/p75_score",
             ],
             "router/s_scale": [
                 "router/s_scale_mean",
@@ -416,11 +416,9 @@ class DiffusionModelTrainer:
             "adaptive_ratio": [
                 "adaptive_ratio/target_ratio",
                 "adaptive_ratio/avg_ratio",
-                *[f"adaptive_ratio/t_group_{i}" for i in range(10)]
             ],
             "adaptive_fuse_prob": [
                 "adaptive_fuse_prob/avg_fuse_prob",
-                # *[f"adaptive_fuse_prob/t_group_{i}" for i in range(10)]
             ],
             "topkgrads/soft_ranks": [
                 "topkgrads/soft_ranks_std",
@@ -852,6 +850,8 @@ class DiffusionModelTrainer:
 
         per_t_layer_ratios = [{} for _ in range(10)]
         per_t_layer_fuse_probs = [{} for _ in range(10)]
+        per_timestep_avg_ratios = {}
+        per_timestep_fuse_probs = {}
         try:
             t_int = int(timestep[0].item())
             t_group = min(t_int // 100, 9)
@@ -860,6 +860,17 @@ class DiffusionModelTrainer:
                 per_t_layer_ratios[t_group][layer_id] = ratio_val
             for layer_id, prob_val in per_layer_probs.items():
                 per_t_layer_fuse_probs[t_group][layer_id] = prob_val
+
+            current_avg_ratio = r_metrics.get("adaptive_ratio/avg_ratio")
+            if current_avg_ratio is not None:
+                per_timestep_avg_ratios = {
+                    f"t_group_{t_group}": current_avg_ratio
+                }
+            current_fuse_probs = avg_fuse_prob
+            if current_fuse_probs is not None:
+                per_timestep_fuse_probs = {
+                    f"t_group_{t_group}": current_fuse_probs
+                }
         except Exception:
             pass
         for i in range(10):
@@ -867,6 +878,11 @@ class DiffusionModelTrainer:
                 f"adaptive_ratio/t_group_{i}": per_t_layer_ratios[i],
                 # f"adaptive_fuse_prob/t_group_{i}": per_t_layer_fuse_probs[i],
             })
+
+        self.step_per_layer_metrics.update({
+            "adaptive_ratio/per_timestep_ratios": per_timestep_avg_ratios,
+            "adaptive_fuse_prob/per_timestep_fuse_probs": per_timestep_fuse_probs,
+        })
 
         return total_hook_loss, aggregated_metrics
 
