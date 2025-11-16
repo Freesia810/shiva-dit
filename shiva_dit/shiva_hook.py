@@ -190,17 +190,18 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
     def _forward_eval(self, x_sel, x_rej, pure_temb, layer_emb):
         dtype = x_sel.dtype
 
-        try:
-            self._collect_training_metrics(
-                load_balancing_loss=torch.tensor(0.0, device=x_sel.device),
-                router_diversity_loss=torch.tensor(0.0, device=x_sel.device),
-                avg_fuse_prob=torch.tensor(0.0, device=x_sel.device),
-                token_scores_logits=self.token_scores_logits,
-                k_float=self.k_float,
-                N=x_sel.shape[1] + x_rej.shape[1],
-            )
-        except Exception as e:
-            pass
+        if getattr(self, "is_validating", False):
+            try:
+                self._collect_training_metrics(
+                    load_balancing_loss=torch.tensor(0.0, device=x_sel.device),
+                    router_diversity_loss=torch.tensor(0.0, device=x_sel.device),
+                    avg_fuse_prob=torch.tensor(0.0, device=x_sel.device),
+                    token_scores_logits=self.token_scores_logits,
+                    k_float=self.k_float,
+                    N=x_sel.shape[1] + x_rej.shape[1],
+                )
+            except Exception as e:
+                pass
 
         if self.use_gater_lut:
             current_t_index = global_context.current_iteration

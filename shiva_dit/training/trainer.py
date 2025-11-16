@@ -1092,6 +1092,11 @@ class DiffusionModelTrainer:
 
         if self.accelerator.is_main_process:
             print(f"\nRunning validation at step {global_step}...")
+        
+        if self.hook_type == "shiva":
+            for hook in HookManager.get_all_hooks().values():
+                if hasattr(hook, "clear_accumulators"): 
+                    hook.is_validating = True
 
         self.model.eval()
 
@@ -1188,6 +1193,10 @@ class DiffusionModelTrainer:
             )
 
         self.model.train()
+        if self.hook_type == "shiva":
+            for hook in HookManager.get_all_hooks().values():
+                if hasattr(hook, "is_validating"):
+                    hook.is_validating = False
 
         return avg_val_loss if "avg_val_loss" in locals() else None
 
