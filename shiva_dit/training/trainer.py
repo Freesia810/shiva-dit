@@ -1025,12 +1025,6 @@ class DiffusionModelTrainer:
 
             if stateful_metrics_to_log:
                 self.metric_manager.update(stateful_metrics_to_log)
-            self.metric_manager.log_step(self.global_step)
-
-            if hasattr(self, "step_per_layer_metrics"):
-                for key, value_dict in self.step_per_layer_metrics.items():
-                    if value_dict:
-                        self.logger.add_scalars(key, value_dict, self.global_step)
 
             if self.global_step % log_trigger == 0:
                 postfix_dict = {
@@ -1046,6 +1040,12 @@ class DiffusionModelTrainer:
                     postfix_dict["ratio_loss"] = f"{self.metric_manager.get_metric('loss/ratio/ratio_loss', 0.0):.4f}"
 
                 progress_bar.set_postfix(postfix_dict)
+
+            self.metric_manager.log_step(self.global_step)
+            if hasattr(self, "step_per_layer_metrics"):
+                for key, value_dict in self.step_per_layer_metrics.items():
+                    if value_dict:
+                        self.logger.add_scalars(key, value_dict, self.global_step)
 
             if inference_trigger and self.global_step % inference_trigger == 0:
                 self.run_inference_validation(self.global_step)
