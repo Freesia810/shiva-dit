@@ -166,7 +166,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         avg_fuse_prob = gating_weights[:, 1].mean()
 
         router_diversity_loss = (
-            1.0 - torch.tanh(self.token_scores_logits.detach()).abs()
+            1.0 - torch.tanh(self.token_scores_logits).abs()
         ).mean()
 
         g_prune = gating_weights[:, 0].unsqueeze(-1).unsqueeze(-1)
