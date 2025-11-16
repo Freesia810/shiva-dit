@@ -96,7 +96,7 @@ def install_shiva_hooks(
 
     ## initialization: keep parameters to reasonable values
     nn.init.constant_(shared_gater_policy.net[-1].bias, 0.0)
-    
+
     logit_bias = 5.0
     nn.init.constant_(shared_ratio_policy.net[-1].bias, logit_bias)
     nn.init.zeros_(shared_ratio_policy.net[-1].weight)
@@ -104,11 +104,14 @@ def install_shiva_hooks(
     for router in grouped_routers:
         nn.init.zeros_(router.router_head.weight)
         nn.init.constant_(router.router_head.bias, 1e-5)
-    
+
     fuser_last_layer = shared_fuse_expert.fusion_ffn[-1]
-    nn.init.zeros_(fuser_last_layer.weight)
-    if fuser_last_layer.bias is not None:
-        nn.init.zeros_(fuser_last_layer.bias)
+    nn.init.zeros_(fuser_last_layer.fusion_ffn[-1].weight)
+    nn.init.zeros_(fuser_last_layer.fusion_ffn[-1].bias)
+    nn.init.zeros_(fuser_last_layer.gate_mlp[-2].weight)
+    nn.init.constant_(
+        fuser_last_layer.gate_mlp[-2].bias, -5.0
+    )
 
     layers_per_group = num_layers // num_router_groups
 
