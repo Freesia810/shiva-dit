@@ -1092,7 +1092,7 @@ class DiffusionModelTrainer:
 
         if self.accelerator.is_main_process:
             print(f"\nRunning validation at step {global_step}...")
-        
+
         if self.hook_type == "shiva":
             for hook in HookManager.get_all_hooks().values():
                 if hasattr(hook, "clear_accumulators"): 
@@ -1125,12 +1125,13 @@ class DiffusionModelTrainer:
                 all_main_losses.append(main_loss)
                 all_hook_losses.append(hook_loss)
                 all_distill_losses.append(distill_loss)
-                all_hook_metrics.append(hook_metrics)
+                all_hook_metrics.append(hook_metrics) 
             except Exception as e:
                 if self.accelerator.is_main_process:
                     print(f"Error during validation batch: {e}")
                 continue
 
+        avg_val_loss = None
         if len(self.val_dataloader) > 0:
             avg_val_loss = (
                 self.accelerator.gather(torch.stack(all_total_losses)).mean().item()
@@ -1152,16 +1153,25 @@ class DiffusionModelTrainer:
                 print(f"  Avg Hook Loss:  {avg_hook_loss:.4f}")
                 print(f"  Avg Distill Loss: {avg_distill_loss:.4f}")
                 print(f"--------------------------------------")
-
+                
                 val_metrics_to_log = {}
                 if all_hook_metrics:
+                    keys_to_log = [
+                        "loss/ratio/ratio_loss",
+                        "loss/gater/gate_loss",
+                        "loss/router/diversity_loss",
+                        "adaptive_ratio/avg_ratio",
+                        "adaptive_fuse_prob/avg_fuse_prob"
+                    ]
+                    
                     avg_hook_metrics = {}
-                    keys = all_hook_metrics[0].keys()
-                    for key in keys:
-                        try:
-                            avg_hook_metrics[f"validation/{key}"] = sum(m[key] for m in all_hook_metrics) / len(all_hook_metrics)
-                        except Exception:
-                            pass
+                    for key in keys_to_log:
+                        if key in all_hook_metrics[0]: 
+                            try:
+                                avg_metric = sum(m[key] for m in all_hook_metrics) / len(all_hook_metrics)
+                                avg_hook_metrics[f"validation/{key}"] = avg_metric
+                            except Exception:
+                                pass
                     val_metrics_to_log.update(avg_hook_metrics)
                 if "validation/adaptive_ratio/avg_ratio" in val_metrics_to_log:
                     print(f"  Avg Ratio (Val): {val_metrics_to_log['validation/adaptive_ratio/avg_ratio']:.4f}")
@@ -1182,10 +1192,10 @@ class DiffusionModelTrainer:
                 if val_metrics_to_log:
                     self.logger.log_scalars(val_metrics_to_log, step=global_step)
 
-                if hasattr(self, "step_per_layer_metrics"):
-                    for key, value_dict in self.step_per_layer_metrics.items():
-                        if value_dict:
-                            self.logger.add_scalars(f"validation/{key}", value_dict, global_step)
+                # if hasattr(self, "step_per_layer_metrics"):
+                #     for key, value_dict in self.step_per_layer_metrics.items():
+                #         if value_dict:
+                #             self.logger.add_scalars(f"validation/{key}", value_dict, global_step)
 
         elif self.accelerator.is_main_process:
             print(
