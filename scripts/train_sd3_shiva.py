@@ -45,7 +45,7 @@ trainer_config = {
     "gradient_accumulation_steps": 16,
     "learning_rate": 1e-4,
     "lora_learning_rate": 1e-4,
-    "policy_learning_rate": 1e-4,
+    "policy_learning_rate": 5e-5,
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
     "lr_scheduler": "cosine",  # "linear", "cosine", "constant"
