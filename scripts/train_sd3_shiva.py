@@ -11,7 +11,7 @@ hook_config = {
     "context_pruning_threshold": None,
     "context_pruning_ratio": None,
     "init_Ts": 10.0,
-    "init_Tk": 10.0,
+    "init_Tk": 0.0,
 }
 lora_config = {
     "enable": True,
