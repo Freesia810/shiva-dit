@@ -806,7 +806,7 @@ class DiffusionModelTrainer:
         aggregated_metrics["adaptive_fuse_prob/avg_fuse_prob"] = avg_fuse_prob
         self.step_per_layer_metrics.update(
             {
-                "adaptive_fuse_prob/per_layer_fuse_prob": per_layer_probs,
+                # "adaptive_fuse_prob/per_layer_fuse_prob": per_layer_probs,
                 "adaptive_ratio/per_layer_ratios": per_layer_ratios,
             }
         )
