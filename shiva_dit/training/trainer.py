@@ -817,6 +817,10 @@ class DiffusionModelTrainer:
         autograd_stats = shiva_metrics.collect_autograd_stats(self.device)
         aggregated_metrics.update(autograd_stats)
 
+        for hook in HookManager.get_all_hooks().values():
+            if hasattr(hook, "clear_accumulators"):
+                hook.clear_accumulators()
+
         per_t_layer_ratios = [{} for _ in range(10)]
         per_t_layer_fuse_probs = [{} for _ in range(10)]
         try:

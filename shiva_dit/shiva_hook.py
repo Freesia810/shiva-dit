@@ -188,7 +188,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         return final_topk_states
 
     def _forward_eval(self, x_sel, x_rej, pure_temb, layer_emb):
-        self.clear_accumulators()
         dtype = x_sel.dtype
 
         try:
