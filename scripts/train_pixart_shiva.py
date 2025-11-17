@@ -1,21 +1,23 @@
 from shiva_dit.training import DiffusionModelTrainer, LoraConfig, TrainerConfig
-from shiva_dit.shiva import ShivaDitBlockHook
+from shiva_dit.shiva_hook import ShivaDitBlockHook
 
 HookType = ShivaDitBlockHook
 hook_config = {
-    "initial_kept_ratio": 1.0,
+    "initial_kept_ratio": 0.999,
     "num_router_groups": 14,
     "bottleneck_dim": 64,
     "layer_embed_dim": 64,
     "fuse_expert_ffn_mult": 2,
     "use_gater_lut": False,
     "context_pruning_threshold": None,
-    "context_pruning_ratio": None,      
+    "context_pruning_ratio": None,    
+    "init_Ts": 0.0,
+    "init_Tk": -7.0,
 }
 lora_config = {
     "enable": True,
-    "rank": 32,
-    "lora_alpha": 32,
+    "rank": 16,
+    "lora_alpha": 16,
     "target_modules": [
         "to_q",
         "to_k",
@@ -39,10 +41,12 @@ trainer_config = {
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
     "caption_dropout_rate": 0.25,
-    "num_epochs": 500,
+    "num_epochs": 50,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16,
-    "learning_rate": 1e-4,
+    "learning_rate": 1e-6,
+    "lora_learning_rate": 1e-6,
+    "ratio_learning_rate": 1e-4,
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
     "lr_scheduler": "cosine",  # "linear", "cosine", "constant"
@@ -64,17 +68,22 @@ trainer_config = {
     "inference_num_inference_steps": 30,
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
-    "hook_warmup_steps": 3500,  # 2 epoch
+    "hook_warmup_steps": 0,  # 2 epoch
     "extra_config": {
-        "anneal_steps": 21000,  # 12 epoch
-        "ratio_loss_weight": 0.3,
-        "target_ratio": 0.7,
+        "ratio_anneal_steps": 3500,  # 2 epoch
+        "ratio_loss_weight": 0.5,
+        "target_ratio": 0.8,
         "schedule_steps": [10500, 26250],  # 6 epoch, 15 epoch
         "gate_schedule": [0.1, 0.05, 0.01],
-        "consistency_schedule": [1e-9, 1e-9, 0.01],
+        "consistency_schedule": [1e-9, 1e-4, 0.01],
+        
+        "temp_anneal_steps": 87500,
+        "temp_anneal_schedule": "cosine",
+        "final_Ts": 30.0,
+        "final_Tk": 30.0,
     },
     "log_with_tensorboard": True,
-    "log_with_wandb": True,
+    "log_with_wandb": False,
     "wandb_project": "shiva-dit",
     "wandb_run_name": "pixart-shiva",
     "log_with_mlflow": False,

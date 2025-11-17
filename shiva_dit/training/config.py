@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Literal, Optional, Tuple, Any, Dict
+from typing import List, Literal, Optional, Tuple, Any, Dict
 
 TrainingMode = Literal["hook_only", "finetune", "lora"]
 
@@ -35,9 +35,8 @@ class TrainerConfig:
     training_mode: TrainingMode = "hook_only" # "hook_only" "finetune" "lora"
     lora_config: LoraConfig = field(default_factory=LoraConfig)
     trainable_hook_config: Tuple[type, Dict[str, Any]] = None 
+    compile_model: bool = True
 
-    # 0 -> hook_warmup_steps -> hook_only_steps
-    hook_warmup_steps: int = 0
     hook_only_steps: int = 0
 
     caption_dropout_rate: float = 0.25
@@ -47,13 +46,17 @@ class TrainerConfig:
     gradient_accumulation_steps: int = 4 # batch_size = train_batch_size * gradient_accumulation_steps
 
     learning_rate: float = 1e-4
+    lora_learning_rate: float = field(
+        default=1e-6, metadata={"help": "Learning rate for LoRA parameters."}
+    )
+    policy_learning_rate: float = field(
+        default=1e-4,
+        metadata={"help": "Learning rate for policy parameters (ratio/gate)."},
+    )
     optimizer: str = "AdamW" # "Adam", "AdamW", "SGD"
     weight_decay: float = 1e-2
     lr_scheduler: str = "cosine" # "linear", "cosine", "constant"
-    num_warmup_steps: int = None
-
-    main_loss_weight: float = 1.0
-    hook_loss_weight: float = 0.1
+    scheduler_num_warmup_steps: int = None
 
     seed: int = 42
     logging_steps: int = 50
