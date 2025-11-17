@@ -96,6 +96,9 @@ def install_shiva_hooks(
 
     ## initialization: keep parameters to reasonable values
     nn.init.constant_(shared_gater_policy.net[-1].bias, 0.0)
+    with torch.no_grad():
+        shared_gater_policy.net[-1].bias[0] = 3.0   # Prune Logit
+        shared_gater_policy.net[-1].bias[1] = -3.0  # Fuse Logit
 
     logit_bias = 5.0
     nn.init.constant_(shared_ratio_policy.net[-1].bias, logit_bias)
@@ -103,7 +106,7 @@ def install_shiva_hooks(
 
     for router in grouped_routers:
         nn.init.zeros_(router.router_head.weight)
-        nn.init.constant_(router.router_head.bias, 1e-5)
+        nn.init.constant_(router.router_head.bias, 1.0)
 
     nn.init.zeros_(shared_fuse_expert.fusion_ffn[-1].weight)
     nn.init.zeros_(shared_fuse_expert.fusion_ffn[-1].bias)
