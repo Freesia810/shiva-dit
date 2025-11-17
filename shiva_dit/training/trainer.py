@@ -432,11 +432,11 @@ class DiffusionModelTrainer:
             #     "topkgrads/z_std",
             #     "topkgrads/z_mean",
             # ],
-            # "topkgrads/grad_probs": [
-            #     "topkgrads/grad_probs_norm",
-            #     "topkgrads/grad_probs_sum",
-            #     "topkgrads/grad_probs_std",
-            # ],
+            "topkgrads/grad_probs": [
+                "topkgrads/grad_probs_norm",
+                "topkgrads/grad_probs_sum",
+                "topkgrads/grad_probs_std",
+            ],
             # "topkgrads/sigmoid_prime": [
             #     "topkgrads/sigmoid_prime_mean",
             #     "topkgrads/sigmoid_prime_std",
@@ -1433,6 +1433,20 @@ class DiffusionModelTrainer:
         global_context.update(encoder_flag=True)
 
         self._try_resume()
+        if self.accelerator.is_main_process:
+            print(f"Force updating Learning Rate to: {self.config.learning_rate}")
+            print(f"Force updating Lora Learning Rate to: {self.config.lora_learning_rate}")
+            print(f"Force updating Policy Learning Rate to: {self.config.policy_learning_rate}")
+        
+        # group[0]: LoRA params
+        # group[1]: Policy params (Gater/Ratio)
+        # group[2]: Base params
+        if len(self.optimizer.param_groups) > 1:
+            self.optimizer.param_groups[0]['lr'] = self.config.lora_learning_rate
+            self.optimizer.param_groups[1]['lr'] = self.config.policy_learning_rate
+            self.optimizer.param_groups[2]['lr'] = self.config.learning_rate
+
+
         self._initial_phase()
 
         self.prev_lora_state = None

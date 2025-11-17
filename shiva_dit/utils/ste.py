@@ -121,12 +121,12 @@ class ShivaTopkFunc(torch.autograd.Function):
 
             if torch.rand(1) < 0.05:
                 with torch.no_grad():
-                    # ShivaTopkFunc._last_grad_probs_stats = {
-                    #     "norm": torch.norm(grad_probs),
-                    #     "mean": grad_probs.mean(),
-                    #     "std": grad_probs.std(),
-                    #     "sum": grad_probs.sum(),
-                    # }
+                    ShivaTopkFunc._last_grad_probs_stats = {
+                        "norm": torch.norm(grad_probs),
+                        "mean": grad_probs.mean(),
+                        "std": grad_probs.std(),
+                        "sum": grad_probs.sum(),
+                    }
 
                     ShivaTopkFunc._last_soft_ranks_stats = {
                         "mean": soft_ranks.mean(),
