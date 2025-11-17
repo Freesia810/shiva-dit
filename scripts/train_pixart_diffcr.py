@@ -10,7 +10,7 @@ hook_config = {
 lora_config = {
     "enable": True,
     "rank": 32,
-    "lora_alpha": 64,
+    "lora_alpha": 32,
     "target_modules": [
         "to_q",
         "to_k",
@@ -39,6 +39,8 @@ trainer_config = {
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16,
     "learning_rate": 1e-6,
+    "lora_learning_rate": 1e-6,
+    "ratio_learning_rate": 1e-4,
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
     "lr_scheduler": "cosine", # "linear", "cosine", "constant"
@@ -54,7 +56,7 @@ trainer_config = {
     "val_metadata_file": "../dataset/MJHQ-30K/val.jsonl",
     "val_image_dir": "../dataset/MJHQ-30K/",
     "run_inference_validation": True,
-    "inference_steps": 438, # 1 epoch
+    "inference_steps": 875, # 1 epoch
     "inference_metadata_file": "../dataset/MJHQ-30K/test.jsonl",
     "inference_seed": 42,
     "inference_num_inference_steps": 30,
@@ -66,13 +68,17 @@ trainer_config = {
     },
     "log_with_tensorboard": True,
     "log_with_wandb": True,
-    "wandb_project": "generative-model-boost",
+    "wandb_project": "shiva-dit",
     "wandb_run_name": "pixart-diffcr",
     "log_with_mlflow": True,
-    "mlflow_experiment_name": "generative-model-boost",
+    "mlflow_experiment_name": "shiva-dit",
     "mlflow_run_name": "pixart-diffcr",
     "mlflow_tracking_uri": None,
 }
+
+print(hook_config)
+print(lora_config)
+print(trainer_config)
 
 config = TrainerConfig(**trainer_config)
 trainer = DiffusionModelTrainer(config=config)

@@ -1,16 +1,17 @@
 from shiva_dit.training import DiffusionModelTrainer, LoraConfig, TrainerConfig
-from shiva_dit.shiva import ShivaDitBlockHook
+from shiva_dit.shiva_hook import ShivaDitBlockHook
 
 HookType = ShivaDitBlockHook
 hook_config = {
-    "initial_kept_ratio": 1.0,
-    "num_router_groups": 4,
+    "num_router_groups": 24,
     "bottleneck_dim": 64,
     "layer_embed_dim": 64,
     "fuse_expert_ffn_mult": 2,
     "use_gater_lut": False,
     "context_pruning_threshold": None,
-    "context_pruning_ratio": None,      
+    "context_pruning_ratio": None,
+    "init_Ts": 10.0,
+    "init_Tk": 0.0,
 }
 lora_config = {
     "enable": True,
@@ -39,19 +40,19 @@ trainer_config = {
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
     "caption_dropout_rate": 0.25,
-    "num_epochs": 500,
+    "num_epochs": 50,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16,
-    "learning_rate": 1e-4,
+    "learning_rate": 1e-5,
+    "lora_learning_rate": 1e-5,
+    "policy_learning_rate": 1e-5,
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
     "lr_scheduler": "cosine",  # "linear", "cosine", "constant"
-    "num_warmup_steps": 0,
-    "main_loss_weight": 1.0,
-    "hook_loss_weight": 1.0,
+    "scheduler_num_warmup_steps": 0,
     "seed": 42,
     "logging_steps": 5,
-    "save_steps": 3500,  # 1 epoch
+    "save_steps": 1750,  # 2 epoch
     "run_validation": True,
     "validation_steps": 875,  # 0.5 epoch
     "val_batch_size": None,
@@ -64,14 +65,17 @@ trainer_config = {
     "inference_num_inference_steps": 30,
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
-    "hook_warmup_steps": 3500,  # 2 epoch
     "extra_config": {
-        "anneal_steps": 21000,  # 12 epoch
-        "ratio_loss_weight": 0.3,
         "target_ratio": 0.8,
-        "schedule_steps": [10500, 26250],  # 6 epoch, 15 epoch
-        "gate_schedule": [0.1, 0.05, 0.01],
-        "consistency_schedule": [1e-9, 1e-9, 0.01],
+        "stage_schedule": [
+            {"steps": 3500, "weights": {"ratio": 1.0, "gate": 0.0, "diversity": 0.0}},
+            {"steps": 21000, "weights": {"ratio": 2.0, "gate": 0.0, "diversity": 0.1}},
+            {"steps": 10500, "weights": {"ratio": 2.0, "gate": 0.5, "diversity": 0.1}},
+            {
+                "steps": -1,
+                "weights": {"ratio": 0.5, "gate": 0.1, "diversity": 0.1},
+            },
+        ],
     },
     "log_with_tensorboard": True,
     "log_with_wandb": True,
@@ -82,6 +86,10 @@ trainer_config = {
     "mlflow_run_name": "sd3-shiva",
     "mlflow_tracking_uri": None,
 }
+
+print(hook_config)
+print(lora_config)
+print(trainer_config)
 
 config = TrainerConfig(**trainer_config)
 trainer = DiffusionModelTrainer(config=config)

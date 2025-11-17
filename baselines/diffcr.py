@@ -60,8 +60,10 @@ class DiffCRDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         hidden_dim = global_context.hidden_dim
         if hidden_dim is None:
             raise ValueError("hidden_dim must be set in global_context")
-        self.hidden_router = nn.Linear(hidden_dim, 1, bias=False)
-        nn.init.constant_(self.hidden_router.weight, 5.0)
+        self.hidden_router = nn.Linear(hidden_dim, 1, bias=True)
+        # init for the gate scores
+        nn.init.zeros_(self.hidden_router.weight)
+        nn.init.constant_(self.hidden_router.bias, 5.0)
         self.dtype = torch.float32
         self.to(device=next(block.parameters()).device, dtype=self.dtype)
 
@@ -191,7 +193,7 @@ class DiffCRDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             return torch.tensor(0.0, device)
 
 if __name__ == "__main__":
-    model_type = "pixart-sigma"
+    model_type = "sd3"
     pipe, model_attrs = get_pipeline(model_type)
 
     diffcr_config = {

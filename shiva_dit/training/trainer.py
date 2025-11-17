@@ -18,7 +18,6 @@ from baselines.diffcr import DiffCRDitBlockHook
 from baselines.dy_dit import DynamicDiTBlockHook
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from shiva_dit.hook import HookManager
-from shiva_dit.shiva import ShivaDitBlockHook
 from shiva_dit.utils import get_pipeline
 from shiva_dit.training.input_preparers import get_input_preparer
 from shiva_dit.training.config import TrainerConfig
@@ -26,17 +25,13 @@ from shiva_dit.training.dataset import ImageTextDataset, collate_fn
 from shiva_dit.training.logging import NoOpLogger
 from shiva_dit.training.metric_manager import MetricManager
 from shiva_dit.utils import global_context
+import shiva_dit.shiva_metrics as shiva_metrics
 
 
 class DiffusionModelTrainer:
     def __init__(self, config: TrainerConfig):
         self.config = config
         self.model_type = config.model_type
-
-        # shiva's extra schedule
-        self.consistency_schedule = self.config.extra_config.get("consistency_schedule", [1.0, 0.1, 0.1])
-        self.gate_schedule = self.config.extra_config.get("gate_schedule", [0.0, 0.0, 0.01])
-        self.schedule_steps = self.config.extra_config.get("schedule_steps", [5000, 10000])
 
         self.input_preparer_fn = get_input_preparer(self.model_type)
 
@@ -96,34 +91,45 @@ class DiffusionModelTrainer:
         """
         config = self.config
 
-        # Shiva loss schedule
-        self.scaled_schedule_steps_0 = self._scale_steps(self.schedule_steps[0])
-        self.scaled_schedule_steps_1 = self._scale_steps(self.schedule_steps[1])
+        self.processed_stage_schedule = []
+        current_step_threshold = 0
+        if 'stage_schedule' not in self.config.extra_config:
+            self.processed_stage_schedule.append({
+                "threshold": float('inf'),
+                "weights": {"ratio": 0.5, "gate": 0.1, "diversity": 0.1}
+            })
+        else:
+            for i, stage in enumerate(self.config.extra_config['stage_schedule']):
+                stage_duration = stage["steps"]
+                if (
+                    stage_duration < 0
+                    or i == len(self.config.extra_config["stage_schedule"]) - 1
+                ):
+                    current_step_threshold = float('inf')
+                else:
+                    scaled_duration = self._scale_steps(stage_duration)
+                    current_step_threshold += scaled_duration
 
-        # Shiva ratio loss annealing
-        self.scaled_hook_warmup_steps = self._scale_steps(config.hook_warmup_steps)
-        self.scaled_anneal_steps = self._scale_steps(
-            config.extra_config.get("anneal_steps", 0)
-        )
+                self.processed_stage_schedule.append({
+                    "threshold": current_step_threshold,
+                    "weights": stage["weights"]
+                })
 
-        # Hook-only phase
+                if current_step_threshold == float('inf'):
+                    break
+
         self.scaled_hook_only_steps = self._scale_steps(config.hook_only_steps)
-
-        # Logging & Validation Triggers
         self.log_trigger = self._scale_steps(config.logging_steps)
-
         self.validate_trigger = (
             self._scale_steps(config.validation_steps)
             if config.validation_steps > 0
             else None
         )
-
         self.inference_trigger = (
             self._scale_steps(config.inference_steps)
             if config.inference_steps > 0
             else None
         )
-
         self.save_trigger = (
             self._scale_steps(config.save_steps) if config.save_steps > 0 else None
         )
@@ -245,8 +251,6 @@ class DiffusionModelTrainer:
 
     def _setup_dataloaders(self):
         config = self.config
-        total_cores = os.cpu_count()
-        num_workers = min(total_cores, 64)
         self.train_dataset = ImageTextDataset(
             model_type=self.model_type,
             metadata_file=config.metadata_file,
@@ -260,7 +264,6 @@ class DiffusionModelTrainer:
             batch_size=config.train_batch_size,
             shuffle=True,
             collate_fn=collate_fn,
-            num_workers=num_workers,
             pin_memory=True,
         )
 
@@ -285,7 +288,6 @@ class DiffusionModelTrainer:
                     batch_size=val_batch_size,
                     shuffle=False,
                     collate_fn=collate_fn,
-                    num_workers=num_workers,
                     pin_memory=True,
                 )
             except Exception as e:
@@ -388,36 +390,62 @@ class DiffusionModelTrainer:
 
     def _setup_metric_manager(self):
         self.metric_grouping_rules = {
-            "shiva/ratio/values": [
-                "shiva/ratio/avg_ratio",
-                "shiva/ratio/std_ratio",
-                "shiva/ratio/target_ratio",
+            "loss/losses_weighted": [
+                "loss/ratio/ratio_loss",
+                "loss/gater/gate_loss",
+                "loss/router/diversity_loss",
             ],
-            "shiva/losses": [
-                "shiva/ratio/ratio_loss",
-                "shiva/gater/gate_loss",
-                "shiva/gater/consistency_loss",
+            "loss/losses_raw": [
+                "loss/ratio/ratio_loss_raw",
+                "loss/gater/gate_loss_raw",
+                "loss/router/diversity_loss_raw",
             ],
-            "shiva/losses_raw": [
-                "shiva/ratio/ratio_loss_raw",
-                "shiva/gater/gate_loss_raw",
-                "shiva/gater/consistency_loss_raw",
+            "router/scores": [
+                "router/mean_score",
+                "router/min_score",
+                "router/max_score",
+                "router/p25_score",
+                "router/p50_score",
+                "router/p75_score",
             ],
-            "shiva/router/scores": [
-                "shiva/router/mean_score",
-                "shiva/router/std_score",
-                "shiva/router/min_score",
+            "router/distribution": [
+                "router/std_score",
+                "router/s_scale_std",
             ],
-            "shiva/fuser/behavior_norm": [
-                "shiva/fuser/avg_discarded_norm",
-                "shiva/fuser/avg_diff_norm",
+            "router/s_scale": [
+                "router/s_scale_mean",
             ],
-            "shiva/fuser/cosine_sim": [
-                "shiva/fuser/avg_cos_sim",
+            "adaptive_ratio": [
+                "adaptive_ratio/target_ratio",
+                "adaptive_ratio/avg_ratio",
             ],
-            "shiva/fuser/gate_prob_avg": [
-                "shiva/fuser/avg_fuse_prob",
-            ]
+            "adaptive_fuse_prob": [
+                "adaptive_fuse_prob/avg_fuse_prob",
+            ],
+            "topkgrads/soft_ranks": [
+                "topkgrads/soft_ranks_std",
+                "topkgrads/soft_ranks_mean",
+                "topkgrads/soft_ranks_min",
+                "topkgrads/soft_ranks_max",
+            ],
+            # "topkgrads/z_stats": [
+            #     "topkgrads/z_std",
+            #     "topkgrads/z_mean",
+            # ],
+            "topkgrads/grad_probs": [
+                "topkgrads/grad_probs_norm",
+                "topkgrads/grad_probs_sum",
+                "topkgrads/grad_probs_std",
+            ],
+            # "topkgrads/sigmoid_prime": [
+            #     "topkgrads/sigmoid_prime_mean",
+            #     "topkgrads/sigmoid_prime_std",
+            # ],
+            "topkgrads/module": [
+                "topkgrads/router_avg_norm",
+                "topkgrads/gater_policy_avg_norm",
+                "topkgrads/ratio_policy_avg_norm",
+            ],
         }
 
         self.metric_manager = MetricManager(
@@ -432,30 +460,36 @@ class DiffusionModelTrainer:
         for text_encoder in self.text_encoders:
             text_encoder.requires_grad_(False)
 
-        params_to_train = []
-
         if self.config.training_mode == "hook_only":
             if self.accelerator.is_main_process:
                 print("Training mode: hook_only (only training Hook parameters)")
             self.model.requires_grad_(False)
+
+            hook_param_found = False
             for hook in HookManager.get_all_hooks().values():
                 if isinstance(hook, nn.Module):
                     hook.requires_grad_(True)
-                    params_to_train.extend(hook.parameters())
+                    if list(hook.parameters()):
+                        hook_param_found = True
 
-            if not params_to_train:
-                raise ValueError(
-                    "No trainable Hook parameters found in 'hook_only' mode."
-                )
+            if not hook_param_found:
+                all_hook_params = []
+                for hook in HookManager.get_all_hooks().values():
+                    if isinstance(hook, nn.Module):
+                        all_hook_params.extend(list(hook.parameters()))
+                if not all_hook_params:
+                    raise ValueError(
+                        "No trainable Hook parameters found in 'hook_only' mode."
+                    )
+
         elif self.config.training_mode == "finetune":
             if self.accelerator.is_main_process:
                 print("Training mode: finetune (training all DiT parameters)")
             self.model.requires_grad_(True)
-            params_to_train = list(self.model.parameters())
             for hook in HookManager.get_all_hooks().values():
                 if isinstance(hook, nn.Module):
                     hook.requires_grad_(True)
-                    params_to_train.extend(hook.parameters())
+
         elif self.config.training_mode == "lora":
             if self.accelerator.is_main_process:
                 print("Training mode: lora (applying LoRA to DiT model)")
@@ -478,31 +512,77 @@ class DiffusionModelTrainer:
                 bias="none",
             )
             self.model = get_peft_model(self.model, peft_config)
-            self.model.print_trainable_parameters()
+
+            if self.accelerator.is_main_process:
+                self.model.print_trainable_parameters()
+
             for hook in HookManager.get_all_hooks().values():
                 if isinstance(hook, nn.Module):
                     hook.requires_grad_(True)
-            params_to_train = [p for p in self.model.parameters() if p.requires_grad]
         else:
             raise ValueError(f"Unknown training mode: {self.config.training_mode}")
 
+        lora_params = []
+        policy_params = []
+        other_model_params = []
+
+        policy_modules = []
+        for hook in HookManager.get_all_hooks().values():
+            if hasattr(hook, "gater_policy"):
+                policy_modules.append(hook.gater_policy)
+            if hasattr(hook, "ratio_policy"):
+                policy_modules.append(hook.ratio_policy)
+
+        policy_param_ids = set()
+        for mod in policy_modules:
+            for param in mod.parameters():
+                policy_param_ids.add(id(param))
+
+        for name, param in self.model.named_parameters():
+            if not param.requires_grad:
+                continue
+
+            if id(param) in policy_param_ids:
+                policy_params.append(param)
+            elif "lora" in name:
+                lora_params.append(param)
+            else:
+                other_model_params.append(param)
+
+        base_lr_params = other_model_params
+
+        if self.accelerator.is_main_process:
+            print(f"Optimizing {len(lora_params)} LoRA params with LR: {self.config.lora_learning_rate}")
+            print(
+                f"Optimizing {len(policy_params)} Policy params with LR: {self.config.policy_learning_rate}"
+            )
+            print(f"Optimizing {len(base_lr_params)} other params with LR: {self.config.learning_rate}")
+
+        optimizer_grouped_parameters = [
+            {"params": lora_params, "lr": self.config.lora_learning_rate, "weight_decay": self.config.weight_decay},
+            {"params": policy_params, "lr": self.config.policy_learning_rate, "weight_decay": 0.0},
+            {"params": base_lr_params, "lr": self.config.learning_rate, "weight_decay": self.config.weight_decay},
+        ]
+
+        optimizer_grouped_parameters = [g for g in optimizer_grouped_parameters if g["params"]]
+
+        if not optimizer_grouped_parameters:
+            raise ValueError("No trainable parameters found for the optimizer.")
+
         if self.config.optimizer == "AdamW":
             optimizer = torch.optim.AdamW(
-                params_to_train,
-                lr=self.config.learning_rate,
-                weight_decay=self.config.weight_decay,
+                optimizer_grouped_parameters,
             )
         else:
             # TODO: add more optimizers if needed
             raise ValueError(f"Unknown optimizer: {self.config.optimizer}")
 
         return optimizer
-
     def _setup_scheduler(self):
         scheduler = get_scheduler(
             self.config.lr_scheduler,
             optimizer=self.optimizer,
-            num_warmup_steps=self.config.num_warmup_steps,
+            num_warmup_steps=self.config.scheduler_num_warmup_steps,
             num_training_steps=self.num_training_steps,
         )
         return scheduler
@@ -703,118 +783,110 @@ class DiffusionModelTrainer:
 
         main_loss = F.mse_loss(
             noise_pred.float(), noise_target.float(), reduction="mean"
-        ) * self.config.main_loss_weight
+        )
 
         return main_loss
 
     def _get_shiva_loss_config(self, global_step: int) -> dict:
-        # multi-stage schedule for Shiva gater
-        current_consistency_weight = self.consistency_schedule[0]
-        current_gate_weight = self.gate_schedule[0]
+        current_weights = {}
 
-        if global_step > self.scaled_schedule_steps_0:
-            current_consistency_weight = self.consistency_schedule[1]
-            current_gate_weight = self.gate_schedule[1]
-        if global_step > self.scaled_schedule_steps_1:
-            current_consistency_weight = self.consistency_schedule[2]
-            current_gate_weight = self.gate_schedule[2]
+        for stage in self.processed_stage_schedule:
+            current_weights = stage["weights"]
+            if global_step < stage["threshold"]:
+                break
 
-        def get_annealing_weight(global_step, start_step, end_step):
-            if global_step < start_step:
-                return 0.0
-            progress = (global_step - start_step) / max(1.0, end_step - start_step)
-            return min(1.0, progress)
+        config = {}
+        config["ratio_loss_weight"] = current_weights.get("ratio", 0.0)
+        config["gate_loss_weight"] = current_weights.get("gate", 0.0)
+        config["diversity_loss_weight"] = current_weights.get("diversity", 0.0)
+        config["target_ratio"] = self.config.extra_config['target_ratio']
 
-        anneal_factor = get_annealing_weight(
-            global_step, self.scaled_hook_warmup_steps, self.scaled_anneal_steps
-        )
+        return config
 
-        base_lambda = self.config.extra_config["ratio_loss_weight"]
-        current_ratio_weight = base_lambda * anneal_factor
-
-        start_ratio = 1.0
-        final_target_ratio = self.config.extra_config["target_ratio"]
-        current_target_ratio = (
-            start_ratio - (start_ratio - final_target_ratio) * anneal_factor
-        )
-
-        return {
-            "ratio_loss_weight": current_ratio_weight,
-            "target_ratio": current_target_ratio,
-            "consistency_loss_weight": current_consistency_weight,
-            "gate_loss_weight": current_gate_weight,
-        }
-
-    def _calculate_hook_loss(self, global_step: int):
+    def _calculate_hook_loss(self, global_step: int, timestep: torch.Tensor):
         total_hook_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
         aggregated_metrics = {}
         self.step_per_layer_metrics = {}
 
-        is_hook_warmup = False
-        if self.config.hook_warmup_steps > 0:
-            if global_step < self.scaled_hook_warmup_steps:
-                is_hook_warmup = True
+        if self.hook_type != "shiva":
+            return total_hook_loss, aggregated_metrics
 
-        if self.hook_type == "dydit":
-            hook_loss = DynamicDiTBlockHook.calculate_flops_loss(
-                self.config.extra_config, device=self.device
-            )
-            total_hook_loss = hook_loss
-        elif self.hook_type == "diffcr":
-            ratio_loss = DiffCRDitBlockHook.calculate_ratio_loss(
-                self.config.extra_config, device=self.device
-            )
+        loss_config = self._get_shiva_loss_config(global_step)
 
-            if is_hook_warmup:
-                ratio_loss = ratio_loss * 1e-9
+        diversity_loss, d_metrics = shiva_metrics.calculate_diversity_loss(
+            loss_config, self.device
+        )
+        gate_loss, g_metrics = shiva_metrics.calculate_gate_loss(
+            loss_config, self.device
+        )
+        ratio_loss, r_metrics, per_layer_ratios = (
+            shiva_metrics.calculate_ratio_loss(loss_config, self.device)
+        )
 
-            total_hook_loss = ratio_loss
-        elif self.hook_type == "shiva":
-            loss_config = self._get_shiva_loss_config(global_step)
+        total_hook_loss = diversity_loss + gate_loss + ratio_loss
 
-            consistency_loss, c_metrics = ShivaDitBlockHook.calculate_consistency_loss(
-                loss_config, self.device
-            )
-            gate_loss, g_metrics = ShivaDitBlockHook.calculate_gate_loss(
-                loss_config, self.device
-            )
-            ratio_loss, r_metrics, per_layer_ratios = ShivaDitBlockHook.calculate_ratio_loss(
-                loss_config, self.device
-            )
+        aggregated_metrics.update(d_metrics)
+        aggregated_metrics.update(g_metrics)
+        aggregated_metrics.update(r_metrics)
 
-            if is_hook_warmup:
-                consistency_loss = consistency_loss * 1e-9
-                ratio_loss = ratio_loss * 1e-9
+        avg_fuse_prob, per_layer_probs = (
+            shiva_metrics.calculate_shiva_gate_prob(self.device)
+        )
+        aggregated_metrics["adaptive_fuse_prob/avg_fuse_prob"] = avg_fuse_prob
+        self.step_per_layer_metrics.update(
+            {
+                # "adaptive_fuse_prob/per_layer_fuse_prob": per_layer_probs,
+                "adaptive_ratio/per_layer_ratios": per_layer_ratios,
+            }
+        )
 
-            total_hook_loss = consistency_loss + gate_loss + ratio_loss
+        router_stats = shiva_metrics.collect_router_stats(self.device)
+        aggregated_metrics.update(router_stats)
 
-            aggregated_metrics.update(c_metrics)
-            aggregated_metrics.update(g_metrics)
-            aggregated_metrics.update(r_metrics)
-            aggregated_metrics["shiva/ratio/target_ratio"] = loss_config["target_ratio"]
+        autograd_stats = shiva_metrics.collect_autograd_stats(self.device)
+        aggregated_metrics.update(autograd_stats)
 
-            avg_fuse_prob, per_layer_probs = (
-                ShivaDitBlockHook.calculate_shiva_gate_prob(self.device)
-            )
-            aggregated_metrics["shiva/fuser/avg_fuse_prob"] = avg_fuse_prob.item()
+        for hook in HookManager.get_all_hooks().values():
+            if hasattr(hook, "clear_accumulators"):
+                hook.clear_accumulators()
+
+        per_t_layer_ratios = [{} for _ in range(10)]
+        per_t_layer_fuse_probs = [{} for _ in range(10)]
+        per_timestep_avg_ratios = {}
+        per_timestep_fuse_probs = {}
+        try:
+            t_int = int(timestep[0].item())
+            t_group = min(t_int // 100, 9)
+
+            for layer_id, ratio_val in per_layer_ratios.items():
+                per_t_layer_ratios[t_group][layer_id] = ratio_val
+            for layer_id, prob_val in per_layer_probs.items():
+                per_t_layer_fuse_probs[t_group][layer_id] = prob_val
+
+            current_avg_ratio = r_metrics.get("adaptive_ratio/avg_ratio")
+            if current_avg_ratio is not None:
+                per_timestep_avg_ratios = {
+                    f"t_group_{t_group}": current_avg_ratio
+                }
+            current_fuse_probs = avg_fuse_prob
+            if current_fuse_probs is not None:
+                per_timestep_fuse_probs = {
+                    f"t_group_{t_group}": current_fuse_probs
+                }
+        except Exception:
+            pass
+        for i in range(10):
             self.step_per_layer_metrics.update({
-                "shiva/fuser/per_layer_fuse_prob": per_layer_probs,
-                "shiva/ratio/per_layer_ratios": per_layer_ratios,
+                f"adaptive_ratio/t_group_{i}": per_t_layer_ratios[i],
+                # f"adaptive_fuse_prob/t_group_{i}": per_t_layer_fuse_probs[i],
             })
 
-            router_stats = ShivaDitBlockHook.collect_router_stats(self.device)
-            aggregated_metrics.update(router_stats)
+        self.step_per_layer_metrics.update({
+            "adaptive_ratio/per_timestep_ratios": per_timestep_avg_ratios,
+            "adaptive_fuse_prob/per_timestep_fuse_probs": per_timestep_fuse_probs,
+        })
 
-            fuser_stats_global, fuser_stats_per_layer = ShivaDitBlockHook.collect_fuser_stats(self.device)
-            aggregated_metrics.update(fuser_stats_global)
-            self.step_per_layer_metrics.update(fuser_stats_per_layer)
-
-        else:
-            total_hook_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
-
-        current_hook_loss_weight = self.config.hook_loss_weight
-
-        return total_hook_loss * current_hook_loss_weight, aggregated_metrics
+        return total_hook_loss, aggregated_metrics
 
     def _compute_loss(self, batch, global_step: int):
         img_latents, noise, noisy_latents, timesteps, model_kwargs = (
@@ -828,7 +900,7 @@ class DiffusionModelTrainer:
         )
 
         main_loss = self._calculate_main_loss(noise_pred, noise, img_latents)
-        hook_loss, hook_metrics = self._calculate_hook_loss(global_step)
+        hook_loss, hook_metrics = self._calculate_hook_loss(global_step, timesteps)
         total_loss = main_loss + hook_loss + distill_loss
 
         return total_loss, main_loss, hook_loss, distill_loss, hook_metrics
@@ -839,8 +911,7 @@ class DiffusionModelTrainer:
         )
         self.accelerator.backward(total_loss)
 
-        if self.accelerator.is_main_process:
-            self.step_metrics = hook_metrics
+        self.step_metrics = hook_metrics
 
         return (
             total_loss.detach(),
@@ -883,105 +954,145 @@ class DiffusionModelTrainer:
         if save_trigger and self.global_step % save_trigger == 0:
             self.maybe_save_periodically()
 
-        if self.accelerator.is_main_process:
-            metrics_to_log = self.step_metrics.copy()
+        metrics_to_log_tensors = self.step_metrics.copy()
 
-            if self.config.training_mode == 'lora':
-                lora_params = [
-                    p for n, p in self.model.named_parameters() if "lora_" in n
-                ]
+        metrics_to_log_tensors.update({
+            "train/total_loss": gathered_losses["total"],
+            "train/main_loss": gathered_losses["main"],
+            "train/extra_loss": gathered_losses["hook"],
+            "train/distill_loss": gathered_losses["distill"],
+            "train/lr": torch.tensor(self.lr_scheduler.get_last_lr()[0], device=self.device),
+        })
 
+        if self.config.training_mode == 'lora':
+            lora_params = [
+                p for n, p in self.model.named_parameters() if "lora_" in n
+            ]
+            if lora_params:
                 lora_norm = torch.norm(
                     torch.stack([torch.norm(p.detach()) for p in lora_params])
-                ).item()
-
+                )
                 lora_grads = [
                     torch.norm(p.grad.detach())
                     for p in lora_params
                     if p.grad is not None
                 ]
+                lora_grad_norm = torch.norm(torch.stack(lora_grads)) if lora_grads else torch.tensor(0.0, device=self.device)
+                metrics_to_log_tensors.update({
+                    "lora/param_norm": lora_norm, 
+                    "lora/grad_norm": lora_grad_norm, 
+                })
+        elif self.config.training_mode == "finetune":
+            all_trainable_params = [
+                p for p in self.model.parameters() if p.requires_grad
+            ]
+            if all_trainable_params:
+                param_norm = torch.norm(
+                    torch.stack([torch.norm(p.detach()) for p in all_trainable_params])
+                )
+                param_grads = [
+                    torch.norm(p.grad.detach())
+                    for p in all_trainable_params
+                    if p.grad is not None
+                ]
+                grad_norm = torch.norm(torch.stack(param_grads)) if param_grads else torch.tensor(0.0, device=self.device)
+                metrics_to_log_tensors.update({
+                    "finetune/param_norm": param_norm, 
+                    "finetune/grad_norm": grad_norm, 
+                })
 
-                if len(lora_grads) > 0:
-                    lora_grad_norm = torch.norm(torch.stack(lora_grads)).item()
-                else:
-                    lora_grad_norm = 0.0
+        if self.hook_type == "shiva":
+            shiva_grad_metrics = {}
+            router_grad_norms = []
+            gater_policy_grad_norms = []
+            ratio_policy_grad_norms = []
 
-                if self.prev_lora_state is not None:
+            unwrapped_model = self.accelerator.unwrap_model(self.model)
+            for name, param in unwrapped_model.named_parameters():
+                if param.grad is None:
+                    continue
+
+                grad_norm_tensor = torch.norm(param.grad.detach())
+
+                if "router." in name:
+                    router_grad_norms.append(grad_norm_tensor)
+                elif "gater_policy." in name:
+                    gater_policy_grad_norms.append(grad_norm_tensor)
+                elif "ratio_policy." in name:
+                    ratio_policy_grad_norms.append(grad_norm_tensor)
+
+            if router_grad_norms:
+                shiva_grad_metrics["topkgrads/router_avg_norm"] = torch.stack(router_grad_norms).mean()
+            if gater_policy_grad_norms:
+                shiva_grad_metrics["topkgrads/gater_policy_avg_norm"] = torch.stack(gater_policy_grad_norms).mean()
+            if ratio_policy_grad_norms:
+                shiva_grad_metrics["topkgrads/ratio_policy_avg_norm"] = torch.stack(ratio_policy_grad_norms).mean()
+
+            metrics_to_log_tensors.update(shiva_grad_metrics)
+
+        self.metric_manager.update(metrics_to_log_tensors, gather=True)
+
+        if self.accelerator.is_main_process:
+            stateful_metrics_to_log = {}
+            if self.config.training_mode == 'lora':
+                lora_params = [
+                    p for n, p in self.model.named_parameters() if "lora_" in n
+                ]
+                if self.prev_lora_state is not None and lora_params:
                     deltas = [
                         torch.norm(p.detach().cpu() - self.prev_lora_state[i])
                         for i, p in enumerate(lora_params)
                     ]
-                    lora_delta = torch.mean(torch.stack(deltas)).item()
+                    lora_delta = torch.mean(torch.stack(deltas))
                 else:
                     lora_delta = 0.0
                 self.prev_lora_state = [p.detach().cpu().clone() for p in lora_params]
-                metrics_to_log.update({
-                    "lora/param_norm": lora_norm, 
-                    "lora/grad_norm": lora_grad_norm, 
+                stateful_metrics_to_log.update({
                     "lora/param_delta": lora_delta
                 })
             elif self.config.training_mode == "finetune":
                 all_trainable_params = [
                     p for p in self.model.parameters() if p.requires_grad
                 ]
-                param_norm = torch.norm(
-                    torch.stack([torch.norm(p.detach()) for p in all_trainable_params])
-                ).item()
-                param_grads = [
-                    torch.norm(p.grad.detach())
-                    for p in all_trainable_params
-                    if p.grad is not None
-                ]
-                grad_norm = (
-                    torch.norm(torch.stack(param_grads)).item() if param_grads else 0.0
-                )
-                if self.prev_finetune_state is not None:
+                if self.prev_finetune_state is not None and all_trainable_params:
                     deltas = [
                         torch.norm(p.detach().cpu() - self.prev_finetune_state[i])
                         for i, p in enumerate(all_trainable_params)
                     ]
-                    param_delta = torch.mean(torch.stack(deltas)).item()
+                    param_delta = torch.mean(torch.stack(deltas))
                 else:
                     param_delta = 0.0
 
                 self.prev_finetune_state = [
                     p.detach().cpu().clone() for p in all_trainable_params
                 ]
-                metrics_to_log.update({
-                    "finetune/param_norm": param_norm, 
-                    "finetune/grad_norm": grad_norm, 
+                stateful_metrics_to_log.update({
                     "finetune/param_delta": param_delta
                 })
 
-            metrics_to_log.update({
-                "train/total_loss": gathered_losses["total"].item(),
-                "train/main_loss": gathered_losses["main"].item(),
-                "train/extra_loss": gathered_losses["hook"].item(),
-                "train/distill_loss": gathered_losses["distill"].item(),
-                "train/lr": self.lr_scheduler.get_last_lr()[0],
-            })
+            if stateful_metrics_to_log:
+                self.metric_manager.update(stateful_metrics_to_log)
 
-            self.metric_manager.update(metrics_to_log)
+            if self.global_step % log_trigger == 0:
+                postfix_dict = {
+                    "loss": f"{self.metric_manager.get_metric('train/total_loss'):.4f}",
+                    "main_loss": f"{self.metric_manager.get_metric('train/main_loss'):.4f}",
+                    "extra_loss": f"{self.metric_manager.get_metric('train/extra_loss'):.4f}",
+                    "distill_loss": f"{self.metric_manager.get_metric('train/distill_loss'):.4f}",
+                    "lr": f"{self.metric_manager.get_metric('train/lr'):.2e}",
+                    "step": self.global_step,
+                }
+
+                if self.hook_type == "shiva":
+                    postfix_dict["ratio_loss"] = f"{self.metric_manager.get_metric('loss/ratio/ratio_loss', 0.0):.4f}"
+
+                progress_bar.set_postfix(postfix_dict)
+
             self.metric_manager.log_step(self.global_step)
             if hasattr(self, "step_per_layer_metrics"):
                 for key, value_dict in self.step_per_layer_metrics.items():
                     if value_dict:
                         self.logger.add_scalars(key, value_dict, self.global_step)
-
-            if self.global_step % log_trigger == 0:
-                postfix_dict = {
-                    "loss": f"{gathered_losses['total'].item():.4f}",
-                    "main_loss": f"{gathered_losses['main'].item():.4f}",
-                    "extra_loss": f"{gathered_losses['hook'].item():.4f}",
-                    "distill_loss": f"{gathered_losses['distill'].item():.4f}",
-                    "lr": f"{self.lr_scheduler.get_last_lr()[0]:.2e}",
-                    "step": self.global_step,
-                }
-
-                if self.hook_type == "shiva":
-                    postfix_dict["ratio_loss"] = f"{self.metric_manager.get_metric('shiva/ratio/ratio_loss'):.4f}"
-
-                progress_bar.set_postfix(postfix_dict)
 
             if inference_trigger and self.global_step % inference_trigger == 0:
                 self.run_inference_validation(self.global_step)
@@ -1029,12 +1140,19 @@ class DiffusionModelTrainer:
         if self.accelerator.is_main_process:
             print(f"\nRunning validation at step {global_step}...")
 
+        if self.hook_type == "shiva":
+            for hook in HookManager.get_all_hooks().values():
+                if hasattr(hook, "clear_accumulators"): 
+                    hook.is_validating = True
+
         self.model.eval()
 
         all_total_losses = []
         all_main_losses = []
         all_hook_losses = []
         all_distill_losses = []
+
+        all_hook_metrics = []
 
         val_progress_bar = tqdm(
             self.val_dataloader,
@@ -1046,7 +1164,7 @@ class DiffusionModelTrainer:
 
         for batch in val_progress_bar:
             try:
-                total_loss, main_loss, hook_loss, distill_loss, _ = self._compute_loss(
+                total_loss, main_loss, hook_loss, distill_loss, hook_metrics = self._compute_loss(
                     batch, global_step
                 )
 
@@ -1054,11 +1172,13 @@ class DiffusionModelTrainer:
                 all_main_losses.append(main_loss)
                 all_hook_losses.append(hook_loss)
                 all_distill_losses.append(distill_loss)
+                all_hook_metrics.append(hook_metrics) 
             except Exception as e:
                 if self.accelerator.is_main_process:
                     print(f"Error during validation batch: {e}")
                 continue
 
+        avg_val_loss = None
         if len(self.val_dataloader) > 0:
             avg_val_loss = (
                 self.accelerator.gather(torch.stack(all_total_losses)).mean().item()
@@ -1081,22 +1201,29 @@ class DiffusionModelTrainer:
                 print(f"  Avg Distill Loss: {avg_distill_loss:.4f}")
                 print(f"--------------------------------------")
 
-                block_ratios_for_tb = {}
-                hook_ratios = []
-                for name, hook in HookManager.get_all_hooks().items():
-                    ratio_val = None
-                    if hook.__class__.__name__ == "DiffCRDitBlockHook":
-                        ratio_val = hook.diff_ratio.item()
-                    elif hook.__class__.__name__ == "ShivaDitBlockHook":
-                        if hasattr(hook, "shiva_ratio"):
-                            ratio_val = hook.shiva_ratio.item()
+                val_metrics_to_log = {}
+                if all_hook_metrics:
+                    keys_to_log = [
+                        "loss/ratio/ratio_loss",
+                        "loss/gater/gate_loss",
+                        "loss/router/diversity_loss",
+                        "adaptive_ratio/avg_ratio",
+                        "adaptive_fuse_prob/avg_fuse_prob"
+                    ]
 
-                    if ratio_val is not None:
-                        hook_ratios.append(ratio_val)
-                        print(f"    {name}: {ratio_val:.4f}")
-                        clean_name = name.split(".")[-1]
-                        block_ratios_for_tb[clean_name] = ratio_val
-
+                    avg_hook_metrics = {}
+                    for key in keys_to_log:
+                        if key in all_hook_metrics[0]: 
+                            try:
+                                avg_metric = sum(m[key] for m in all_hook_metrics) / len(all_hook_metrics)
+                                avg_hook_metrics[f"validation/{key}"] = avg_metric
+                            except Exception:
+                                pass
+                    val_metrics_to_log.update(avg_hook_metrics)
+                if "validation/adaptive_ratio/avg_ratio" in val_metrics_to_log:
+                    print(f"  Avg Ratio (Val): {val_metrics_to_log['validation/adaptive_ratio/avg_ratio']:.4f}")
+                if "validation/adaptive_fuse_prob/avg_fuse_prob" in val_metrics_to_log:
+                    print(f"  Avg Fuse Prob (Val): {val_metrics_to_log['validation/adaptive_fuse_prob/avg_fuse_prob']:.4f}")
                 print(f"--------------------------------------")
 
                 self.logger.log_scalars(
@@ -1108,18 +1235,25 @@ class DiffusionModelTrainer:
                     },
                     step=global_step
                 )
-                if block_ratios_for_tb:
-                    self.logger.add_scalars(
-                        "validation/block_ratios", block_ratios_for_tb, global_step
-                    )
-                    avg_ratio = sum(hook_ratios) / len(hook_ratios)
-                    self.logger.log_scalars({"validation/avg_ratio": avg_ratio}, step=global_step)
+
+                if val_metrics_to_log:
+                    self.logger.log_scalars(val_metrics_to_log, step=global_step)
+
+                # if hasattr(self, "step_per_layer_metrics"):
+                #     for key, value_dict in self.step_per_layer_metrics.items():
+                #         if value_dict:
+                #             self.logger.add_scalars(f"validation/{key}", value_dict, global_step)
+
         elif self.accelerator.is_main_process:
             print(
                 f"Validation dataloader is empty or validation failed, skipping logging."
             )
 
         self.model.train()
+        if self.hook_type == "shiva":
+            for hook in HookManager.get_all_hooks().values():
+                if hasattr(hook, "is_validating"):
+                    hook.is_validating = False
 
         return avg_val_loss if "avg_val_loss" in locals() else None
 
@@ -1299,6 +1433,20 @@ class DiffusionModelTrainer:
         global_context.update(encoder_flag=True)
 
         self._try_resume()
+        if self.accelerator.is_main_process:
+            print(f"Force updating Learning Rate to: {self.config.learning_rate}")
+            print(f"Force updating Lora Learning Rate to: {self.config.lora_learning_rate}")
+            print(f"Force updating Policy Learning Rate to: {self.config.policy_learning_rate}")
+        
+        # group[0]: LoRA params
+        # group[1]: Policy params (Gater/Ratio)
+        # group[2]: Base params
+        if len(self.optimizer.param_groups) > 1:
+            self.optimizer.param_groups[0]['lr'] = self.config.lora_learning_rate
+            self.optimizer.param_groups[1]['lr'] = self.config.policy_learning_rate
+            self.optimizer.param_groups[2]['lr'] = self.config.learning_rate
+
+
         self._initial_phase()
 
         self.prev_lora_state = None

@@ -135,21 +135,28 @@ class HookManager:
 
         default_hook_cls, default_kwargs = cls._hook_config["__default__"]
 
-        if hasattr(default_hook_cls, "setup_shared_hooks"):
-            print(
-                f"[HookManager] Detected 'setup_shared_hooks' method on {default_hook_cls.__name__}."
-            )
-            print("[HookManager] Delegating injection logic to Hook...")
+        if default_hook_cls.__name__ == "ShivaDitBlockHook":
+            print(f"[HookManager] Detected {default_hook_cls.__name__}.")
+            print("[HookManager] Delegating injection logic to ShivaInstaller...")
 
-            assert len(cls._hook_config) == 1, (
-                "[HookManager] When using shared hook injection, only the default hook config is supported."
-            )
+            assert (
+                len(cls._hook_config) == 1
+            ), "[HookManager] When using shared hook injection (Shiva), only the default hook config is supported."
 
-            default_hook_cls.setup_shared_hooks(
+            try:
+                from shiva_dit.shiva_installer import install_shiva_hooks
+            except ImportError:
+                print(
+                    "Error: Could not import install_shiva_hooks. Make sure shiva_dit/shiva_installer.py exists."
+                )
+                raise
+
+            install_shiva_hooks(
                 cls,
                 model_type,
                 pipe,
                 model_attrs,
+                default_hook_cls,
                 **default_kwargs,
             )
 
