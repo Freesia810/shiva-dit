@@ -68,9 +68,9 @@ trainer_config = {
     "extra_config": {
         "target_ratio": 0.8,
         "stage_schedule": [
-            {"steps": 1750, "weights": {"ratio": 1.0, "gate": 0.0, "diversity": 0.0}},
-            {"steps": 21000, "weights": {"ratio": 0.5, "gate": 0.0, "diversity": 0.5}},
-            {"steps": 10500, "weights": {"ratio": 0.5, "gate": 0.5, "diversity": 0.1}},
+            {"steps": 3500, "weights": {"ratio": 1.0, "gate": 0.0, "diversity": 0.0}},
+            {"steps": 21000, "weights": {"ratio": 2.0, "gate": 0.0, "diversity": 0.1}},
+            {"steps": 10500, "weights": {"ratio": 2.0, "gate": 0.5, "diversity": 0.1}},
             {
                 "steps": -1,
                 "weights": {"ratio": 0.5, "gate": 0.1, "diversity": 0.1},
