@@ -55,7 +55,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.router_stats_accumulator = []
         self.k_accumulator = []
         self.n_minus_k_accumulator = []
-        self.diversity_loss_accumulator = []
         self.ratio_accumulator = []
 
     def delegated_call(self, func, module_self, *args, **kwargs):
@@ -165,10 +164,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         load_balancing_loss = num_experts * torch.sum(avg_gating_probs.pow(2))
         avg_fuse_prob = gating_weights[:, 1].mean()
 
-        router_diversity_loss = (
-            1.0 - torch.tanh(self.token_scores_logits).abs()
-        ).mean()
-
         g_prune = gating_weights[:, 0].unsqueeze(-1).unsqueeze(-1)
         g_fuse = gating_weights[:, 1].unsqueeze(-1).unsqueeze(-1)
 
@@ -179,7 +174,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         self._collect_training_metrics(
             load_balancing_loss=load_balancing_loss,
-            router_diversity_loss=router_diversity_loss,
             avg_fuse_prob=avg_fuse_prob,
             token_scores_logits=self.token_scores_logits,
             k_float=self.k_float,
@@ -194,7 +188,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             try:
                 self._collect_training_metrics(
                     load_balancing_loss=torch.tensor(0.0, device=x_sel.device),
-                    router_diversity_loss=torch.tensor(0.0, device=x_sel.device),
                     avg_fuse_prob=torch.tensor(0.0, device=x_sel.device),
                     token_scores_logits=self.token_scores_logits,
                     k_float=self.k_float,
@@ -307,7 +300,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.gate_loss_accumulator.clear()
         self.gater_fuse_prob_accumulator.clear()
         self.router_stats_accumulator.clear()
-        self.diversity_loss_accumulator.clear()
         self.k_accumulator.clear()
         self.n_minus_k_accumulator.clear()
         self.ratio_accumulator.clear()
@@ -315,14 +307,12 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
     def _collect_training_metrics(
         self,
         load_balancing_loss,
-        router_diversity_loss,
         avg_fuse_prob,
         token_scores_logits,
         k_float,
         N,
     ):
         self.gate_loss_accumulator.append(load_balancing_loss)
-        self.diversity_loss_accumulator.append(router_diversity_loss)
         self.gater_fuse_prob_accumulator.append(avg_fuse_prob)
         self.ratio_accumulator.append(self.current_ratio_for_loss)
 

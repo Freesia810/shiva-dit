@@ -100,7 +100,7 @@ def install_shiva_hooks(
         shared_gater_policy.net[-1].bias[0] = 3.0   # Prune Logit
         shared_gater_policy.net[-1].bias[1] = -3.0  # Fuse Logit
 
-    logit_bias = 5.0
+    logit_bias = 2.5
     nn.init.constant_(shared_ratio_policy.net[-1].bias, logit_bias)
     nn.init.zeros_(shared_ratio_policy.net[-1].weight)
 

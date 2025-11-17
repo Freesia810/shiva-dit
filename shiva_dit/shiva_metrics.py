@@ -15,36 +15,6 @@ def _get_shiva_hooks():
         if isinstance(hook, ShivaDitBlockHook):
             yield hook
 
-
-def calculate_diversity_loss(config: dict, device: torch.device) -> torch.Tensor:
-    diversity_losses = []
-
-    for hook in _get_shiva_hooks():
-        accumulator = hook.diversity_loss_accumulator
-
-        if accumulator:
-            avg_loss_for_hook = torch.stack(accumulator).mean()
-            diversity_losses.append(avg_loss_for_hook)
-            device = avg_loss_for_hook.device
-
-        hook.diversity_loss_accumulator.clear()
-
-    metrics = {
-        "loss/router/diversity_loss_raw": 0.0,
-        "loss/router/diversity_loss": 0.0,
-    }
-
-    loss_weight = config.get("diversity_loss_weight", 0.0)
-
-    if diversity_losses:
-        raw_loss = torch.stack(diversity_losses).mean()
-        final_loss = raw_loss * loss_weight
-        metrics["loss/router/diversity_loss_raw"] = raw_loss
-        metrics["loss/router/diversity_loss"] = final_loss
-        return final_loss, metrics
-    else:
-        return torch.tensor(0.0, device=device), metrics
-
 def calculate_gate_loss(config: dict, device: torch.device) -> torch.Tensor:
     gate_losses = []
 

@@ -96,7 +96,7 @@ class DiffusionModelTrainer:
         if 'stage_schedule' not in self.config.extra_config:
             self.processed_stage_schedule.append({
                 "threshold": float('inf'),
-                "weights": {"ratio": 0.5, "gate": 0.1, "diversity": 0.1}
+                "weights": {"ratio": 0.5, "gate": 0.1}
             })
         else:
             for i, stage in enumerate(self.config.extra_config['stage_schedule']):
@@ -393,12 +393,10 @@ class DiffusionModelTrainer:
             "loss/losses_weighted": [
                 "loss/ratio/ratio_loss",
                 "loss/gater/gate_loss",
-                "loss/router/diversity_loss",
             ],
             "loss/losses_raw": [
                 "loss/ratio/ratio_loss_raw",
                 "loss/gater/gate_loss_raw",
-                "loss/router/diversity_loss_raw",
             ],
             "router/scores": [
                 "router/mean_score",
@@ -798,7 +796,6 @@ class DiffusionModelTrainer:
         config = {}
         config["ratio_loss_weight"] = current_weights.get("ratio", 0.0)
         config["gate_loss_weight"] = current_weights.get("gate", 0.0)
-        config["diversity_loss_weight"] = current_weights.get("diversity", 0.0)
         config["target_ratio"] = self.config.extra_config['target_ratio']
 
         return config
@@ -813,9 +810,6 @@ class DiffusionModelTrainer:
 
         loss_config = self._get_shiva_loss_config(global_step)
 
-        diversity_loss, d_metrics = shiva_metrics.calculate_diversity_loss(
-            loss_config, self.device
-        )
         gate_loss, g_metrics = shiva_metrics.calculate_gate_loss(
             loss_config, self.device
         )
@@ -823,7 +817,7 @@ class DiffusionModelTrainer:
             shiva_metrics.calculate_ratio_loss(loss_config, self.device)
         )
 
-        total_hook_loss = diversity_loss + gate_loss + ratio_loss
+        total_hook_loss = gate_loss + ratio_loss
 
         aggregated_metrics.update(d_metrics)
         aggregated_metrics.update(g_metrics)
@@ -1206,7 +1200,6 @@ class DiffusionModelTrainer:
                     keys_to_log = [
                         "loss/ratio/ratio_loss",
                         "loss/gater/gate_loss",
-                        "loss/router/diversity_loss",
                         "adaptive_ratio/avg_ratio",
                         "adaptive_fuse_prob/avg_fuse_prob"
                     ]
