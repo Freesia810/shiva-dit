@@ -102,7 +102,12 @@ def install_shiva_hooks(
 
     logit_bias = 2.5
     nn.init.constant_(shared_ratio_policy.net[-1].bias, logit_bias)
-    nn.init.zeros_(shared_ratio_policy.net[-1].weight)
+    nn.init.normal_(shared_ratio_policy.net[-1].weight, mean=0.0, std=1e-4)
+
+    # target_r = 0.8
+    # init_bias_val = torch.log(torch.tensor(target_r / (1 - target_r))).item()
+    # nn.init.constant_(shared_ratio_policy.net[-1].bias, init_bias_val)
+    # nn.init.normal_(shared_ratio_policy.net[-1].weight, mean=0.0, std=1e-4)
 
     for router in grouped_routers:
         nn.init.zeros_(router.router_head.weight)

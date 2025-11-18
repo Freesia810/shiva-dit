@@ -105,8 +105,8 @@ class ShivaTopkFunc(torch.autograd.Function):
         Tk_detached = Tk
 
         with torch.enable_grad():
-            T_rank = F.softplus(Ts_detached)
-            T_select = F.softplus(Tk_detached)
+            T_rank = Ts_detached
+            T_select = Tk_detached
             
             scores_for_soft_rank = torch.sigmoid(logits_detached)
             noise = torch.randn_like(logits_detached) * 1e-5
@@ -116,7 +116,8 @@ class ShivaTopkFunc(torch.autograd.Function):
                 scores_for_soft_rank, T_rank
             )
 
-            z = T_select * (k_detached.unsqueeze(-1) - soft_ranks)
+            N_float = float(logits_detached.shape[1])
+            z = T_select * (k_detached.unsqueeze(-1) - soft_ranks) / N_float
             selection_probs = torch.sigmoid(z)
 
             if torch.rand(1) < 0.05:

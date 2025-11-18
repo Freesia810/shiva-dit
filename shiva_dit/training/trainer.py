@@ -1097,7 +1097,7 @@ class DiffusionModelTrainer:
                     "main_loss": f"{self.metric_manager.get_metric('train/main_loss'):.4f}",
                     "extra_loss": f"{self.metric_manager.get_metric('train/extra_loss'):.4f}",
                     "distill_loss": f"{self.metric_manager.get_metric('train/distill_loss'):.4f}",
-                    "lr": f"{self.metric_manager.get_metric('train/lr'):.2e}",
+                    "lr": f"[base: {self.metric_manager.get_metric('train/lr_base'):.2e}, lora: {self.metric_manager.get_metric('train/lr_lora'):.2e}, policy: {self.metric_manager.get_metric('train/lr_policy'):.2e}]",
                     "step": self.global_step,
                 }
 

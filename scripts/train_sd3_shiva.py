@@ -11,7 +11,7 @@ hook_config = {
     "context_pruning_threshold": None,
     "context_pruning_ratio": None,
     "init_Ts": 10.0,
-    "init_Tk": 0.0,
+    "init_Tk": 10.0,
 }
 lora_config = {
     "enable": True,
@@ -68,7 +68,7 @@ trainer_config = {
     "extra_config": {
         "target_ratio": 0.8,
         "stage_schedule": [
-            {"steps": 7000,  "weights": {"ratio": 0.1, "gate": 0.0}, "lr": [1e-5, 1e-4, 1e-4]},
+            {"steps": 7000,  "weights": {"ratio": 1.0, "gate": 0.0}, "lr": [1e-5, 1e-4, 2e-5]},
             {"steps": 21000, "weights": {"ratio": 1.0, "gate": 0.0}, "lr": [1e-5, 1e-4, 1e-5]},
             {"steps": 17500, "weights": {"ratio": 1.0, "gate": 0.5}, "lr": [1e-5, 1e-4, 1e-5]},
             {"steps": -1,    "weights": {"ratio": 0.0, "gate": 0.1}, "lr": [1e-5, 1e-4, 1e-5]},
