@@ -116,8 +116,7 @@ class ShivaTopkFunc(torch.autograd.Function):
                 scores_for_soft_rank, T_rank
             )
 
-            N_float = float(logits_detached.shape[1])
-            z = T_select * (k_detached.unsqueeze(-1) - soft_ranks) / N_float
+            z = T_select * (k_detached.unsqueeze(-1) - soft_ranks)
             selection_probs = torch.sigmoid(z)
 
             if torch.rand(1) < 0.05:

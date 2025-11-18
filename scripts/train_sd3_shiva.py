@@ -71,7 +71,7 @@ trainer_config = {
             {"steps": 7000,  "weights": {"ratio": 1.0, "gate": 0.0}, "lr": [1e-5, 1e-4, 2e-5]},
             {"steps": 21000, "weights": {"ratio": 1.0, "gate": 0.0}, "lr": [1e-5, 1e-4, 1e-5]},
             {"steps": 17500, "weights": {"ratio": 1.0, "gate": 0.5}, "lr": [1e-5, 1e-4, 1e-5]},
-            {"steps": -1,    "weights": {"ratio": 0.0, "gate": 0.1}, "lr": [1e-5, 1e-4, 1e-5]},
+            {"steps": -1,    "weights": {"ratio": 1.0, "gate": 0.1}, "lr": [1e-5, 1e-4, 1e-5]},
         ],
     },
     "log_with_tensorboard": True,
