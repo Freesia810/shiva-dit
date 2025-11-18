@@ -104,6 +104,7 @@ class DiffusionModelTrainer:
         else:
             for i, stage in enumerate(self.config.extra_config['stage_schedule']):
                 stage_duration = stage["steps"]
+                start_step = current_step_threshold if current_step_threshold != float('inf') else 0
                 if (
                     stage_duration < 0
                     or i == len(self.config.extra_config["stage_schedule"]) - 1
@@ -115,12 +116,12 @@ class DiffusionModelTrainer:
 
                 self.processed_stage_schedule.append({
                     "threshold": scaled_threshold,
-                    "start_step": last_threshold,
+                    "start_step": int(start_step),
                     "weights": stage["weights"],
                     "lr": stage.get("lr", None),
-                    "temp": stage.get("temp", [10.0, 10.0]),
+                    "temp": stage.get("temp", [5.0, 5.0]),
                 })
-                
+
                 if scaled_threshold != float('inf'):
                     current_step_threshold = scaled_threshold
                     last_threshold = scaled_threshold
@@ -961,21 +962,25 @@ class DiffusionModelTrainer:
                 else:
                     start_step = stage["start_step"]
                     end_step = stage["threshold"]
-                    progress = (self.global_step - start_step) / (end_step - start_step)
-                    progress = max(0.0, min(1.0, progress)) # clip
-                    current_temp = start_t + (end_t - start_t) * progress
+                    if end_step > start_step:
+                        progress = (self.global_step - start_step) / (end_step - start_step)
+                        progress = max(0.0, min(1.0, progress)) # clip to [0, 1]
+                        current_temp = start_t + (end_t - start_t) * progress
+                    else:
+                        current_temp = start_t
                 break
         
         if current_temp is None:
             return
 
+        t_val = torch.tensor(current_temp, device=self.device, dtype=self.dtype)
         for hook in HookManager.get_all_hooks().values():
             if hasattr(hook, "prune_expert"):
-                t_val = torch.tensor(current_temp, device=self.device, dtype=self.dtype)
                 if hasattr(hook.prune_expert, "Ts"):
                     hook.prune_expert.Ts = t_val
                 if hasattr(hook.prune_expert, "Tk"):
                     hook.prune_expert.Tk = t_val
+                break
 
     def _on_update_step_end(self, gathered_losses, progress_bar):
         log_trigger = self.log_trigger
@@ -1008,6 +1013,16 @@ class DiffusionModelTrainer:
             current_policy_lr = self.optimizer.param_groups[1]['lr']
         if len(self.optimizer.param_groups) > 2:
             current_base_lr = self.optimizer.param_groups[2]['lr']
+        
+        current_Ts = 0.0
+        current_Tk = 0.0
+        for hook in HookManager.get_all_hooks().values():
+            if hasattr(hook, "prune_expert"):
+                if hasattr(hook.prune_expert, "Ts"):
+                    current_Ts = hook.prune_expert.Ts.item()
+                if hasattr(hook.prune_expert, "Tk"):
+                    current_Tk = hook.prune_expert.Tk.item()
+                break
 
         metrics_to_log_tensors.update({
             "train/total_loss": gathered_losses["total"],
@@ -1017,6 +1032,8 @@ class DiffusionModelTrainer:
             "train/lr_base": torch.tensor(current_base_lr, device=self.device),
             "train/lr_lora": torch.tensor(current_lora_lr, device=self.device),
             "train/lr_policy": torch.tensor(current_policy_lr, device=self.device),
+            "train/Ts": torch.tensor(current_Ts, device=self.device),
+            "train/Tk": torch.tensor(current_Tk, device=self.device),
         })
 
         if self.config.training_mode == 'lora':
