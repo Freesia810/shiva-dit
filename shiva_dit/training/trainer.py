@@ -7,7 +7,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from transformers import get_scheduler
 from peft import LoraConfig as PeftLoraConfig, get_peft_model
 from tqdm import tqdm
 from accelerate import Accelerator
@@ -64,7 +63,6 @@ class DiffusionModelTrainer:
             1, len(self.train_dataloader) // config.gradient_accumulation_steps
         )
         self.num_training_steps = num_update_steps_per_epoch * config.num_epochs
-        self.lr_scheduler = self._setup_scheduler()
 
         self._prepare_with_accelerator()
 
@@ -96,7 +94,8 @@ class DiffusionModelTrainer:
         if 'stage_schedule' not in self.config.extra_config:
             self.processed_stage_schedule.append({
                 "threshold": float('inf'),
-                "weights": {"ratio": 0.5, "gate": 0.1}
+                "weights": {"ratio": 0.5, "gate": 0.1},
+                "lr": None,
             })
         else:
             for i, stage in enumerate(self.config.extra_config['stage_schedule']):
@@ -112,7 +111,8 @@ class DiffusionModelTrainer:
 
                 self.processed_stage_schedule.append({
                     "threshold": current_step_threshold,
-                    "weights": stage["weights"]
+                    "weights": stage["weights"],
+                    "lr": stage.get("lr", None),
                 })
 
                 if current_step_threshold == float('inf'):
@@ -301,7 +301,6 @@ class DiffusionModelTrainer:
         prepare_list = [
             self.model,
             self.optimizer,
-            self.lr_scheduler,
             self.train_dataloader,
         ]
 
@@ -315,7 +314,6 @@ class DiffusionModelTrainer:
         if self.teacher_model is not None:
             self.teacher_model = prepared[idx]; idx += 1
         self.optimizer = prepared[idx]; idx += 1
-        self.lr_scheduler = prepared[idx]; idx += 1
         self.train_dataloader = prepared[idx]; idx += 1
         if self.val_dataloader is not None:
             self.val_dataloader = self.accelerator.prepare(self.val_dataloader)
@@ -550,11 +548,9 @@ class DiffusionModelTrainer:
         base_lr_params = other_model_params
 
         if self.accelerator.is_main_process:
-            print(f"Optimizing {len(lora_params)} LoRA params with LR: {self.config.lora_learning_rate}")
-            print(
-                f"Optimizing {len(policy_params)} Policy params with LR: {self.config.policy_learning_rate}"
-            )
-            print(f"Optimizing {len(base_lr_params)} other params with LR: {self.config.learning_rate}")
+            print(f"Optimizing {len(lora_params)} LoRA params")
+            print(f"Optimizing {len(policy_params)} Policy params")
+            print(f"Optimizing {len(base_lr_params)} other params")
 
         optimizer_grouped_parameters = [
             {"params": lora_params, "lr": self.config.lora_learning_rate, "weight_decay": self.config.weight_decay},
@@ -576,14 +572,6 @@ class DiffusionModelTrainer:
             raise ValueError(f"Unknown optimizer: {self.config.optimizer}")
 
         return optimizer
-    def _setup_scheduler(self):
-        scheduler = get_scheduler(
-            self.config.lr_scheduler,
-            optimizer=self.optimizer,
-            num_warmup_steps=self.config.scheduler_num_warmup_steps,
-            num_training_steps=self.num_training_steps,
-        )
-        return scheduler
 
     def _setup_caption_dropout_embeds(self):
         if self.config.caption_dropout_rate > 0:
@@ -819,7 +807,6 @@ class DiffusionModelTrainer:
 
         total_hook_loss = gate_loss + ratio_loss
 
-        aggregated_metrics.update(d_metrics)
         aggregated_metrics.update(g_metrics)
         aggregated_metrics.update(r_metrics)
 
@@ -829,7 +816,7 @@ class DiffusionModelTrainer:
         aggregated_metrics["adaptive_fuse_prob/avg_fuse_prob"] = avg_fuse_prob
         self.step_per_layer_metrics.update(
             {
-                # "adaptive_fuse_prob/per_layer_fuse_prob": per_layer_probs,
+                "adaptive_fuse_prob/per_layer_fuse_prob": per_layer_probs,
                 "adaptive_ratio/per_layer_ratios": per_layer_ratios,
             }
         )
@@ -929,6 +916,30 @@ class DiffusionModelTrainer:
                     if param.requires_grad != requires_grad:
                         param.requires_grad = requires_grad
 
+    def _update_learning_rate(self):
+        current_lrs = None
+        for stage in self.processed_stage_schedule:
+            if self.global_step < stage["threshold"]:
+                current_lrs = stage["lr"]
+                break
+        
+        if current_lrs is None or len(current_lrs) != 3:
+            return
+
+        # Mapping: config [Base, LoRA, Policy] -> optimizer groups
+        lr_base = current_lrs[0]
+        lr_lora = current_lrs[1]
+        lr_policy = current_lrs[2]
+        
+        if len(self.optimizer.param_groups) > 0:
+             self.optimizer.param_groups[0]['lr'] = lr_lora
+        
+        if len(self.optimizer.param_groups) > 1:
+             self.optimizer.param_groups[1]['lr'] = lr_policy
+             
+        if len(self.optimizer.param_groups) > 2:
+             self.optimizer.param_groups[2]['lr'] = lr_base
+
     def _on_update_step_end(self, gathered_losses, progress_bar):
         log_trigger = self.log_trigger
         validate_trigger = self.validate_trigger
@@ -950,12 +961,25 @@ class DiffusionModelTrainer:
 
         metrics_to_log_tensors = self.step_metrics.copy()
 
+        current_base_lr = 0.0
+        current_lora_lr = 0.0
+        current_policy_lr = 0.0
+        
+        if len(self.optimizer.param_groups) > 0:
+            current_lora_lr = self.optimizer.param_groups[0]['lr']
+        if len(self.optimizer.param_groups) > 1:
+            current_policy_lr = self.optimizer.param_groups[1]['lr']
+        if len(self.optimizer.param_groups) > 2:
+            current_base_lr = self.optimizer.param_groups[2]['lr']
+
         metrics_to_log_tensors.update({
             "train/total_loss": gathered_losses["total"],
             "train/main_loss": gathered_losses["main"],
             "train/extra_loss": gathered_losses["hook"],
             "train/distill_loss": gathered_losses["distill"],
-            "train/lr": torch.tensor(self.lr_scheduler.get_last_lr()[0], device=self.device),
+            "train/lr_base": torch.tensor(current_base_lr, device=self.device),
+            "train/lr_lora": torch.tensor(current_lora_lr, device=self.device),
+            "train/lr_policy": torch.tensor(current_policy_lr, device=self.device),
         })
 
         if self.config.training_mode == 'lora':
@@ -1426,19 +1450,6 @@ class DiffusionModelTrainer:
         global_context.update(encoder_flag=True)
 
         self._try_resume()
-        if self.accelerator.is_main_process:
-            print(f"Force updating Learning Rate to: {self.config.learning_rate}")
-            print(f"Force updating Lora Learning Rate to: {self.config.lora_learning_rate}")
-            print(f"Force updating Policy Learning Rate to: {self.config.policy_learning_rate}")
-        
-        # group[0]: LoRA params
-        # group[1]: Policy params (Gater/Ratio)
-        # group[2]: Base params
-        if len(self.optimizer.param_groups) > 1:
-            self.optimizer.param_groups[0]['lr'] = self.config.lora_learning_rate
-            self.optimizer.param_groups[1]['lr'] = self.config.policy_learning_rate
-            self.optimizer.param_groups[2]['lr'] = self.config.learning_rate
-
 
         self._initial_phase()
 
@@ -1461,6 +1472,8 @@ class DiffusionModelTrainer:
             )
 
             for step, batch in enumerate(progress_bar):
+                self._update_learning_rate()
+
                 if step % self.config.gradient_accumulation_steps == 0:
                     self.optimizer.zero_grad(set_to_none=True)
 
@@ -1475,7 +1488,6 @@ class DiffusionModelTrainer:
                         self.accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
 
                     self.optimizer.step()
-                    self.lr_scheduler.step()
                     self.global_step += 1
 
                     self._trigger_phase()

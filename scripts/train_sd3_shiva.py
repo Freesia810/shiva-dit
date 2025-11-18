@@ -4,8 +4,8 @@ from shiva_dit.shiva_hook import ShivaDitBlockHook
 HookType = ShivaDitBlockHook
 hook_config = {
     "num_router_groups": 24,
-    "bottleneck_dim": 64,
-    "layer_embed_dim": 64,
+    "bottleneck_dim": 256,
+    "layer_embed_dim": 256,
     "fuse_expert_ffn_mult": 2,
     "use_gater_lut": False,
     "context_pruning_threshold": None,
@@ -68,14 +68,10 @@ trainer_config = {
     "extra_config": {
         "target_ratio": 0.8,
         "stage_schedule": [
-            {"steps": 3500, "weights": {"ratio": 1.0, "gate": 0.0}, "lr": [1e-5, 1e-4, 1e-4]},
+            {"steps": 7000,  "weights": {"ratio": 0.1, "gate": 0.0}, "lr": [1e-5, 1e-4, 1e-4]},
             {"steps": 21000, "weights": {"ratio": 1.0, "gate": 0.0}, "lr": [1e-5, 1e-4, 1e-5]},
             {"steps": 17500, "weights": {"ratio": 1.0, "gate": 0.5}, "lr": [1e-5, 1e-4, 1e-5]},
-            {
-                "steps": -1,
-                "weights": {"ratio": 0.0, "gate": 0.1},
-                "lr": [1e-5, 1e-4, 1e-5],
-            },
+            {"steps": -1,    "weights": {"ratio": 0.0, "gate": 0.1}, "lr": [1e-5, 1e-4, 1e-5]},
         ],
     },
     "log_with_tensorboard": True,
