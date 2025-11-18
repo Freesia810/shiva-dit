@@ -75,7 +75,7 @@ trainer_config = {
         ],
     },
     "log_with_tensorboard": True,
-    "log_with_wandb": True,
+    "log_with_wandb": False,
     "wandb_project": "shiva-dit",
     "wandb_run_name": "sd3-shiva",
     "log_with_mlflow": False,
