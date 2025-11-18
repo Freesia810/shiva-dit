@@ -91,11 +91,15 @@ class DiffusionModelTrainer:
 
         self.processed_stage_schedule = []
         current_step_threshold = 0
+        last_threshold = 0 
+
         if 'stage_schedule' not in self.config.extra_config:
             self.processed_stage_schedule.append({
                 "threshold": float('inf'),
+                "start_step": 0,
                 "weights": {"ratio": 0.5, "gate": 0.1},
                 "lr": None,
+                "temp": [5.0, 5.0],
             })
         else:
             for i, stage in enumerate(self.config.extra_config['stage_schedule']):
@@ -104,18 +108,23 @@ class DiffusionModelTrainer:
                     stage_duration < 0
                     or i == len(self.config.extra_config["stage_schedule"]) - 1
                 ):
-                    current_step_threshold = float('inf')
+                    scaled_threshold = float('inf')
                 else:
                     scaled_duration = self._scale_steps(stage_duration)
-                    current_step_threshold += scaled_duration
+                    scaled_threshold = current_step_threshold + scaled_duration
 
                 self.processed_stage_schedule.append({
-                    "threshold": current_step_threshold,
+                    "threshold": scaled_threshold,
+                    "start_step": last_threshold,
                     "weights": stage["weights"],
                     "lr": stage.get("lr", None),
+                    "temp": stage.get("temp", [10.0, 10.0]),
                 })
-
-                if current_step_threshold == float('inf'):
+                
+                if scaled_threshold != float('inf'):
+                    current_step_threshold = scaled_threshold
+                    last_threshold = scaled_threshold
+                else:
                     break
 
         self.scaled_hook_only_steps = self._scale_steps(config.hook_only_steps)
@@ -940,6 +949,34 @@ class DiffusionModelTrainer:
         if len(self.optimizer.param_groups) > 2:
              self.optimizer.param_groups[2]['lr'] = lr_base
 
+    def _update_temperature(self):
+        current_temp = None
+        
+        for stage in self.processed_stage_schedule:
+            if self.global_step < stage["threshold"]:
+                start_t, end_t = stage["temp"]
+
+                if stage["threshold"] == float('inf') or start_t == end_t:
+                    current_temp = start_t
+                else:
+                    start_step = stage["start_step"]
+                    end_step = stage["threshold"]
+                    progress = (self.global_step - start_step) / (end_step - start_step)
+                    progress = max(0.0, min(1.0, progress)) # clip
+                    current_temp = start_t + (end_t - start_t) * progress
+                break
+        
+        if current_temp is None:
+            return
+
+        for hook in HookManager.get_all_hooks().values():
+            if hasattr(hook, "prune_expert"):
+                t_val = torch.tensor(current_temp, device=self.device, dtype=self.dtype)
+                if hasattr(hook.prune_expert, "Ts"):
+                    hook.prune_expert.Ts = t_val
+                if hasattr(hook.prune_expert, "Tk"):
+                    hook.prune_expert.Tk = t_val
+
     def _on_update_step_end(self, gathered_losses, progress_bar):
         log_trigger = self.log_trigger
         validate_trigger = self.validate_trigger
@@ -1473,6 +1510,7 @@ class DiffusionModelTrainer:
 
             for step, batch in enumerate(progress_bar):
                 self._update_learning_rate()
+                self._update_temperature()
 
                 if step % self.config.gradient_accumulation_steps == 0:
                     self.optimizer.zero_grad(set_to_none=True)

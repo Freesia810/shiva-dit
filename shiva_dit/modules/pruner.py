@@ -59,11 +59,11 @@ class ShivaPrunerExpert(torch.nn.Module):
     def __init__(self, init_Ts, init_Tk):
         super().__init__()
 
-        self.register_buffer("shiva_Ts", torch.tensor(float(init_Ts)))
-        self.register_buffer("shiva_Tk", torch.tensor(float(init_Tk)))
+        self.register_buffer("Ts", torch.tensor(float(init_Ts)))
+        self.register_buffer("Tk", torch.tensor(float(init_Tk)))
 
     def forward(self, x, logits, k):
         """
         support both training and eval
         """
-        return ShivaTopkFunc.apply(x, logits, k, self.shiva_Ts, self.shiva_Tk)
+        return ShivaTopkFunc.apply(x, logits, k, self.Ts, self.Tk)
