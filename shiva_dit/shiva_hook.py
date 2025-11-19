@@ -124,10 +124,17 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         if current_t is None:
             raise ValueError("global_context.current_timestep is None")
         
-        if current_t.max() > 1.5: 
-            t_scalar = (current_t / 1000.0).to(dtype).unsqueeze(-1)
+        t_val = current_t.to(dtype)
+        if t_val.max() > 1.5:
+            t_val = t_val / 1000.0
+
+        if t_val.numel() == 1:
+            t_scalar = t_val.view(1, 1).expand(B, 1)
+        elif t_val.shape[0] == B:
+            t_scalar = t_val.view(B, 1)
         else:
-            t_scalar = current_t.to(dtype).unsqueeze(-1)
+            raise ValueError(f"t_val.shape: {t_val.shape}")
+        l_scalar = l_scalar.view(B, 1)
 
         gate_logits = self.gater_policy(pure_temb, layer_emb_vector)
         predicted_ratio_logits = self.ratio_policy(pure_temb, layer_emb_vector, t_scalar, l_scalar)
