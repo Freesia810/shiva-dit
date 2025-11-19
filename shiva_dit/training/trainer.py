@@ -413,7 +413,6 @@ class DiffusionModelTrainer:
                 "router/p25_score",
                 "router/p50_score",
                 "router/p75_score",
-                "router/mask_saturation",
             ],
             "router/distribution": [
                 "router/std_score",

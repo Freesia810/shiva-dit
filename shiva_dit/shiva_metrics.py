@@ -185,7 +185,6 @@ def collect_router_stats(device: torch.device) -> dict:
     total_p25 = []
     total_p50 = []
     total_p75 = []
-    total_mask_sat = []
     q_tensor = torch.tensor([0.25, 0.50, 0.75], device=device)
 
     total_s_scale_mean = []
@@ -206,9 +205,6 @@ def collect_router_stats(device: torch.device) -> dict:
             total_p25.append(quantiles[0])
             total_p50.append(quantiles[1])
             total_p75.append(quantiles[2])
-
-            saturation = torch.abs(all_scores - 0.5) * 2.0
-            total_mask_sat.append(saturation.mean())
         acc.clear()
 
     if total_mean:
@@ -222,7 +218,6 @@ def collect_router_stats(device: torch.device) -> dict:
             "router/p25_score": torch.stack(total_p25).mean(),
             "router/p50_score": torch.stack(total_p50).mean(),
             "router/p75_score": torch.stack(total_p75).mean(),
-            "router/mask_saturation": torch.stack(total_mask_sat).mean(),
         }
     else:
         return {}
