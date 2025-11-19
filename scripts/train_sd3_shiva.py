@@ -68,11 +68,47 @@ trainer_config = {
     "extra_config": {
         "target_ratio": 0.8,
         "stage_schedule": [
-            {"steps": 3500,  "weights": {"ratio": 0.5, "gate": 0.0}, "lr": [1e-5, 1e-4, 2e-5], "temp": [1.0, 2.0]}, 
-            {"steps": 21000, "weights": {"ratio": 0.01, "gate": 0.0}, "lr": [1e-5, 1e-4, 1e-5], "temp": [2.0, 5.0]}, 
-            {"steps": 17500, "weights": {"ratio": 0.1, "gate": 0.5}, "lr": [1e-5, 1e-4, 1e-5], "temp": [5.0, 5.0]},
-            {"steps": -1,    "weights": {"ratio": 0.05, "gate": 0.5}, "lr": [1e-5, 1e-4, 1e-5], "temp": [5.0, 5.0]},
-        ],
+            # Phase 1: Router Warmup (0 - 1000步)
+            # Policy 冻结 (LR=0)。让 Router 先学会“谁是垃圾 Token”。
+            # Ratio 保持在初始值 (由 logit_bias=1.386 决定，约 0.8)。
+            {
+                "steps": 1000, 
+                "weights": {"ratio": 0.0, "gate": 0.0}, 
+                "lr": [1e-5, 1e-4, 0.0], 
+                "temp": [1.0, 1.0]
+            },
+
+            # Phase 2: Anchor & Constraint (1000 - 4000步)
+            # 开启 Policy 训练。
+            # 使用 1.0 的强权重，对抗 Main Loss 的上升推力，确保平均值死死锚定在 0.8。
+            # 这是为了让 Policy 学会：“由于 Budget 有限，我必须做选择”。
+            {
+                "steps": 3000, 
+                "weights": {"ratio": 1.0, "gate": 0.0}, 
+                "lr": [1e-5, 1e-4, 5e-5], 
+                "temp": [1.0, 2.0]
+            },
+
+            # Phase 3: Differentiation / Exploration (4000 - 20000步) - 关键阶段
+            # 只有在这里，我们才期望看到分化。
+            # 权重降至 0.05。此时 Main Loss 的局部敏感度差异将主导梯度。
+            # 如果这一阶段 Ratio 还是不分化，说明 Main Loss 对 Token 数量极其敏感。
+            {
+                "steps": 16000, 
+                "weights": {"ratio": 0.05, "gate": 0.0}, 
+                "lr": [1e-5, 1e-4, 5e-5], 
+                "temp": [2.0, 4.0]
+            },
+
+            # Phase 4: Stability & Gater (20000+ 步)
+            # 引入 Gate Loss，启用 Fusion 训练的正则化。
+            {
+                "steps": -1, 
+                "weights": {"ratio": 0.05, "gate": 0.5}, 
+                "lr": [1e-5, 1e-4, 1e-5], 
+                "temp": [4.0, 5.0]
+            }
+        ]
     },
     "log_with_tensorboard": True,
     "log_with_wandb": False,
