@@ -84,7 +84,7 @@ trainer_config = {
             # Tk=[2, 5]:   选择开始变硬，梯度逐渐聚焦到 Top-K 边界上。
             {
                 "steps": 3500, 
-                "weights": {"ratio": 1.0, "gate": 0.0}, 
+                "weights": {"ratio": 5.0, "gate": 0.0}, 
                 "lr": [1e-5, 1e-4, 5e-5], 
                 "temp": [20.0, 30.0, 2.0, 5.0] 
             },
