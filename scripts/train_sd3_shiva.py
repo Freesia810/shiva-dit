@@ -68,13 +68,7 @@ trainer_config = {
     "extra_config": {
         "target_ratio": 0.8,
         "stage_schedule": [
-            # ------------------------------------------------------------------
-            # Phase 1: Router Warmup (0 - 1000步)
-            # ------------------------------------------------------------------
-            # 目的: 仅仅让 Router 学会“谁重要”。Policy 稍微动一点点 (5e-5)。
-            # Ts=[20, 20]: 排序非常清晰 (High Confidence)。
-            # Tk=[2, 2]:   选择非常模糊 (Soft Selection)，梯度回传给所有人。
-            # RatioW=0.0:  不约束比例，先让 Router 自由生长。
+            # Router Voting
             {
                 "steps": 1750,
                 "weights": {"ratio": 0.0, "gate": 0.0}, 
