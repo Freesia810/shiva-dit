@@ -429,10 +429,12 @@ class DiffusionModelTrainer:
                 "adaptive_fuse_prob/avg_fuse_prob",
             ],
             "topkgrads/soft_ranks": [
-                "topkgrads/soft_ranks_std",
                 "topkgrads/soft_ranks_mean",
                 "topkgrads/soft_ranks_min",
                 "topkgrads/soft_ranks_max",
+            ],
+            "topkgrads/soft_ranks_distribution": [
+                "topkgrads/soft_ranks_std",
             ],
             # "topkgrads/z_stats": [
             #     "topkgrads/z_std",
@@ -953,35 +955,49 @@ class DiffusionModelTrainer:
              self.optimizer.param_groups[2]['lr'] = lr_base
 
     def _update_temperature(self):
-        current_temp = None
+        current_Ts = None
+        current_Tk = None
         
         for stage in self.processed_stage_schedule:
             if self.global_step < stage["threshold"]:
-                start_t, end_t = stage["temp"]
-
-                if stage["threshold"] == float('inf') or start_t == end_t:
-                    current_temp = start_t
-                else:
+                temp_config = stage["temp"]
+                progress = 0.0
+                if stage["threshold"] != float('inf'):
                     start_step = stage["start_step"]
                     end_step = stage["threshold"]
                     if end_step > start_step:
                         progress = (self.global_step - start_step) / (end_step - start_step)
-                        progress = max(0.0, min(1.0, progress)) # clip to [0, 1]
-                        current_temp = start_t + (end_t - start_t) * progress
-                    else:
-                        current_temp = start_t
+                        progress = max(0.0, min(1.0, progress))
+
+                if len(temp_config) == 4:
+                    # [start_Ts, end_Ts, start_Tk, end_Tk]
+                    s_ts, e_ts, s_tk, e_tk = temp_config
+                    current_Ts = s_ts + (e_ts - s_ts) * progress
+                    current_Tk = s_tk + (e_tk - s_tk) * progress
+                elif len(temp_config) == 2:
+                    # [start, end] -> Ts=Tk
+                    s_t, e_t = temp_config
+                    val = s_t + (e_t - s_t) * progress
+                    current_Ts = val
+                    current_Tk = val
+                else:
+                    current_Ts = 5.0
+                    current_Tk = 5.0
+                
                 break
         
-        if current_temp is None:
+        if current_Ts is None or current_Tk is None:
             return
 
-        t_val = torch.tensor(current_temp, device=self.device, dtype=self.dtype)
+        ts_val = torch.tensor(current_Ts, device=self.device, dtype=self.dtype)
+        tk_val = torch.tensor(current_Tk, device=self.device, dtype=self.dtype)
+        
         for hook in HookManager.get_all_hooks().values():
             if hasattr(hook, "prune_expert"):
                 if hasattr(hook.prune_expert, "Ts"):
-                    hook.prune_expert.Ts = t_val
+                    hook.prune_expert.Ts = ts_val
                 if hasattr(hook.prune_expert, "Tk"):
-                    hook.prune_expert.Tk = t_val
+                    hook.prune_expert.Tk = tk_val
                 break
 
     def _on_update_step_end(self, gathered_losses, progress_bar):

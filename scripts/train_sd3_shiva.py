@@ -51,7 +51,7 @@ trainer_config = {
     "lr_scheduler": "cosine",  # "linear", "cosine", "constant"
     "scheduler_num_warmup_steps": 0,
     "seed": 42,
-    "logging_steps": 5,
+    "logging_steps": 40,
     "save_steps": 1750,  # 2 epoch
     "run_validation": True,
     "validation_steps": 875,  # 0.5 epoch
@@ -68,47 +68,57 @@ trainer_config = {
     "extra_config": {
         "target_ratio": 0.8,
         "stage_schedule": [
+            # ------------------------------------------------------------------
             # Phase 1: Router Warmup (0 - 1000步)
-            # Policy 冻结 (LR=0)。让 Router 先学会“谁是垃圾 Token”。
-            # Ratio 保持在初始值 (由 logit_bias=1.386 决定，约 0.8)。
+            # ------------------------------------------------------------------
+            # 目的: 仅仅让 Router 学会“谁重要”。Policy 稍微动一点点 (5e-5)。
+            # Ts=[20, 20]: 排序非常清晰 (High Confidence)。
+            # Tk=[2, 2]:   选择非常模糊 (Soft Selection)，梯度回传给所有人。
+            # RatioW=0.0:  不约束比例，先让 Router 自由生长。
             {
-                "steps": 7000, 
+                "steps": 1750,
                 "weights": {"ratio": 0.0, "gate": 0.0}, 
-                "lr": [1e-5, 1e-4, 0.0], 
-                "temp": [1.0, 1.0]
+                "lr": [1e-5, 1e-4, 0.0],  # Policy LR = 0
+                "temp": [20.0, 20.0, 2.0, 2.0]  # [Ts_start, Ts_end, Tk_start, Tk_end]
             },
 
-            # Phase 2: Anchor & Constraint (1000 - 4000步)
-            # 开启 Policy 训练。
-            # 使用 1.0 的强权重，对抗 Main Loss 的上升推力，确保平均值死死锚定在 0.8。
-            # 这是为了让 Policy 学会：“由于 Budget 有限，我必须做选择”。
+            # ------------------------------------------------------------------
+            # Phase 2: Anchor & Harden (1000 - 4500步)
+            # ------------------------------------------------------------------
+            # 目的: 强行把 Ratio 拉回 0.8 (Weight=1.0)，同时让选择变硬。
+            # Ts=[20, 30]: 保持高精度排序。
+            # Tk=[2, 5]:   选择开始变硬，梯度逐渐聚焦到 Top-K 边界上。
             {
                 "steps": 3500, 
                 "weights": {"ratio": 1.0, "gate": 0.0}, 
                 "lr": [1e-5, 1e-4, 5e-5], 
-                "temp": [1.0, 2.0]
+                "temp": [20.0, 30.0, 2.0, 5.0] 
             },
 
-            # Phase 3: Differentiation / Exploration (4000 - 20000步) - 关键阶段
-            # 只有在这里，我们才期望看到分化。
-            # 权重降至 0.05。此时 Main Loss 的局部敏感度差异将主导梯度。
-            # 如果这一阶段 Ratio 还是不分化，说明 Main Loss 对 Token 数量极其敏感。
+            # ------------------------------------------------------------------
+            # Phase 3: Differentiation (4500 - 25000步)
+            # ------------------------------------------------------------------
+            # 目的: 放开约束 (0.05)，让 Main Loss 驱动分化。
+            # Ts=[30, 50]: 接近完美排序。
+            # Tk=[5, 20]:  接近硬截断 (Hard Top-K)。此时梯度只在边界 Token 上有值。
             {
-                "steps": 17500, 
+                "steps": 21000, 
                 "weights": {"ratio": 0.05, "gate": 0.0}, 
-                "lr": [1e-5, 1e-4, 5e-5], 
-                "temp": [2.0, 4.0]
+                "lr": [1e-5, 1e-4, 2e-5], 
+                "temp": [30.0, 50.0, 5.0, 20.0] 
             },
 
-            # Phase 4: Stability & Gater (20000+ 步)
-            # 引入 Gate Loss，启用 Fusion 训练的正则化。
+            # ------------------------------------------------------------------
+            # Phase 4: Gater & Stability (25000+ 步)
+            # ------------------------------------------------------------------
+            # 目的: 引入 Fusion，稳定训练。
             {
                 "steps": -1, 
                 "weights": {"ratio": 0.05, "gate": 0.5}, 
                 "lr": [1e-5, 1e-4, 1e-5], 
-                "temp": [4.0, 5.0]
-            }
-        ]
+                "temp": [50.0, 50.0, 20.0, 20.0] 
+            },
+        ],
     },
     "log_with_tensorboard": True,
     "log_with_wandb": False,
