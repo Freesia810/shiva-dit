@@ -221,3 +221,17 @@ def collect_router_stats(device: torch.device) -> dict:
         }
     else:
         return {}
+
+def generate_router_heatmap(sel_idx, total_tokens, height, width):
+    B = sel_idx.shape[0]
+    heatmap = torch.zeros((B, total_tokens), dtype=torch.float32)
+
+    heatmap.scatter_(1, sel_idx.long(), 1.0)
+    
+    try:
+        heatmap_img = heatmap.reshape(B, height, width)
+    except Exception as e:
+        print(f"Heatmap reshape failed: {e}. Tokens: {total_tokens}, H: {height}, W: {width}")
+        return None
+
+    return heatmap_img # Tensor (B, H, W)

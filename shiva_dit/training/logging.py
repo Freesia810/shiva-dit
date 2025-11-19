@@ -38,8 +38,12 @@ class TensorBoardLogger(AbstractLogger):
 
     def log_image(self, tag, image, step, prefix=""):
         try:
-            image_tensor = self.pil_to_tensor(image)
-            self.writer.add_image(f"{prefix}{tag}", image_tensor, step)
+            import torch
+            if isinstance(image, torch.Tensor):
+                self.writer.add_image(f"{prefix}{tag}", image, step)
+            else:
+                image_tensor = self.pil_to_tensor(image)
+                self.writer.add_image(f"{prefix}{tag}", image_tensor, step)
         except Exception as e:
             print(f"TensorBoard log_image Error: {e}")
 

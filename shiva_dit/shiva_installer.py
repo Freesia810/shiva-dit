@@ -128,6 +128,7 @@ def install_shiva_hooks(
             "shared_pruner": shared_pruner_expert,
             "shared_context_pruner": shared_context_pruner,
             "shared_fuse_expert": shared_fuse_expert,
+            "total_layers": num_layers,
             **kwargs,
         }
 

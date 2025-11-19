@@ -29,6 +29,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         shared_fuse_expert: ShivaFuserExpert,
         use_gater_lut: bool = False,
         shared_gater_cache: torch.Tensor = None,
+        total_layers: int = 1,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -49,6 +50,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 f"ShivaDitBlockHook(layer_idx={self.layer_idx}): 'use_gater_lut' is True, "
                 "but 'shared_gater_cache' was not provided."
             )
+        
+        self.total_layers = total_layers
 
         self.gate_loss_accumulator = []
         self.gater_fuse_prob_accumulator = []
@@ -56,6 +59,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.k_accumulator = []
         self.n_minus_k_accumulator = []
         self.ratio_accumulator = []
+
+        self.capture_mask_for_viz = True
 
     def delegated_call(self, func, module_self, *args, **kwargs):
         (
@@ -113,8 +118,19 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         ).expand(B)
         layer_emb_vector = self.layer_embedder(layer_id_tensor).to(dtype)
 
+        l_val = self.layer_idx / max(1, self.total_layers - 1)
+        l_scalar = torch.tensor([l_val], device=pure_temb.device, dtype=dtype).expand(B, 1)
+        current_t = global_context.current_timestep
+        if current_t is None:
+            raise ValueError("global_context.current_timestep is None")
+        
+        if current_t.max() > 1.5: 
+            t_scalar = (current_t / 1000.0).to(dtype).unsqueeze(-1)
+        else:
+            t_scalar = current_t.to(dtype).unsqueeze(-1)
+
         gate_logits = self.gater_policy(pure_temb, layer_emb_vector)
-        predicted_ratio_logits = self.ratio_policy(pure_temb, layer_emb_vector)
+        predicted_ratio_logits = self.ratio_policy(pure_temb, layer_emb_vector, t_scalar, l_scalar)
         predicted_ratio = torch.sigmoid(predicted_ratio_logits).squeeze(-1).mean()
 
         clamped_ratio = predicted_ratio.clamp(min=0.01)
@@ -255,6 +271,11 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
     def _select_topk(self, x, token_scores_logits, k, C):
         x_sel, x_rej, sel_idx, rej_idx = self.prune_expert(x, token_scores_logits, k)
+
+        if getattr(self, "capture_mask_for_viz", False):
+            self.last_sel_idx = sel_idx.detach().cpu() # (B, k)
+            self.last_total_tokens = x.shape[1]
+
         remaining_x = torch.zeros_like(x)
         remaining_x.scatter_(1, rej_idx.unsqueeze(-1).expand(-1, -1, C), x_rej)
         return x_sel, x_rej, remaining_x, sel_idx

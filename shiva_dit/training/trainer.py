@@ -884,6 +884,8 @@ class DiffusionModelTrainer:
             self._prepare_model_inputs(batch)
         )
 
+        global_context.update(current_timestep=timesteps.to(self.device))
+
         noisy_latents = noisy_latents.to(self.dtype).detach()
 
         noise_pred, distill_loss = self._forward_pass_with_distillation(
@@ -1144,7 +1146,7 @@ class DiffusionModelTrainer:
 
             if stateful_metrics_to_log:
                 self.metric_manager.update(stateful_metrics_to_log)
-
+            
             if self.global_step % log_trigger == 0:
                 postfix_dict = {
                     "loss": f"{self.metric_manager.get_metric('train/total_loss'):.4f}",
@@ -1159,6 +1161,7 @@ class DiffusionModelTrainer:
                     postfix_dict["ratio_loss"] = f"{self.metric_manager.get_metric('loss/ratio/ratio_loss', 0.0):.4f}"
 
                 progress_bar.set_postfix(postfix_dict)
+                self._log_router_visualization()
 
             self.metric_manager.log_step(self.global_step)
             if hasattr(self, "step_per_layer_metrics"):
@@ -1168,6 +1171,46 @@ class DiffusionModelTrainer:
 
             if inference_trigger and self.global_step % inference_trigger == 0:
                 self.run_inference_validation(self.global_step)
+
+    def _log_router_visualization(self):
+        if not self.accelerator.is_main_process:
+            return
+
+        target_layers = [1, 5, 10, 15, 20] 
+        
+        from shiva_dit.hook import HookManager
+        all_hooks = HookManager.get_all_hooks()
+        
+        H = global_context.hidden_seq_height
+        W = global_context.hidden_seq_width
+
+        for layer_idx in target_layers:
+            target_hook = None
+            for name, hook in all_hooks.items():
+                if hook.layer_idx == layer_idx and hasattr(hook, "last_sel_idx"):
+                    target_hook = hook
+                    break
+            
+            if target_hook is not None and target_hook.last_sel_idx is not None:
+                heatmap_tensor = shiva_metrics.generate_router_heatmap(
+                    target_hook.last_sel_idx, 
+                    target_hook.last_total_tokens, 
+                    H, W
+                )
+                
+                if heatmap_tensor is not None:
+                    heatmap_tensor = heatmap_tensor.unsqueeze(1)
+                    
+                    try:
+                        import torchvision
+                        grid_img_tensor = torchvision.utils.make_grid(
+                            heatmap_tensor, nrow=heatmap_tensor.shape[0], normalize=False, pad_value=0.5
+                        )
+                        self.logger.log_image(f"router_viz/layer_{layer_idx:02d}", grid_img_tensor, self.global_step)
+                    except ImportError:
+                        self.logger.log_image(f"router_viz/layer_{layer_idx:02d}", heatmap_tensor[0], self.global_step)
+                    
+                target_hook.last_sel_idx = None
 
     def _log_trainable_parameters(self, description: str = ""):
         if not self.accelerator.is_main_process:

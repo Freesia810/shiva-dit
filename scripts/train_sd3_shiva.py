@@ -72,7 +72,7 @@ trainer_config = {
             # Policy 冻结 (LR=0)。让 Router 先学会“谁是垃圾 Token”。
             # Ratio 保持在初始值 (由 logit_bias=1.386 决定，约 0.8)。
             {
-                "steps": 1000, 
+                "steps": 7000, 
                 "weights": {"ratio": 0.0, "gate": 0.0}, 
                 "lr": [1e-5, 1e-4, 0.0], 
                 "temp": [1.0, 1.0]
@@ -83,7 +83,7 @@ trainer_config = {
             # 使用 1.0 的强权重，对抗 Main Loss 的上升推力，确保平均值死死锚定在 0.8。
             # 这是为了让 Policy 学会：“由于 Budget 有限，我必须做选择”。
             {
-                "steps": 3000, 
+                "steps": 3500, 
                 "weights": {"ratio": 1.0, "gate": 0.0}, 
                 "lr": [1e-5, 1e-4, 5e-5], 
                 "temp": [1.0, 2.0]
@@ -94,7 +94,7 @@ trainer_config = {
             # 权重降至 0.05。此时 Main Loss 的局部敏感度差异将主导梯度。
             # 如果这一阶段 Ratio 还是不分化，说明 Main Loss 对 Token 数量极其敏感。
             {
-                "steps": 16000, 
+                "steps": 17500, 
                 "weights": {"ratio": 0.05, "gate": 0.0}, 
                 "lr": [1e-5, 1e-4, 5e-5], 
                 "temp": [2.0, 4.0]
