@@ -59,8 +59,8 @@ class ShivaPrunerExpert(torch.nn.Module):
     def __init__(self, init_Ts, init_Tk):
         super().__init__()
 
-        self.register_buffer("Ts", torch.tensor(float(init_Ts)))
-        self.register_buffer("Tk", torch.tensor(float(init_Tk)))
+        self.register_buffer("Ts", torch.tensor(float(init_Ts)), persistent=False)
+        self.register_buffer("Tk", torch.tensor(float(init_Tk)), persistent=False)
 
     def forward(self, x, logits, k):
         """

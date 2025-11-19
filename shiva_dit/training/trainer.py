@@ -1460,6 +1460,20 @@ class DiffusionModelTrainer:
                 self.epoch = custom_state.get("epoch", 0)
                 self.best_val_metric = custom_state.get("best_val_metric", None)
 
+                saved_Ts = custom_state.get("shiva_Ts", None)
+                saved_Tk = custom_state.get("shiva_Tk", None)
+
+                if saved_Ts is not None and saved_Tk is not None:
+                    t_val_Ts = torch.tensor(saved_Ts, device=self.device, dtype=self.dtype)
+                    t_val_Tk = torch.tensor(saved_Tk, device=self.device, dtype=self.dtype)
+                    for hook in HookManager.get_all_hooks().values():
+                        if hasattr(hook, "prune_expert"):
+                            if hasattr(hook.prune_expert, "Ts"):
+                                hook.prune_expert.Ts = t_val_Ts
+                            if hasattr(hook.prune_expert, "Tk"):
+                                hook.prune_expert.Tk = t_val_Tk
+                            break
+
                 resumed = True
                 if self.accelerator.is_main_process:
                     print(f"Resumed successfully from step={self.global_step}, epoch={self.epoch}")
@@ -1652,10 +1666,20 @@ class DiffusionModelTrainer:
 
         self.accelerator.save_state(save_path_dir)
         if self.accelerator.is_main_process:
+            current_Ts = 0.0
+            current_Tk = 0.0
+            for hook in HookManager.get_all_hooks().values():
+                if hasattr(hook, "prune_expert"):
+                    current_Ts = hook.prune_expert.Ts.item()
+                    current_Tk = hook.prune_expert.Tk.item()
+                    break
+
             custom_state = {
                 "global_step": self.global_step,
                 "epoch": self.epoch,
-                "best_val_metric": self.best_val_metric
+                "best_val_metric": self.best_val_metric,
+                "shiva_Ts": current_Ts,
+                "shiva_Tk": current_Tk,
             }
             try:
                 with open(os.path.join(save_path_dir, "trainer_state.json"), "w") as f:

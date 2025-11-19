@@ -69,7 +69,7 @@ trainer_config = {
         "target_ratio": 0.8,
         "stage_schedule": [
             {"steps": 3500,  "weights": {"ratio": 0.5, "gate": 0.0}, "lr": [1e-5, 1e-4, 2e-5], "temp": [1.0, 2.0]},
-            {"steps": 21000, "weights": {"ratio": 0.1, "gate": 0.0}, "lr": [1e-5, 1e-4, 1e-5], "temp": [2.0, 5.0]},
+            {"steps": 21000, "weights": {"ratio": 0.01, "gate": 0.0}, "lr": [1e-5, 1e-4, 1e-5], "temp": [2.0, 5.0]},
             {"steps": 17500, "weights": {"ratio": 0.1, "gate": 0.5}, "lr": [1e-5, 1e-4, 1e-5], "temp": [5.0, 5.0]},
             {"steps": -1,    "weights": {"ratio": 0.05, "gate": 0.5}, "lr": [1e-5, 1e-4, 1e-5], "temp": [5.0, 5.0]},
         ],
