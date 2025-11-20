@@ -159,7 +159,7 @@ class ShivaTopkFunc(torch.autograd.Function):
         grad_k = grads[1]
 
         if grad_k is not None:
-            grad_k = grad_k * N_float
+            grad_k = grad_k * 2
 
         return grad_x, grad_logits, grad_k, grad_Ts, grad_Tk
 
