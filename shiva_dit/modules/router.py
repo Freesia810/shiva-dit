@@ -7,7 +7,7 @@ class ShivaRouter(nn.Module):
         hidden_dim: int,
         prompt_embed_dim: int,
         layer_embed_dim: int,
-        bottleneck_dim: int = 64,
+        bottleneck_dim: int,
         time_embed_dim: int = None,
     ):
         super().__init__()

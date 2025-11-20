@@ -69,10 +69,10 @@ def install_shiva_hooks(
 
     shared_layer_embedder = nn.Embedding(num_layers, layer_embed_dim).to(device, dtype)
     shared_gater_policy = ShivaGaterPolicy(
-        time_embed_dim=time_embed_dim, layer_embed_dim=layer_embed_dim
+        time_embed_dim=time_embed_dim, layer_embed_dim=layer_embed_dim, bottleneck_dim=bottleneck_dim
     ).to(device, dtype)
     shared_ratio_policy = ShivaRatioPolicy(
-        time_embed_dim=time_embed_dim, layer_embed_dim=layer_embed_dim
+        time_embed_dim=time_embed_dim, layer_embed_dim=layer_embed_dim, bottleneck_dim=bottleneck_dim
     ).to(device, dtype)
     shared_context_pruner = ShivaContextPruner(
         threshold=context_pruning_threshold, ratio=context_pruning_ratio
