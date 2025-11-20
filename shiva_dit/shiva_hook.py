@@ -148,7 +148,10 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 k_float = torch.ceil(clamped_ratio * N)
 
         token_scores_logits = self.router(
-            hidden_states.to(dtype), pure_temb, pooled_encoder_vector, layer_emb_vector
+            hidden_states=hidden_states.to(dtype), 
+            pooled_encoder_states=pooled_encoder_vector,
+            temb=pure_temb, 
+            layer_emb=layer_emb_vector
         )
 
         self.current_gate_logits_for_loss = gate_logits
