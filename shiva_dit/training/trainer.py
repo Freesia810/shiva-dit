@@ -31,6 +31,7 @@ class DiffusionModelTrainer:
     def __init__(self, config: TrainerConfig):
         self.config = config
         self.model_type = config.model_type
+        self.current_stage_idx = -1
 
         self.input_preparer_fn = get_input_preparer(self.model_type)
 
@@ -403,9 +404,8 @@ class DiffusionModelTrainer:
                 "loss/gater/gate_loss",
             ],
             "loss/losses_raw": [
-                "loss/ratio/wall_component",
-                "loss/ratio/gravity_component",
-                "loss/ratio/dynamic_tax",
+                "loss/ratio/floor_loss",
+                "loss/ratio/budget_loss",
                 "loss/gater/gate_loss_raw",
             ],
             "router/scores": [
@@ -534,6 +534,7 @@ class DiffusionModelTrainer:
 
         lora_params = []
         policy_params = []
+        fuser_params = []
         other_model_params = []
 
         policy_modules = []
@@ -552,7 +553,9 @@ class DiffusionModelTrainer:
             if not param.requires_grad:
                 continue
 
-            if id(param) in policy_param_ids:
+            if "fuse_expert" in name:
+                fuser_params.append(param)
+            elif id(param) in policy_param_ids:
                 policy_params.append(param)
             elif "lora" in name:
                 lora_params.append(param)
@@ -564,12 +567,34 @@ class DiffusionModelTrainer:
         if self.accelerator.is_main_process:
             print(f"Optimizing {len(lora_params)} LoRA params")
             print(f"Optimizing {len(policy_params)} Policy params")
+            print(f"Optimizing {len(fuser_params)} Fuser params")
             print(f"Optimizing {len(base_lr_params)} other params")
 
         optimizer_grouped_parameters = [
-            {"params": lora_params, "lr": self.config.lora_learning_rate, "weight_decay": self.config.weight_decay},
-            {"params": policy_params, "lr": self.config.policy_learning_rate, "weight_decay": 0.0},
-            {"params": base_lr_params, "lr": self.config.learning_rate, "weight_decay": self.config.weight_decay},
+            {
+                "params": lora_params,
+                "lr": self.config.lora_learning_rate,
+                "weight_decay": self.config.weight_decay,
+                "name": "lora"
+            },
+            {
+                "params": policy_params,
+                "lr": self.config.policy_learning_rate,
+                "weight_decay": 0.0,
+                "name": "policy"
+            },
+            {
+                "params": fuser_params, 
+                "lr": 0.0, 
+                "weight_decay": 0.0, 
+                "name": "fuser"
+            },
+            {
+                "params": base_lr_params,
+                "lr": self.config.learning_rate,
+                "weight_decay": self.config.weight_decay,
+                "name": "base"
+            },
         ]
 
         optimizer_grouped_parameters = [g for g in optimizer_grouped_parameters if g["params"]]
@@ -934,32 +959,46 @@ class DiffusionModelTrainer:
 
     def _update_learning_rate(self):
         current_lrs = None
-        for stage in self.processed_stage_schedule:
+        new_stage_idx = -1
+
+        for idx, stage in enumerate(self.processed_stage_schedule):
             if self.global_step < stage["threshold"]:
                 current_lrs = stage["lr"]
+                new_stage_idx = idx
                 break
-        
-        if current_lrs is None or len(current_lrs) != 3:
+
+        if new_stage_idx != self.current_stage_idx and new_stage_idx != -1:
+            if self.accelerator.is_main_process:
+                print(f"\n[Step {self.global_step}] Stage changed ({self.current_stage_idx} -> {new_stage_idx}). Resetting Optimizer State (Momentum)!")
+
+            self.optimizer.state.clear()
+            self.current_stage_idx = new_stage_idx
+
+        if current_lrs is None:
             return
 
-        # Mapping: config [Base, LoRA, Policy] -> optimizer groups
+        # Mapping: config [Base, LoRA, Policy, Fuser] -> optimizer groups
         lr_base = current_lrs[0]
         lr_lora = current_lrs[1]
         lr_policy = current_lrs[2]
-        
-        if len(self.optimizer.param_groups) > 0:
-             self.optimizer.param_groups[0]['lr'] = lr_lora
-        
-        if len(self.optimizer.param_groups) > 1:
-             self.optimizer.param_groups[1]['lr'] = lr_policy
-             
-        if len(self.optimizer.param_groups) > 2:
-             self.optimizer.param_groups[2]['lr'] = lr_base
+        lr_fuser = current_lrs[3]
+
+        for param_group in self.optimizer.param_groups:
+            group_name = param_group.get("name", "")
+
+            if group_name == "base":
+                param_group["lr"] = lr_base
+            elif group_name == "lora":
+                param_group["lr"] = lr_lora
+            elif group_name == "policy":
+                param_group["lr"] = lr_policy
+            elif group_name == "fuser":
+                param_group["lr"] = lr_fuser
 
     def _update_temperature(self):
         current_Ts = None
         current_Tk = None
-        
+
         for stage in self.processed_stage_schedule:
             if self.global_step < stage["threshold"]:
                 temp_config = stage["temp"]
@@ -985,15 +1024,15 @@ class DiffusionModelTrainer:
                 else:
                     current_Ts = 5.0
                     current_Tk = 5.0
-                
+
                 break
-        
+
         if current_Ts is None or current_Tk is None:
             return
 
         ts_val = torch.tensor(current_Ts, device=self.device, dtype=self.dtype)
         tk_val = torch.tensor(current_Tk, device=self.device, dtype=self.dtype)
-        
+
         for hook in HookManager.get_all_hooks().values():
             if hasattr(hook, "prune_expert"):
                 if hasattr(hook.prune_expert, "Ts"):
@@ -1026,14 +1065,14 @@ class DiffusionModelTrainer:
         current_base_lr = 0.0
         current_lora_lr = 0.0
         current_policy_lr = 0.0
-        
+
         if len(self.optimizer.param_groups) > 0:
             current_lora_lr = self.optimizer.param_groups[0]['lr']
         if len(self.optimizer.param_groups) > 1:
             current_policy_lr = self.optimizer.param_groups[1]['lr']
         if len(self.optimizer.param_groups) > 2:
             current_base_lr = self.optimizer.param_groups[2]['lr']
-        
+
         current_Ts = 0.0
         current_Tk = 0.0
         for hook in HookManager.get_all_hooks().values():
@@ -1164,7 +1203,7 @@ class DiffusionModelTrainer:
 
             if stateful_metrics_to_log:
                 self.metric_manager.update(stateful_metrics_to_log)
-            
+
             if self.global_step % log_trigger == 0:
                 postfix_dict = {
                     "loss": f"{self.metric_manager.get_metric('train/total_loss'):.4f}",
@@ -1195,10 +1234,10 @@ class DiffusionModelTrainer:
             return
 
         target_layers = [1, 5, 10, 15, 20] 
-        
+
         from shiva_dit.hook import HookManager
         all_hooks = HookManager.get_all_hooks()
-        
+
         H = global_context.hidden_seq_height
         W = global_context.hidden_seq_width
 
@@ -1208,17 +1247,17 @@ class DiffusionModelTrainer:
                 if hook.layer_idx == layer_idx and hasattr(hook, "last_sel_idx"):
                     target_hook = hook
                     break
-            
+
             if target_hook is not None and target_hook.last_sel_idx is not None:
                 heatmap_tensor = shiva_metrics.generate_router_heatmap(
                     target_hook.last_sel_idx, 
                     target_hook.last_total_tokens, 
                     H, W
                 )
-                
+
                 if heatmap_tensor is not None:
                     heatmap_tensor = heatmap_tensor.unsqueeze(1)
-                    
+
                     try:
                         import torchvision
                         grid_img_tensor = torchvision.utils.make_grid(
@@ -1227,7 +1266,7 @@ class DiffusionModelTrainer:
                         self.logger.log_image(f"router_viz/layer_{layer_idx:02d}", grid_img_tensor, self.global_step)
                     except ImportError:
                         self.logger.log_image(f"router_viz/layer_{layer_idx:02d}", heatmap_tensor[0], self.global_step)
-                    
+
                 target_hook.last_sel_idx = None
 
     def _log_trainable_parameters(self, description: str = ""):

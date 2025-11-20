@@ -42,9 +42,9 @@ def calculate_gate_loss(config: dict, device: torch.device) -> torch.Tensor:
     else:
         return torch.tensor(0.0, device=device), metrics
 
+
 def calculate_ratio_loss(
-    config: dict, device: torch.device,
-    timestep: torch.Tensor = None
+    config: dict, device: torch.device, timestep: torch.Tensor = None
 ) -> tuple[torch.Tensor, dict, dict]:
 
     ratios_per_layer = {}
@@ -53,7 +53,6 @@ def calculate_ratio_loss(
 
     for hook in _get_shiva_hooks():
         layer_name = f"layer_{hook.layer_idx:02d}"
-
         accumulator = hook.ratio_accumulator
 
         if accumulator:
@@ -69,43 +68,45 @@ def calculate_ratio_loss(
     metrics = {
         "adaptive_ratio/avg_ratio": 0.0,
         "adaptive_ratio/target_ratio": 0.0,
-        "loss/ratio/ratio_loss_raw": 0.0,
+        "loss/ratio/budget_loss": 0.0,
+        "loss/ratio/floor_loss": 0.0,
         "loss/ratio/ratio_loss": 0.0,
     }
 
-    scale_up, scale_down = config["ratio_loss_weight"]
+    w_config = config["ratio_loss_weight"]
+    if isinstance(w_config, list):
+        w_budget = w_config[0]
+        w_floor = w_config[1] if len(w_config) > 1 else 0.0
+    else:
+        w_budget = w_config
+        w_floor = 0.0
+
     current_target_ratio = config["target_ratio"]
 
     if ratios_for_loss:
-        avg_ratio_loss = torch.mean(torch.stack(ratios_for_loss))
+        all_ratios = torch.stack(ratios_for_loss)
+
+        global_avg_ratio = torch.mean(all_ratios)
         target = torch.tensor(
-            current_target_ratio, device=device, dtype=avg_ratio_loss.dtype
+            current_target_ratio, device=device, dtype=all_ratios.dtype
         )
-        wall_loss = torch.relu(avg_ratio_loss - target) * scale_up
 
-        if timestep is not None:
-            t_norm = timestep.float().mean() / 1000.0
-            t_factor = (1.0 - t_norm).clamp(0.0, 1.0)
-            current_scale_down = scale_down * t_factor
-        else:
-            current_scale_down = scale_down
+        budget_loss = (global_avg_ratio - target) ** 2 * w_budget
 
-        gravity_loss = avg_ratio_loss * current_scale_down
-        final_loss = wall_loss + gravity_loss
+        min_allowed = 0.20
+        floor_penalties = torch.relu(min_allowed - all_ratios)
+        floor_loss = torch.sum(floor_penalties) * w_floor
+
+        final_loss = budget_loss + floor_loss
 
         with torch.no_grad():
-            if ratios_for_logging:
-                ratios_tensor_logging = torch.tensor(ratios_for_logging, device=device)
-                avg_ratio_metric = torch.mean(ratios_tensor_logging)
-            else:
-                avg_ratio_metric = avg_ratio_loss.detach()
+            avg_ratio_metric = global_avg_ratio.detach()
 
         metrics = {
             "adaptive_ratio/avg_ratio": avg_ratio_metric,
             "adaptive_ratio/target_ratio": target,
-            "loss/ratio/wall_component": wall_loss,
-            "loss/ratio/gravity_component": gravity_loss,
-            "loss/ratio/dynamic_tax": current_scale_down,
+            "loss/ratio/budget_loss": budget_loss,
+            "loss/ratio/floor_loss": floor_loss,
             "loss/ratio/ratio_loss": final_loss,
         }
 

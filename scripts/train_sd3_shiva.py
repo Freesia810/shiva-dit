@@ -71,14 +71,14 @@ trainer_config = {
             {
                 "steps": 1750,
                 "weights": {"ratio": [0.0, 0.0], "gate": 0.0},
-                "lr": [1e-5, 1e-4, 0.0],  # Disable policy
+                "lr": [1e-5, 1e-4, 0.0, 0.0],  # Disable policy
                 "temp": [5.0, 5.0, 2.0, 2.0],
             },
             # ------------------------------------------------------------------
             {
-                "steps": 10500, 
-                "weights": {"ratio": [10.0, 0.0], "gate": 0.0},
-                "lr": [1e-5, 0.0, 2e-5], # Disable lora, enable policy
+                "steps": 10500,
+                "weights": {"ratio": [100.0, 1000.0], "gate": 0.0},
+                "lr": [1e-5, 0.0, 1e-5, 0.0],  # Disable lora, enable policy
                 "temp": [5.0, 10.0, 2.0, 5.0],
             },
             {
