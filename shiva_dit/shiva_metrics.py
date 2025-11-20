@@ -80,8 +80,8 @@ def calculate_ratio_loss(
         target = torch.tensor(
             current_target_ratio, device=device, dtype=avg_ratio_loss.dtype
         )
-        wall_loss = torch.relu(avg_ratio - target) * scale_up
-        gravity_loss = avg_ratio * scale_down
+        wall_loss = torch.relu(avg_ratio_loss - target) * scale_up
+        gravity_loss = avg_ratio_loss * scale_down
         final_loss = wall_loss + gravity_loss
 
         with torch.no_grad():
