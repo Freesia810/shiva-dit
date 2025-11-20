@@ -403,7 +403,8 @@ class DiffusionModelTrainer:
                 "loss/gater/gate_loss",
             ],
             "loss/losses_raw": [
-                "loss/ratio/ratio_loss_raw",
+                "loss/ratio/wall_component",
+                "loss/ratio/gravity_component",
                 "loss/gater/gate_loss_raw",
             ],
             "router/scores": [

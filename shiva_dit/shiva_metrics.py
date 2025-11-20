@@ -80,9 +80,9 @@ def calculate_ratio_loss(
         target = torch.tensor(
             current_target_ratio, device=device, dtype=avg_ratio_loss.dtype
         )
-        diff = avg_ratio_loss - target
-        loss_val = torch.where(diff > 0, diff * scale_up, -diff * scale_down)
-        final_loss = loss_val
+        wall_loss = torch.relu(avg_ratio - target) * scale_up
+        gravity_loss = avg_ratio * scale_down
+        final_loss = wall_loss + gravity_loss
 
         with torch.no_grad():
             if ratios_for_logging:
@@ -94,7 +94,8 @@ def calculate_ratio_loss(
         metrics = {
             "adaptive_ratio/avg_ratio": avg_ratio_metric,
             "adaptive_ratio/target_ratio": target,
-            "loss/ratio/ratio_loss_raw": loss_val,
+            "loss/ratio/wall_component": wall_loss,
+            "loss/ratio/gravity_component": gravity_loss,
             "loss/ratio/ratio_loss": final_loss,
         }
 
