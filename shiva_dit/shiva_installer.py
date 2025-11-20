@@ -102,11 +102,11 @@ def install_shiva_hooks(
 
     logit_bias = 1.386
     nn.init.constant_(shared_ratio_policy.net[-1].bias, logit_bias)
-    nn.init.normal_(shared_ratio_policy.net[-1].weight, mean=0.0, std=0.1)
+    nn.init.normal_(shared_ratio_policy.net[-1].weight, mean=0.0, std=0.2)
 
     for router in grouped_routers:
         nn.init.normal_(router.router_head.weight, mean=0.0, std=0.02)
-        nn.init.constant_(router.router_head.bias, 1.0)
+        nn.init.constant_(router.router_head.bias, 0.0)
 
     nn.init.zeros_(shared_fuse_expert.fusion_ffn[-1].weight)
     nn.init.zeros_(shared_fuse_expert.fusion_ffn[-1].bias)

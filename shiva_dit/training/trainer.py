@@ -794,7 +794,7 @@ class DiffusionModelTrainer:
                 break
 
         config = {}
-        config["ratio_loss_weight"] = current_weights.get("ratio", 0.0)
+        config["ratio_loss_weight"] = current_weights.get("ratio", [0.0, 0.0])
         config["gate_loss_weight"] = current_weights.get("gate", 0.0)
         config["target_ratio"] = self.config.extra_config['target_ratio']
 
