@@ -43,7 +43,8 @@ def calculate_gate_loss(config: dict, device: torch.device) -> torch.Tensor:
         return torch.tensor(0.0, device=device), metrics
 
 def calculate_ratio_loss(
-    config: dict, device: torch.device
+    config: dict, device: torch.device,
+    timestep: torch.Tensor = None
 ) -> tuple[torch.Tensor, dict, dict]:
 
     ratios_per_layer = {}
@@ -81,7 +82,15 @@ def calculate_ratio_loss(
             current_target_ratio, device=device, dtype=avg_ratio_loss.dtype
         )
         wall_loss = torch.relu(avg_ratio_loss - target) * scale_up
-        gravity_loss = avg_ratio_loss * scale_down
+
+        if timestep is not None:
+            t_norm = timestep.float().mean() / 1000.0
+            t_factor = (1.0 - t_norm).clamp(0.0, 1.0)
+            current_scale_down = scale_down * t_factor
+        else:
+            current_scale_down = scale_down
+
+        gravity_loss = avg_ratio_loss * current_scale_down
         final_loss = wall_loss + gravity_loss
 
         with torch.no_grad():
@@ -96,6 +105,7 @@ def calculate_ratio_loss(
             "adaptive_ratio/target_ratio": target,
             "loss/ratio/wall_component": wall_loss,
             "loss/ratio/gravity_component": gravity_loss,
+            "loss/ratio/dynamic_tax": current_scale_down,
             "loss/ratio/ratio_loss": final_loss,
         }
 

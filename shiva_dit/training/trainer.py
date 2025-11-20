@@ -405,6 +405,7 @@ class DiffusionModelTrainer:
             "loss/losses_raw": [
                 "loss/ratio/wall_component",
                 "loss/ratio/gravity_component",
+                "loss/ratio/dynamic_tax",
                 "loss/gater/gate_loss_raw",
             ],
             "router/scores": [
@@ -815,7 +816,7 @@ class DiffusionModelTrainer:
             loss_config, self.device
         )
         ratio_loss, r_metrics, per_layer_ratios = (
-            shiva_metrics.calculate_ratio_loss(loss_config, self.device)
+            shiva_metrics.calculate_ratio_loss(loss_config, self.device, timestep=timestep)
         )
 
         total_hook_loss = gate_loss + ratio_loss
