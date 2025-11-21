@@ -67,7 +67,7 @@ trainer_config = {
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
     "extra_config": {
-        "target_ratio": 0.8,
+        "target_ratio": 0.75,
         "stage_schedule": [
             {
                 "steps": 1750,
@@ -79,7 +79,7 @@ trainer_config = {
             {
                 "steps": 10500,
                 "weights": {"ratio": [1.0, 0.1], "gate": 0.0},
-                "lr": [0.0, 0.0, 2e-5, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
+                "lr": [0.0, 0.0, 1e-4, 1e-4, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [5.0, 10.0, 2.0, 5.0],
             },
             {
