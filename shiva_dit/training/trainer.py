@@ -405,6 +405,7 @@ class DiffusionModelTrainer:
             ],
             "loss/losses_raw": [
                 "loss/ratio/floor_loss",
+                "loss/ratio/mse_loss",
                 "loss/ratio/budget_loss",
                 "loss/gater/gate_loss_raw",
             ],

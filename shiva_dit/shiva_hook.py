@@ -142,6 +142,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             layer_idx_tensor=layer_id_tensor
         )
         predicted_ratio = torch.sigmoid(predicted_ratio_logits).squeeze(-1).mean()
+        if self.layer_idx == 0:
+            predicted_ratio = torch.tensor(1.0, device=predicted_ratio.device, dtype=predicted_ratio.dtype)
 
         clamped_ratio = predicted_ratio.clamp(min=0.01)
         if self.training:

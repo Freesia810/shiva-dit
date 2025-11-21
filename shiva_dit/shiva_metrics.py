@@ -70,19 +70,23 @@ def calculate_ratio_loss(
         "adaptive_ratio/target_ratio": 0.0,
         "loss/ratio/budget_loss": 0.0,
         "loss/ratio/floor_loss": 0.0,
+        "loss/ratio/mse_loss": 0.0,
         "loss/ratio/ratio_loss": 0.0,
     }
 
     if not ratios_for_loss:
         return torch.tensor(0.0, device=device), metrics, ratios_per_layer
 
+    # [1.0, 20.0, 1.0]
     w_config = config.get("ratio_loss_weight", 1.0)
     if isinstance(w_config, list):
         w_budget = w_config[0]
         w_floor = w_config[1] if len(w_config) > 1 else 0.0
+        w_mse = w_config[2] if len(w_config) > 2 else 0.0
     else:
         w_budget = w_config
         w_floor = 0.0
+        w_mse = 0.0
 
     current_target_ratio = config.get("target_ratio", 0.8)
 
@@ -91,18 +95,24 @@ def calculate_ratio_loss(
     global_avg_ratio = torch.mean(all_ratios)
     target = torch.tensor(current_target_ratio, device=device, dtype=all_ratios.dtype)
 
-    # Budget Loss: Hinge Loss (ReLU)
     diff = global_avg_ratio - target
     budget_loss = w_budget * torch.relu(diff)
 
     if w_floor > 0.0:
-        min_allowed = 0.05 
+        min_allowed = 0.1
         floor_penalties = torch.relu(min_allowed - all_ratios)
         floor_loss = torch.sum(floor_penalties) * w_floor
     else:
         floor_loss = torch.tensor(0.0, device=device)
 
-    final_loss = budget_loss + floor_loss
+    if w_mse > 0.0:
+        target_full = torch.full_like(all_ratios, current_target_ratio)
+        mse_loss_val = F.mse_loss(all_ratios, target_full)
+        mse_loss = w_mse * mse_loss_val
+    else:
+        mse_loss = torch.tensor(0.0, device=device)
+
+    final_loss = budget_loss + floor_loss + mse_loss
 
     with torch.no_grad():
         metrics.update({
@@ -110,6 +120,7 @@ def calculate_ratio_loss(
             "adaptive_ratio/target_ratio": target,
             "loss/ratio/budget_loss": budget_loss.detach(),
             "loss/ratio/floor_loss": floor_loss.detach(),
+            "loss/ratio/mse_loss": mse_loss.detach(),
             "loss/ratio/ratio_loss": final_loss.detach(),
         })
 

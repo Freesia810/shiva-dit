@@ -67,37 +67,38 @@ trainer_config = {
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
     "extra_config": {
-        "target_ratio": 0.75,
+        "target_ratio": 0.8,
         "stage_schedule": [
             {
                 "steps": 1750,
-                "weights": {"ratio": [0.0, 0.0], "gate": 0.0},
+                "weights": {"ratio": [0.0, 0.0, 0.0], "gate": 0.0},
                 "lr": [1e-5, 1e-4, 0.0, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
-                "temp": [5.0, 5.0, 2.0, 2.0],
+                "temp": [5.0, 5.0, 2.0, 2.0], # [Ts-start, Ts-end, Tk-start, Tk-end]
             },
             # ------------------------------------------------------------------
             {
-                "steps": 10500,
-                "weights": {"ratio": [1.0, 0.1], "gate": 0.0},
-                "lr": [0.0, 0.0, 1e-4, 1e-4, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
-                "temp": [5.0, 10.0, 2.0, 5.0],
+                "steps": 7000,
+                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0}, # [Budget(Hinge), Floor(Wall), MSE(Smooth)]
+                "lr": [0.0, 0.0, 5e-4, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
+                "temp": [5.0, 10.0, 2.0, 10.0],
             },
+            # ------------------------------------------------------------------
             {
                 "steps": 14000,
-                "weights": {"ratio": 2.0, "gate": 0.0},
-                "lr": [1e-5, 5e-5, 1e-5],
-                "temp": [10.0, 20.0, 5.0, 10.0],
+                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0},
+                "lr": [0.0, 1e-5, 1e-5, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
+                "temp": [10.0, 10.0, 10.0, 50.0],
             },
-            # ------------------------------------------------------------------
-            # Phase 4: Gater Fusion (26250+ 步)
-            # 目的: 开启 Gater 修正被误删的信息 (如果需要的话)
-            # ------------------------------------------------------------------
-            {
-                "steps": -1,
-                "weights": {"ratio": 2.0, "gate": 1.0},
-                "lr": [1e-6, 1e-5, 1e-6],
-                "temp": [20.0, 50.0, 10.0, 20.0],
-            },
+            # # ------------------------------------------------------------------
+            # # Phase 4: Gater Fusion (26250+ 步)
+            # # 目的: 开启 Gater 修正被误删的信息 (如果需要的话)
+            # # ------------------------------------------------------------------
+            # {
+            #     "steps": -1,
+            #     "weights": {"ratio": 2.0, "gate": 1.0},
+            #     "lr": [1e-6, 1e-5, 1e-6],
+            #     "temp": [20.0, 50.0, 10.0, 20.0],
+            # },
         ],
     },
     "log_with_tensorboard": True,
