@@ -21,6 +21,7 @@ def install_shiva_hooks(
     **kwargs,
 ):
     bottleneck_dim = kwargs.pop("bottleneck_dim", 64)
+    ratio_bottleneck_dim = kwargs.pop("ratio_bottleneck_dim", 32)
     num_router_groups = kwargs.pop("num_router_groups", 4)
     layer_embed_dim = kwargs.pop("layer_embed_dim", 256)
     fuse_expert_ffn_mult = kwargs.pop("fuse_expert_ffn_mult", 2)
@@ -72,7 +73,7 @@ def install_shiva_hooks(
         time_embed_dim=time_embed_dim, layer_embed_dim=layer_embed_dim, bottleneck_dim=bottleneck_dim
     ).to(device, dtype)
     shared_ratio_policy = ShivaRatioPolicy(
-        time_embed_dim=time_embed_dim, layer_embed_dim=layer_embed_dim, bottleneck_dim=bottleneck_dim
+        total_layers=num_layers, ratio_bottleneck_dim=ratio_bottleneck_dim
     ).to(device, dtype)
     shared_context_pruner = ShivaContextPruner(
         threshold=context_pruning_threshold, ratio=context_pruning_ratio
@@ -93,25 +94,6 @@ def install_shiva_hooks(
             for _ in range(num_router_groups)
         ]
     ).to(device, dtype)
-
-    ## initialization: keep parameters to reasonable values
-    nn.init.constant_(shared_gater_policy.net[-1].bias, 0.0)
-    with torch.no_grad():
-        shared_gater_policy.net[-1].bias[0] = 0.0   # Prune Logit
-        shared_gater_policy.net[-1].bias[1] = 0.0  # Fuse Logit
-
-    logit_bias = 1.386
-    nn.init.constant_(shared_ratio_policy.net[-1].bias, logit_bias)
-    nn.init.normal_(shared_ratio_policy.net[-1].weight, mean=0.0, std=0.01)
-
-    for router in grouped_routers:
-        nn.init.normal_(router.router_head.weight, mean=0.0, std=0.02)
-        nn.init.constant_(router.router_head.bias, 0.0)
-
-    nn.init.zeros_(shared_fuse_expert.fusion_ffn[-1].weight)
-    nn.init.zeros_(shared_fuse_expert.fusion_ffn[-1].bias)
-    nn.init.zeros_(shared_fuse_expert.gate_mlp[-2].weight)
-    nn.init.constant_(shared_fuse_expert.gate_mlp[-2].bias, -5.0)
 
     layers_per_group = num_layers // num_router_groups
 

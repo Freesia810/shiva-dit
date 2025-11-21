@@ -51,7 +51,7 @@ class TrainerConfig:
     )
     policy_learning_rate: float = field(
         default=1e-4,
-        metadata={"help": "Learning rate for policy parameters (ratio/gate)."},
+        metadata={"help": "Learning rate for policy parameters (ratio)."},
     )
     optimizer: str = "AdamW" # "Adam", "AdamW", "SGD"
     weight_decay: float = 1e-2

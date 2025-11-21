@@ -43,82 +43,6 @@ def calculate_gate_loss(config: dict, device: torch.device) -> torch.Tensor:
         return torch.tensor(0.0, device=device), metrics
 
 
-# def calculate_ratio_loss(
-#     config: dict, device: torch.device, timestep: torch.Tensor = None
-# ) -> tuple[torch.Tensor, dict, dict]:
-
-#     ratios_per_layer = {}
-#     ratios_for_loss = []
-#     ratios_for_logging = []
-
-#     for hook in _get_shiva_hooks():
-#         layer_name = f"layer_{hook.layer_idx:02d}"
-#         accumulator = hook.ratio_accumulator
-
-#         if accumulator:
-#             avg_ratio_for_hook = torch.stack(accumulator).mean()
-#             ratios_for_loss.append(avg_ratio_for_hook)
-
-#             avg_ratio_item = avg_ratio_for_hook.detach().item()
-#             ratios_per_layer[layer_name] = avg_ratio_item
-#             ratios_for_logging.append(avg_ratio_item)
-
-#         hook.ratio_accumulator.clear()
-
-#     metrics = {
-#         "adaptive_ratio/avg_ratio": 0.0,
-#         "adaptive_ratio/target_ratio": 0.0,
-#         "loss/ratio/budget_loss": 0.0,
-#         "loss/ratio/floor_loss": 0.0,
-#         "loss/ratio/ratio_loss": 0.0,
-#     }
-
-#     w_config = config["ratio_loss_weight"]
-#     if isinstance(w_config, list):
-#         w_budget = w_config[0]
-#         w_floor = w_config[1] if len(w_config) > 1 else 0.0
-#     else:
-#         w_budget = w_config
-#         w_floor = 0.0
-
-#     current_target_ratio = config["target_ratio"]
-
-#     if ratios_for_loss:
-#         all_ratios = torch.stack(ratios_for_loss)
-
-#         global_avg_ratio = torch.mean(all_ratios)
-#         target = torch.tensor(
-#             current_target_ratio, device=device, dtype=all_ratios.dtype
-#         )
-
-#         tolerance = 0.02
-#         diff = torch.abs(global_avg_ratio - target)
-#         error = torch.relu(diff - tolerance) 
-#         budget_loss = (error ** 2) * w_budget
-
-#         # budget_loss = (global_avg_ratio - target) ** 2 * w_budget
-
-#         min_allowed = 0.20
-#         floor_penalties = torch.relu(min_allowed - all_ratios)
-#         floor_loss = torch.sum(floor_penalties) * w_floor
-
-#         final_loss = budget_loss + floor_loss
-
-#         with torch.no_grad():
-#             avg_ratio_metric = global_avg_ratio.detach()
-
-#         metrics = {
-#             "adaptive_ratio/avg_ratio": avg_ratio_metric,
-#             "adaptive_ratio/target_ratio": target,
-#             "loss/ratio/budget_loss": budget_loss,
-#             "loss/ratio/floor_loss": floor_loss,
-#             "loss/ratio/ratio_loss": final_loss,
-#         }
-
-#         return final_loss, metrics, ratios_per_layer
-#     else:
-#         return torch.tensor(0.0, device=device), metrics, ratios_per_layer
-
 def calculate_ratio_loss(
     config: dict, device: torch.device, timestep: torch.Tensor = None
 ) -> tuple[torch.Tensor, dict, dict]:
@@ -127,7 +51,6 @@ def calculate_ratio_loss(
     ratios_for_loss = []
     ratios_for_logging = []
 
-    # --- 收集每个 layer 的 ratio ---
     for hook in _get_shiva_hooks():
         layer_name = f"layer_{hook.layer_idx:02d}"
         accumulator = hook.ratio_accumulator
@@ -142,7 +65,6 @@ def calculate_ratio_loss(
 
         hook.ratio_accumulator.clear()
 
-    # --- 默认指标 ---
     metrics = {
         "adaptive_ratio/avg_ratio": 0.0,
         "adaptive_ratio/target_ratio": 0.0,
@@ -151,8 +73,10 @@ def calculate_ratio_loss(
         "loss/ratio/ratio_loss": 0.0,
     }
 
-    # --- Loss 权重 ---
-    w_config = config.get("ratio_loss_weight", [1.0, 0.0])
+    if not ratios_for_loss:
+        return torch.tensor(0.0, device=device), metrics, ratios_per_layer
+
+    w_config = config.get("ratio_loss_weight", 1.0)
     if isinstance(w_config, list):
         w_budget = w_config[0]
         w_floor = w_config[1] if len(w_config) > 1 else 0.0
@@ -160,54 +84,36 @@ def calculate_ratio_loss(
         w_budget = w_config
         w_floor = 0.0
 
-    current_target_ratio = config["target_ratio"]
+    current_target_ratio = config.get("target_ratio", 0.8)
 
-    # --- 如果有 ratio 数据 ---
-    if ratios_for_loss:
-        all_ratios = torch.stack(ratios_for_loss)
+    all_ratios = torch.stack(ratios_for_loss) # (Num_Layers,)
+    
+    global_avg_ratio = torch.mean(all_ratios)
+    target = torch.tensor(current_target_ratio, device=device, dtype=all_ratios.dtype)
 
-        # 全局平均 ratio（约束基准）
-        global_avg_ratio = torch.mean(all_ratios)
-        target = torch.tensor(
-            current_target_ratio, device=device, dtype=all_ratios.dtype
-        )
+    # Budget Loss: Hinge Loss (ReLU)
+    diff = global_avg_ratio - target
+    budget_loss = w_budget * torch.relu(diff)
 
-        # ---------------------------------------------------------
-        # S3：Soft-Knapsack Lagrangian Constraint
-        # ---------------------------------------------------------
-        # only penalize if Avg > Target
-        budget_overuse = torch.relu(global_avg_ratio - target)
+    if w_floor > 0.0:
+        min_allowed = 0.05 
+        floor_penalties = torch.relu(min_allowed - all_ratios)
+        floor_loss = torch.sum(floor_penalties) * w_floor
+    else:
+        floor_loss = torch.tensor(0.0, device=device)
 
-        # key: multiply by avg.detach() to form smooth Lagrange multiplier
-        budget_loss = (budget_overuse * global_avg_ratio.detach()) * w_budget
+    final_loss = budget_loss + floor_loss
 
-        # (optional) floor restriction (currently disabled unless w_floor > 0)
-        if w_floor > 0.0:
-            min_allowed = 0.20
-            floor_penalties = torch.relu(min_allowed - all_ratios)
-            floor_loss = torch.sum(floor_penalties) * w_floor
-        else:
-            floor_loss = torch.tensor(0.0, device=device)
-
-        final_loss = budget_loss + floor_loss
-
-        # --- logging ---
-        with torch.no_grad():
-            avg_ratio_metric = global_avg_ratio.detach()
-
-        metrics = {
-            "adaptive_ratio/avg_ratio": avg_ratio_metric,
+    with torch.no_grad():
+        metrics.update({
+            "adaptive_ratio/avg_ratio": global_avg_ratio.detach(),
             "adaptive_ratio/target_ratio": target,
             "loss/ratio/budget_loss": budget_loss.detach(),
             "loss/ratio/floor_loss": floor_loss.detach(),
             "loss/ratio/ratio_loss": final_loss.detach(),
-        }
+        })
 
-        return final_loss, metrics, ratios_per_layer
-
-    # --- 如果没有 ratio 数据 ---
-    zero_loss = torch.tensor(0.0, device=device)
-    return zero_loss, metrics, ratios_per_layer
+    return final_loss, metrics, ratios_per_layer
 
 @torch.no_grad()
 def calculate_shiva_gate_prob(device: torch.device) -> tuple[torch.Tensor, dict]:

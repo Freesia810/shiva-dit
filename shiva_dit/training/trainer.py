@@ -533,21 +533,27 @@ class DiffusionModelTrainer:
             raise ValueError(f"Unknown training mode: {self.config.training_mode}")
 
         lora_params = []
-        policy_params = []
+        gate_policy_params = []
+        ratio_policy_params = []
         fuser_params = []
         other_model_params = []
 
-        policy_modules = []
+        gate_policy_modules = []
+        ratio_policy_modules = []
         for hook in HookManager.get_all_hooks().values():
             if hasattr(hook, "gater_policy"):
-                policy_modules.append(hook.gater_policy)
+                gate_policy_modules.append(hook.gater_policy)
             if hasattr(hook, "ratio_policy"):
-                policy_modules.append(hook.ratio_policy)
+                ratio_policy_modules.append(hook.ratio_policy)
 
-        policy_param_ids = set()
-        for mod in policy_modules:
+        gate_policy_param_ids = set()
+        ratio_policy_param_ids = set()
+        for mod in gate_policy_modules:
             for param in mod.parameters():
-                policy_param_ids.add(id(param))
+                gate_policy_param_ids.add(id(param))
+        for mod in ratio_policy_modules:
+            for param in mod.parameters():
+                ratio_policy_param_ids.add(id(param))
 
         for name, param in self.model.named_parameters():
             if not param.requires_grad:
@@ -555,8 +561,10 @@ class DiffusionModelTrainer:
 
             if "fuse_expert" in name:
                 fuser_params.append(param)
-            elif id(param) in policy_param_ids:
-                policy_params.append(param)
+            elif id(param) in gate_policy_param_ids:
+                gate_policy_params.append(param)
+            elif id(param) in ratio_policy_param_ids:
+                ratio_policy_params.append(param)
             elif "lora" in name:
                 lora_params.append(param)
             else:
@@ -566,7 +574,7 @@ class DiffusionModelTrainer:
 
         if self.accelerator.is_main_process:
             print(f"Optimizing {len(lora_params)} LoRA params")
-            print(f"Optimizing {len(policy_params)} Policy params")
+            print(f"Optimizing {len(gate_policy_params)}, {len(ratio_policy_params)} Policy params")
             print(f"Optimizing {len(fuser_params)} Fuser params")
             print(f"Optimizing {len(base_lr_params)} other params")
 
@@ -578,10 +586,16 @@ class DiffusionModelTrainer:
                 "name": "lora"
             },
             {
-                "params": policy_params,
+                "params": gate_policy_params,
                 "lr": self.config.policy_learning_rate,
                 "weight_decay": 0.0,
-                "name": "policy"
+                "name": "gate_policy"
+            },
+            {
+                "params": ratio_policy_params,
+                "lr": self.config.policy_learning_rate,
+                "weight_decay": 0.0,
+                "name": "ratio_policy"
             },
             {
                 "params": fuser_params, 
@@ -977,11 +991,12 @@ class DiffusionModelTrainer:
         if current_lrs is None:
             return
 
-        # Mapping: config [Base, LoRA, Policy, Fuser] -> optimizer groups
+        # Mapping: config [Base, LoRA, Ratio, Gate, Fuser] -> optimizer groups
         lr_base = current_lrs[0]
         lr_lora = current_lrs[1]
-        lr_policy = current_lrs[2]
-        lr_fuser = current_lrs[3]
+        lr_ratio_policy = current_lrs[2]
+        lr_gate_policy = current_lrs[3]
+        lr_fuser = current_lrs[4]
 
         for param_group in self.optimizer.param_groups:
             group_name = param_group.get("name", "")
@@ -990,8 +1005,10 @@ class DiffusionModelTrainer:
                 param_group["lr"] = lr_base
             elif group_name == "lora":
                 param_group["lr"] = lr_lora
-            elif group_name == "policy":
-                param_group["lr"] = lr_policy
+            elif group_name == "gate_policy":
+                param_group["lr"] = lr_gate_policy
+            elif group_name == "ratio_policy":
+                param_group["lr"] = lr_ratio_policy
             elif group_name == "fuser":
                 param_group["lr"] = lr_fuser
 
@@ -1655,6 +1672,9 @@ class DiffusionModelTrainer:
                 if is_update_step or is_last_step:
                     if self.accelerator.sync_gradients:
                         self.accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
+                        policy_params = [p for n, p in self.model.named_parameters() if "policy" in n]
+                        if policy_params:
+                            self.accelerator.clip_grad_norm_(policy_params, 0.1)
 
                     self.optimizer.step()
                     self.global_step += 1

@@ -5,6 +5,7 @@ HookType = ShivaDitBlockHook
 hook_config = {
     "num_router_groups": 24,
     "bottleneck_dim": 256,
+    "ratio_bottleneck_dim": 32,
     "layer_embed_dim": 256,
     "fuse_expert_ffn_mult": 2,
     "use_gater_lut": False,
@@ -71,14 +72,14 @@ trainer_config = {
             {
                 "steps": 1750,
                 "weights": {"ratio": [0.0, 0.0], "gate": 0.0},
-                "lr": [1e-5, 1e-4, 0.0, 0.0],  # Disable policy
+                "lr": [1e-5, 1e-4, 0.0, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [5.0, 5.0, 2.0, 2.0],
             },
             # ------------------------------------------------------------------
             {
                 "steps": 10500,
-                "weights": {"ratio": [10.0, 0.0], "gate": 0.0},
-                "lr": [1e-5, 0.0, 2e-5, 0.0],  # Disable lora, enable policy
+                "weights": {"ratio": [1.0, 0.1], "gate": 0.0},
+                "lr": [0.0, 0.0, 2e-5, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [5.0, 10.0, 2.0, 5.0],
             },
             {

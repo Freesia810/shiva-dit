@@ -22,6 +22,9 @@ class ShivaRouter(nn.Module):
         self.layernorm = nn.LayerNorm(bottleneck_dim)
         self.router_head = nn.Linear(bottleneck_dim, 1, bias=True)
 
+        nn.init.normal_(self.router_head.weight, mean=0.0, std=0.02)
+        nn.init.constant_(self.router_head.bias, 0.0)
+
     def forward(
         self,
         hidden_states,

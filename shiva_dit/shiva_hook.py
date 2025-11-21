@@ -137,7 +137,10 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         l_scalar = l_scalar.view(B, 1)
 
         gate_logits = self.gater_policy(pure_temb, layer_emb_vector)
-        predicted_ratio_logits = self.ratio_policy(pure_temb, layer_emb_vector, t_scalar, l_scalar)
+        predicted_ratio_logits = self.ratio_policy(
+            t_scalar=t_scalar,
+            layer_idx_tensor=layer_id_tensor
+        )
         predicted_ratio = torch.sigmoid(predicted_ratio_logits).squeeze(-1).mean()
 
         clamped_ratio = predicted_ratio.clamp(min=0.01)
