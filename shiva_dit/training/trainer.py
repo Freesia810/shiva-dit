@@ -136,7 +136,7 @@ class DiffusionModelTrainer:
             self.evaluators = {}
             if CLIPScore:
                 print("Loading CLIP Score model...")
-                self.evaluators['clip'] = CLIPScore(model_name_or_path="../openai-clip-vit-base-patch16").to(self.device)
+                self.evaluators['clip'] = CLIPScore(model_name_or_path="../openai-clip-vit-base-patch16", sync_on_compute=False).to(self.device)
             if RM:
                 print("Loading ImageReward model...")
                 self.evaluators['image_reward'] = RM.load("../ImageReward/ImageReward.pt", device=self.device, med_config="../ImageReward/med_config.json")
@@ -1545,129 +1545,122 @@ class DiffusionModelTrainer:
 
     @torch.no_grad()
     def run_inference_validation(self, global_step):
-        if (
-            not self.accelerator.is_main_process
-            or not self.config.run_inference_validation
-            or not self.config.inference_metadata_file
-        ):
-            return
+        if not self.config.run_inference_validation or not self.config.inference_metadata_file:
+            return {}
 
-        print(
-            f"\nRunning inference validation from file: {self.config.inference_metadata_file}..."
-        )
-
-        self.model.eval()
         prompts = []
-        try:
-            with open(self.config.inference_metadata_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    item = json.loads(line)
-                    if "text" in item:
-                        prompts.append(item["text"])
-            if not prompts:
-                print(
-                    "  Warning: Inference metadata file is empty or contains no captions. Skipping."
-                )
-                return
-        except Exception as e:
-            print(
-                f"  Failed to read or parse inference metadata file: {e}. Skipping inference validation."
-            )
-            return
+        if self.accelerator.is_main_process:
+            print(f"\nRunning inference validation from file: {self.config.inference_metadata_file}...")
+            try:
+                with open(self.config.inference_metadata_file, "r", encoding="utf-8") as f:
+                    for line in f:
+                        item = json.loads(line)
+                        if "text" in item:
+                            prompts.append(item["text"])
+            except Exception as e:
+                print(f"  Failed to read metadata file: {e}")
 
-        unwrapped_model = self.accelerator.unwrap_model(self.model)
+        broadcast_data = [prompts]
+        broadcast_object_list(broadcast_data, from_process=0)
+        prompts = broadcast_data[0]
 
-        assert len(self.model_attrs) == 1, "Currently only single model_attr supported"
+        if not prompts:
+            return {}
+
+        original_model_in_pipe = None
+        original_scheduler = None
         model_attr_name = self.model_attrs[0]
-        original_model_in_pipe = getattr(self.pipe, model_attr_name)
-        setattr(self.pipe, model_attr_name, unwrapped_model)
-        print(
-            f"  Temporarily patching pipe.{model_attr_name} with unwrapped trained model"
-        )
-
-        inference_generator = torch.Generator(device=self.device).manual_seed(
-            self.config.inference_seed
-        )
-
-        original_scheduler = copy.deepcopy(self.scheduler)
-
-        generated_images = []
-        generated_images_tensors = []
+        
+        inference_metrics = {}
+        generated_images_tensors = [] 
+        generated_images_pil = []     
         target_prompts = []
 
-        sample_dir = os.path.join(
-            self.config.output_dir,
-            self.config.inference_output_dir,
-            f"step_{global_step}",
-        )
-        os.makedirs(sample_dir, exist_ok=True)
+        if self.accelerator.is_main_process:
+            unwrapped_model = self.accelerator.unwrap_model(self.model)
+            original_model_in_pipe = getattr(self.pipe, model_attr_name)
+            setattr(self.pipe, model_attr_name, unwrapped_model)
+            
+            inference_generator = torch.Generator(device=self.device).manual_seed(self.config.inference_seed)
+            original_scheduler = copy.deepcopy(self.scheduler)
+            
+            self.model.eval()
+            
+            sample_dir = os.path.join(
+                self.config.output_dir,
+                self.config.inference_output_dir,
+                f"step_{global_step}",
+            )
+            os.makedirs(sample_dir, exist_ok=True)
 
         for i, prompt in enumerate(prompts):
-            try:
-                if self.device.type == 'cuda':
-                    torch.cuda.empty_cache()
-                with self.accelerator.autocast():
-                    image = self.pipe(
-                        prompt=prompt,
-                        generator=inference_generator,
-                        num_inference_steps=self.config.inference_num_inference_steps,
-                    ).images[0]
+            if self.accelerator.is_main_process:
+                try:
+                    if self.device.type == 'cuda':
+                        torch.cuda.empty_cache()
+                    
+                    with self.accelerator.autocast():
+                        image = self.pipe(
+                            prompt=prompt,
+                            generator=inference_generator,
+                            num_inference_steps=self.config.inference_num_inference_steps,
+                        ).images[0]
 
-                safe_prompt = "".join(c if c.isalnum() else "_" for c in prompt)[:50]
-                image.save(
-                    os.path.join(sample_dir, f"sample_{i+1:03d}_{safe_prompt}.png")
-                )
-                tag = f"inference_sample/{i+1:03d}_{safe_prompt}"
-                self.logger.log_image(tag, image, global_step)
+                    safe_prompt = "".join(c if c.isalnum() else "_" for c in prompt)[:50]
+                    image.save(os.path.join(sample_dir, f"sample_{i+1:03d}_{safe_prompt}.png"))
+                    tag = f"inference_sample/{i+1:03d}_{safe_prompt}"
+                    self.logger.log_image(tag, image, global_step)
 
-                generated_images.append(image)
-                target_prompts.append(prompt)
-                if CLIPScore:
-                    img_tensor = TF.to_tensor(image).to(self.device)
-                    generated_images_tensors.append(img_tensor)
-            except Exception as e:
-                print(f"  Failed to generate image for prompt: '{prompt}'. Error: {e}")
+                    generated_images_pil.append(image)
+                    target_prompts.append(prompt)
+                    if CLIPScore:
+                        img_tensor = TF.to_tensor(image).to(self.device)
+                        generated_images_tensors.append(img_tensor)
 
-        inference_metrics = {}
-        if CLIPScore and generated_images_tensors and 'clip' in self.evaluators:
-            try:
-                # stack & convert to uint8 [0, 255] for torchmetrics
-                imgs_stack = torch.stack(generated_images_tensors)
-                imgs_stack = (imgs_stack * 255).to(dtype=torch.uint8)
-                
-                self.evaluators['clip'].update(imgs_stack, target_prompts)
-                clip_val = self.evaluators['clip'].compute().item()
-                self.evaluators['clip'].reset()
-                
-                inference_metrics['clip_score'] = clip_val
-                print(f"  >> CLIP Score: {clip_val:.4f}")
-            except Exception as e:
-                print(f"  Error calculating CLIP Score: {e}")
+                except Exception as e:
+                    print(f"  Failed to generate image for prompt: '{prompt}'. Error: {e}")
 
-        if RM and generated_images and 'image_reward' in self.evaluators:
-            try:
-                rewards = []
-                for img, txt in zip(generated_images, target_prompts):
-                    score = self.evaluators['image_reward'].score(txt, img)
-                    rewards.append(score)
-                
-                if rewards:
-                    avg_reward = sum(rewards) / len(rewards)
-                    inference_metrics['image_reward'] = avg_reward
-                    print(f"  >> ImageReward: {avg_reward:.4f}")
-            except Exception as e:
-                print(f"  Error calculating ImageReward: {e}")
+            self.accelerator.wait_for_everyone()
 
-        if inference_metrics:
-            metrics_to_log = {f"inference/{k}": v for k, v in inference_metrics.items()}
-            self.logger.log_scalars(metrics_to_log, global_step)
+        if self.accelerator.is_main_process:
+            # CLIP Score
+            if CLIPScore and generated_images_tensors and 'clip' in self.evaluators:
+                try:
+                    imgs_stack = torch.stack(generated_images_tensors)
+                    imgs_stack = (imgs_stack * 255).to(dtype=torch.uint8)
+                    
+                    self.evaluators['clip'].update(imgs_stack, target_prompts)
+                    clip_val = self.evaluators['clip'].compute().item()
+                    self.evaluators['clip'].reset()
+                    
+                    inference_metrics['clip_score'] = clip_val
+                    print(f"  >> CLIP Score: {clip_val:.4f}")
+                except Exception as e:
+                    print(f"  Error calculating CLIP Score: {e}")
 
-        setattr(self.pipe, model_attr_name, original_model_in_pipe)
-        print(f"  Restored original model to pipe.{model_attr_name}")
+            if RM and generated_images_pil and 'image_reward' in self.evaluators:
+                try:
+                    rewards = []
+                    for img, txt in zip(generated_images_pil, target_prompts):
+                        score = self.evaluators['image_reward'].score(txt, img)
+                        rewards.append(score)
+                    if rewards:
+                        avg_reward = sum(rewards) / len(rewards)
+                        inference_metrics['image_reward'] = avg_reward
+                        print(f"  >> ImageReward: {avg_reward:.4f}")
+                except Exception as e:
+                    print(f"  Error calculating ImageReward: {e}")
 
-        self.scheduler = original_scheduler
+            if inference_metrics:
+                metrics_to_log = {f"inference/{k}": v for k, v in inference_metrics.items()}
+                self.logger.log_scalars(metrics_to_log, global_step)
 
-        self.model.train()
+            setattr(self.pipe, model_attr_name, original_model_in_pipe)
+            self.scheduler = original_scheduler
+            print(f"  Restored original model to pipe.{model_attr_name}")
+            self.model.train()
+
+        return inference_metrics
 
     def _try_resume(self):
         self.global_step = 0
