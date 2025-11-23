@@ -1155,6 +1155,7 @@ class DiffusionModelTrainer:
                         metric_value=value, 
                         higher_is_better=True
                     )
+            self.accelerator.wait_for_everyone()
 
         if save_trigger and self.global_step % save_trigger == 0:
             self.maybe_save_periodically()
@@ -1324,9 +1325,6 @@ class DiffusionModelTrainer:
                 for key, value_dict in self.step_per_layer_metrics.items():
                     if value_dict:
                         self.logger.add_scalars(key, value_dict, self.global_step)
-
-            if inference_trigger and self.global_step % inference_trigger == 0:
-                self.run_inference_validation(self.global_step)
 
     def _log_router_visualization(self, batch=None):
         if not self.accelerator.is_main_process:
@@ -1593,34 +1591,34 @@ class DiffusionModelTrainer:
             )
             os.makedirs(sample_dir, exist_ok=True)
 
-        for i, prompt in enumerate(prompts):
-            if self.accelerator.is_main_process:
-                try:
-                    if self.device.type == 'cuda':
-                        torch.cuda.empty_cache()
-                    
-                    with self.accelerator.autocast():
-                        image = self.pipe(
-                            prompt=prompt,
-                            generator=inference_generator,
-                            num_inference_steps=self.config.inference_num_inference_steps,
-                        ).images[0]
+            for i, prompt in enumerate(prompts):
+                if self.accelerator.is_main_process:
+                    try:
+                        if self.device.type == 'cuda':
+                            torch.cuda.empty_cache()
+                        
+                        with self.accelerator.autocast():
+                            image = self.pipe(
+                                prompt=prompt,
+                                generator=inference_generator,
+                                num_inference_steps=self.config.inference_num_inference_steps,
+                            ).images[0]
 
-                    safe_prompt = "".join(c if c.isalnum() else "_" for c in prompt)[:50]
-                    image.save(os.path.join(sample_dir, f"sample_{i+1:03d}_{safe_prompt}.png"))
-                    tag = f"inference_sample/{i+1:03d}_{safe_prompt}"
-                    self.logger.log_image(tag, image, global_step)
+                        safe_prompt = "".join(c if c.isalnum() else "_" for c in prompt)[:50]
+                        image.save(os.path.join(sample_dir, f"sample_{i+1:03d}_{safe_prompt}.png"))
+                        tag = f"inference_sample/{i+1:03d}_{safe_prompt}"
+                        self.logger.log_image(tag, image, global_step)
 
-                    generated_images_pil.append(image)
-                    target_prompts.append(prompt)
-                    if CLIPScore:
-                        img_tensor = TF.to_tensor(image).to(self.device)
-                        generated_images_tensors.append(img_tensor)
+                        generated_images_pil.append(image)
+                        target_prompts.append(prompt)
+                        if CLIPScore:
+                            img_tensor = TF.to_tensor(image).to(self.device)
+                            generated_images_tensors.append(img_tensor)
 
-                except Exception as e:
-                    print(f"  Failed to generate image for prompt: '{prompt}'. Error: {e}")
+                    except Exception as e:
+                        print(f"  Failed to generate image for prompt: '{prompt}'. Error: {e}")
 
-            self.accelerator.wait_for_everyone()
+        self.accelerator.wait_for_everyone()
 
         if self.accelerator.is_main_process:
             # CLIP Score
