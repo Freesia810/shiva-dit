@@ -137,11 +137,22 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         l_scalar = l_scalar.view(B, 1)
 
         gate_logits = self.gater_policy(pure_temb, layer_emb_vector)
-        predicted_ratio_logits = self.ratio_policy(
-            t_scalar=t_scalar,
-            layer_idx_tensor=layer_id_tensor
+
+        predicted_ratio_logits = self.ratio_policy(t_scalar, layer_id_tensor)
+        policy_ratio = torch.sigmoid(predicted_ratio_logits).squeeze(-1).mean()
+
+        is_random_training = (
+            self.training 
+            and getattr(global_context, "current_stage_idx", -1) == 1
         )
-        predicted_ratio = torch.sigmoid(predicted_ratio_logits).squeeze(-1).mean()
+
+        if is_random_training:
+            random_ratio_val = torch.rand(1, device=pure_temb.device).item() * 0.5 + 0.4
+            random_ratio = torch.tensor(random_ratio_val, device=pure_temb.device, dtype=dtype)
+            predicted_ratio = random_ratio + (0.0 * policy_ratio)
+        else:
+            predicted_ratio = policy_ratio
+
         if self.layer_idx == 0:
             predicted_ratio = torch.tensor(1.0, device=predicted_ratio.device, dtype=predicted_ratio.dtype)
 
@@ -158,6 +169,13 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             temb=pure_temb, 
             layer_emb=layer_emb_vector
         )
+
+        if token_scores_logits.shape[0] % 2 == 0 and token_scores_logits.shape[0] > 1:
+            B_half = token_scores_logits.shape[0] // 2
+            
+            scores_uncond, scores_cond = token_scores_logits.chunk(2, dim=0)
+            unified_scores = torch.maximum(scores_uncond, scores_cond)
+            token_scores_logits = torch.cat([unified_scores, unified_scores], dim=0)
 
         self.current_gate_logits_for_loss = gate_logits
         self.current_ratio_for_loss = clamped_ratio
@@ -278,9 +296,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
     ):
         if module_name == "ffn":
             # gate with topk scores, to maintain the grad
-            selected_logits = torch.gather(self.token_scores_logits, 1, self.sel_idx)
-            s_scale = (1.0 + torch.tanh(selected_logits)).to(hidden_output.dtype)
-            hidden_output = hidden_output * s_scale.unsqueeze(2)
+            # selected_logits = torch.gather(self.token_scores_logits, 1, self.sel_idx)
+            # s_scale = (1.0 + torch.tanh(selected_logits)).to(hidden_output.dtype)
+            # hidden_output = hidden_output * s_scale.unsqueeze(2)
             self.token_scores_logits = self.sel_idx = None
         return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
 
@@ -353,9 +371,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.ratio_accumulator.append(self.current_ratio_for_loss)
 
         token_scores = torch.sigmoid(token_scores_logits)
-        s_scale = (1.0 + torch.tanh(token_scores_logits))
-        s_scale_mean = s_scale.mean()
-        s_scale_std = s_scale.std()
+        # s_scale = (1.0 + torch.tanh(token_scores_logits))
+        # s_scale_mean = s_scale.mean()
+        # s_scale_std = s_scale.std()
         self.router_stats_accumulator.append(
             {
                 "scores_tensor": token_scores,
@@ -363,8 +381,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 "std": token_scores.std(),
                 "min": token_scores.min(),
                 "max": token_scores.max(),
-                "s_scale_mean": s_scale_mean,
-                "s_scale_std": s_scale_std,
+                # "s_scale_mean": s_scale_mean,
+                # "s_scale_std": s_scale_std,
             }
         )
 

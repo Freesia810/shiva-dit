@@ -70,35 +70,54 @@ trainer_config = {
         "target_ratio": 0.8,
         "stage_schedule": [
             {
-                "steps": 1750,
+                "steps": 1750, # 1 epoch
                 "weights": {"ratio": [0.0, 0.0, 0.0], "gate": 0.0},
                 "lr": [1e-5, 1e-4, 0.0, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [5.0, 5.0, 2.0, 2.0], # [Ts-start, Ts-end, Tk-start, Tk-end]
             },
             # ------------------------------------------------------------------
             {
-                "steps": 7000,
+                "steps": 5250, # 3 epoch
+                "weights": {"ratio": [0.0, 0.0, 0.0], "gate": 0.0},
+                "lr": [1e-5, 1e-5, 0.0, 0.0, 0.0],
+                "temp": [5.0, 5.0, 2.0, 2.0],
+            },
+
+            # ------------------------------------------------------------------
+            {
+                "steps": 7000, # 4 epoch
                 "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0}, # [Budget(Hinge), Floor(Wall), MSE(Smooth)]
                 "lr": [0.0, 0.0, 5e-4, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [5.0, 10.0, 2.0, 10.0],
             },
             # ------------------------------------------------------------------
             {
-                "steps": 14000,
+                "steps": 14000, # 8 epoch
                 "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0},
                 "lr": [0.0, 1e-5, 1e-5, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [10.0, 10.0, 10.0, 50.0],
             },
+
+            {
+                "steps": 10500, # 6 epoch
+                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0},
+                "lr": [0.0, 1e-5, 1e-5, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
+                "temp": [10.0, 10.0, 50.0, 50.0],
+            },
             # # ------------------------------------------------------------------
-            # # Phase 4: Gater Fusion (26250+ 步)
-            # # 目的: 开启 Gater 修正被误删的信息 (如果需要的话)
-            # # ------------------------------------------------------------------
-            # {
-            #     "steps": -1,
-            #     "weights": {"ratio": 2.0, "gate": 1.0},
-            #     "lr": [1e-6, 1e-5, 1e-6],
-            #     "temp": [20.0, 50.0, 10.0, 20.0],
-            # },
+            {
+                "steps": 7000, # 4 epoch
+                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.1},
+                "lr": [0.0, 0.0, 0.0, 1e-4, 2e-4],  # [Base, LoRA, Ratio, Gate, Fuser]
+                "temp": [10.0, 10.0, 50.0, 50.0],
+            },
+
+            {
+                "steps": -1,
+                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.1},
+                "lr": [0.0, 1e-5, 1e-5, 1e-5, 1e-5],  # [Base, LoRA, Ratio, Gate, Fuser]
+                "temp": [10.0, 10.0, 50.0, 50.0],
+            },
         ],
     },
     "log_with_tensorboard": True,

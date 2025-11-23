@@ -419,11 +419,11 @@ class DiffusionModelTrainer:
             ],
             "router/distribution": [
                 "router/std_score",
-                "router/s_scale_std",
+                # "router/s_scale_std",
             ],
-            "router/s_scale": [
-                "router/s_scale_mean",
-            ],
+            # "router/s_scale": [
+            #     "router/s_scale_mean",
+            # ],
             "adaptive_ratio": [
                 "adaptive_ratio/target_ratio",
                 "adaptive_ratio/avg_ratio",
@@ -988,6 +988,7 @@ class DiffusionModelTrainer:
 
             self.optimizer.state.clear()
             self.current_stage_idx = new_stage_idx
+            global_context.update(current_stage_idx=new_stage_idx)
 
         if current_lrs is None:
             return
@@ -1059,7 +1060,7 @@ class DiffusionModelTrainer:
                     hook.prune_expert.Tk = tk_val
                 break
 
-    def _on_update_step_end(self, gathered_losses, progress_bar):
+    def _on_update_step_end(self, gathered_losses, progress_bar, batch=None):
         log_trigger = self.log_trigger
         validate_trigger = self.validate_trigger
         inference_trigger = self.inference_trigger
@@ -1236,7 +1237,7 @@ class DiffusionModelTrainer:
                     postfix_dict["ratio_loss"] = f"{self.metric_manager.get_metric('loss/ratio/ratio_loss', 0.0):.4f}"
 
                 progress_bar.set_postfix(postfix_dict)
-                self._log_router_visualization()
+                self._log_router_visualization(batch=batch)
 
             self.metric_manager.log_step(self.global_step)
             if hasattr(self, "step_per_layer_metrics"):
@@ -1247,11 +1248,27 @@ class DiffusionModelTrainer:
             if inference_trigger and self.global_step % inference_trigger == 0:
                 self.run_inference_validation(self.global_step)
 
-    def _log_router_visualization(self):
+    def _log_router_visualization(self, batch=None):
         if not self.accelerator.is_main_process:
             return
+        
+        if batch is not None and "pixel_values" in batch:
+            try:
+                import torchvision
+                images = batch["pixel_values"].detach().cpu().float()
+                
+                images = (images + 1.0) / 2.0
+                images = images.clamp(0.0, 1.0)
+                
+                grid_input = torchvision.utils.make_grid(
+                    images, nrow=images.shape[0], normalize=False, pad_value=1.0
+                )
+                
+                self.logger.log_image("router_viz/input_image", grid_input, self.global_step)
+            except Exception as e:
+                print(f"Failed to log input image: {e}")
 
-        target_layers = [1, 5, 10, 15, 20] 
+        target_layers = range(24)
 
         from shiva_dit.hook import HookManager
         all_hooks = HookManager.get_all_hooks()
@@ -1688,7 +1705,7 @@ class DiffusionModelTrainer:
                         "hook": self.accelerator.gather(hook_loss).mean(),
                         "distill": self.accelerator.gather(distill_loss).mean()
                     }
-                    self._on_update_step_end(gathered_losses, progress_bar)
+                    self._on_update_step_end(gathered_losses, progress_bar, batch)
 
             if self.accelerator.is_main_process:
                 print(f"Epoch {epoch+1} completed.")

@@ -220,8 +220,8 @@ def collect_router_stats(device: torch.device) -> dict:
             total_std.append(torch.stack([x["std"] for x in acc]).mean())
             total_min.append(torch.stack([x["min"] for x in acc]).min())
             total_max.append(torch.stack([x["max"] for x in acc]).max())
-            total_s_scale_mean.append(torch.stack([x["s_scale_mean"] for x in acc]).mean())
-            total_s_scale_std.append(torch.stack([x["s_scale_std"] for x in acc]).mean())
+            # total_s_scale_mean.append(torch.stack([x["s_scale_mean"] for x in acc]).mean())
+            # total_s_scale_std.append(torch.stack([x["s_scale_std"] for x in acc]).mean())
 
             all_scores = torch.stack([x["scores_tensor"] for x in acc]) 
             quantiles = torch.quantile(all_scores.to(torch.float32), q_tensor.to(torch.float32), dim=None) 
@@ -236,8 +236,8 @@ def collect_router_stats(device: torch.device) -> dict:
             "router/std_score": torch.stack(total_std).mean(),
             "router/min_score": torch.stack(total_min).min(),
             "router/max_score": torch.stack(total_max).max(),
-            "router/s_scale_mean": torch.stack(total_s_scale_mean).mean(),
-            "router/s_scale_std": torch.stack(total_s_scale_std).mean(),
+            # "router/s_scale_mean": torch.stack(total_s_scale_mean).mean(),
+            # "router/s_scale_std": torch.stack(total_s_scale_std).mean(),
             "router/p25_score": torch.stack(total_p25).mean(),
             "router/p50_score": torch.stack(total_p50).mean(),
             "router/p75_score": torch.stack(total_p75).mean(),
