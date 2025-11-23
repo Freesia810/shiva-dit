@@ -1890,8 +1890,6 @@ class DiffusionModelTrainer:
                 f"(mode={mode}, step={global_step})"
             )
 
-        self.accelerator.wait_for_everyone()
-
     def save_specific_best(self, metric_name: str, metric_value: float, higher_is_better: bool = True):
         if not self.accelerator.is_main_process:
             return
