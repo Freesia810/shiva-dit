@@ -54,6 +54,7 @@ trainer_config = {
     "seed": 42,
     "logging_steps": 40,
     "save_steps": 1750,  # 2 epoch
+    "save_best": True,
     "run_validation": True,
     "validation_steps": 875,  # 0.5 epoch
     "val_batch_size": None,
@@ -67,7 +68,7 @@ trainer_config = {
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
     "extra_config": {
-        "target_ratio": 0.8,
+        "target_ratio": 0.5,
         "stage_schedule": [
             {
                 "steps": 1750, # 1 epoch

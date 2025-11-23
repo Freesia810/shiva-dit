@@ -3,9 +3,11 @@ import json
 import copy
 import re
 import glob
+import sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from types import ModuleType
 from torch.utils.data import DataLoader
 from peft import LoraConfig as PeftLoraConfig, get_peft_model
 from tqdm import tqdm
@@ -19,6 +21,48 @@ try:
 except ImportError:
     CLIPScore = None
     print("Warning: torchmetrics not installed. CLIP Score will not be calculated.")
+
+LOCAL_BERT_PATH = "../bert-base-uncased"
+
+if not os.path.exists(LOCAL_BERT_PATH):
+    print(f"Warning: Local BERT path not found at {LOCAL_BERT_PATH}. Offline mode might fail.")
+
+from transformers import BertTokenizer, BertModel
+
+_original_tokenizer_from_pretrained = BertTokenizer.from_pretrained
+_original_model_from_pretrained = BertModel.from_pretrained
+
+def _patched_tokenizer_loader(cls, pretrained_model_name_or_path, *args, **kwargs):
+    if pretrained_model_name_or_path == "bert-base-uncased":
+        if os.path.exists(LOCAL_BERT_PATH):
+            print(f"Intercepted 'bert-base-uncased' -> Redirecting to local: {LOCAL_BERT_PATH}")
+            pretrained_model_name_or_path = LOCAL_BERT_PATH
+    return _original_tokenizer_from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
+
+def _patched_model_loader(cls, pretrained_model_name_or_path, *args, **kwargs):
+    if pretrained_model_name_or_path == "bert-base-uncased":
+        if os.path.exists(LOCAL_BERT_PATH):
+            print(f"Intercepted 'bert-base-uncased' (Model) -> Redirecting to local: {LOCAL_BERT_PATH}")
+            pretrained_model_name_or_path = LOCAL_BERT_PATH
+    return _original_model_from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
+
+BertTokenizer.from_pretrained = classmethod(_patched_tokenizer_loader)
+BertModel.from_pretrained = classmethod(_patched_model_loader)
+
+sys.modules["ImageReward.ReFL"] = ModuleType("ImageReward.ReFL")
+import transformers.modeling_utils
+import transformers.pytorch_utils
+if not hasattr(transformers.modeling_utils, "apply_chunking_to_forward"):
+    if hasattr(transformers.pytorch_utils, "apply_chunking_to_forward"):
+        transformers.modeling_utils.apply_chunking_to_forward = transformers.pytorch_utils.apply_chunking_to_forward
+
+if not hasattr(transformers.modeling_utils, "find_pruneable_heads_and_indices"):
+    if hasattr(transformers.pytorch_utils, "find_pruneable_heads_and_indices"):
+        transformers.modeling_utils.find_pruneable_heads_and_indices = transformers.pytorch_utils.find_pruneable_heads_and_indices
+
+if not hasattr(transformers.modeling_utils, "prune_linear_layer"):
+    if hasattr(transformers.pytorch_utils, "prune_linear_layer"):
+        transformers.modeling_utils.prune_linear_layer = transformers.pytorch_utils.prune_linear_layer
 
 try:
     import ImageReward as RM
@@ -92,13 +136,10 @@ class DiffusionModelTrainer:
             self.evaluators = {}
             if CLIPScore:
                 print("Loading CLIP Score model...")
-                self.evaluators['clip'] = CLIPScore(model_name_or_path="openai/clip-vit-base-patch16").to(self.device)
+                self.evaluators['clip'] = CLIPScore(model_name_or_path="../openai-clip-vit-base-patch16").to(self.device)
             if RM:
                 print("Loading ImageReward model...")
-                try:
-                    self.evaluators['image_reward'] = RM.load("ImageReward-v1.0", device=self.device)
-                except Exception as e:
-                    print(f"Failed to load ImageReward: {e}")
+                self.evaluators['image_reward'] = RM.load("../ImageReward/ImageReward.pt", device=self.device, med_config="../ImageReward/med_config.json")
 
         self._print_setup_summary()
 
