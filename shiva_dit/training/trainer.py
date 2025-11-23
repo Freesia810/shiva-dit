@@ -13,6 +13,19 @@ from accelerate import Accelerator
 from accelerate.utils import set_seed, DistributedDataParallelKwargs, broadcast_object_list
 from dataclasses import asdict
 
+try:
+    from torchmetrics.multimodal.clip_score import CLIPScore
+    import torchvision.transforms.functional as TF
+except ImportError:
+    CLIPScore = None
+    print("Warning: torchmetrics not installed. CLIP Score will not be calculated.")
+
+try:
+    import ImageReward as RM
+except ImportError:
+    RM = None
+    print("Warning: ImageReward not installed. ImageReward Score will not be calculated.")
+
 from baselines.diffcr import DiffCRDitBlockHook
 from baselines.dy_dit import DynamicDiTBlockHook
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
@@ -72,6 +85,20 @@ class DiffusionModelTrainer:
         self._setup_metric_manager()
 
         self._setup_caption_dropout_embeds()
+
+        self.best_metrics_state = {} 
+
+        if self.accelerator.is_main_process:
+            self.evaluators = {}
+            if CLIPScore:
+                print("Loading CLIP Score model...")
+                self.evaluators['clip'] = CLIPScore(model_name_or_path="openai/clip-vit-base-patch16").to(self.device)
+            if RM:
+                print("Loading ImageReward model...")
+                try:
+                    self.evaluators['image_reward'] = RM.load("ImageReward-v1.0", device=self.device)
+                except Exception as e:
+                    print(f"Failed to load ImageReward: {e}")
 
         self._print_setup_summary()
 
@@ -1070,11 +1097,23 @@ class DiffusionModelTrainer:
         if validate_trigger and self.global_step % validate_trigger == 0:
             val_metric = self.validate(self.global_step)
 
-        if self.config.save_best and val_metric is not None:
-            self.auto_save_best(
-                val_metric,
-                higher_is_better=self.config.best_metric_higher_is_better,
-            )
+            if self.config.save_best and val_metric is not None:
+                self.save_specific_best(
+                    metric_name="val_main_loss", 
+                    metric_value=val_metric, 
+                    higher_is_better=False
+                )
+        
+        if inference_trigger and self.global_step % inference_trigger == 0:
+            inf_metrics = self.run_inference_validation(self.global_step)
+            
+            if self.config.save_best and inf_metrics:
+                for name, value in inf_metrics.items():
+                    self.save_specific_best(
+                        metric_name=name, 
+                        metric_value=value, 
+                        higher_is_better=True
+                    )
 
         if save_trigger and self.global_step % save_trigger == 0:
             self.maybe_save_periodically()
@@ -1511,6 +1550,10 @@ class DiffusionModelTrainer:
 
         original_scheduler = copy.deepcopy(self.scheduler)
 
+        generated_images = []
+        generated_images_tensors = []
+        target_prompts = []
+
         sample_dir = os.path.join(
             self.config.output_dir,
             self.config.inference_output_dir,
@@ -1535,8 +1578,48 @@ class DiffusionModelTrainer:
                 )
                 tag = f"inference_sample/{i+1:03d}_{safe_prompt}"
                 self.logger.log_image(tag, image, global_step)
+
+                generated_images.append(image)
+                target_prompts.append(prompt)
+                if CLIPScore:
+                    img_tensor = TF.to_tensor(image).to(self.device)
+                    generated_images_tensors.append(img_tensor)
             except Exception as e:
                 print(f"  Failed to generate image for prompt: '{prompt}'. Error: {e}")
+
+        inference_metrics = {}
+        if CLIPScore and generated_images_tensors and 'clip' in self.evaluators:
+            try:
+                # stack & convert to uint8 [0, 255] for torchmetrics
+                imgs_stack = torch.stack(generated_images_tensors)
+                imgs_stack = (imgs_stack * 255).to(dtype=torch.uint8)
+                
+                self.evaluators['clip'].update(imgs_stack, target_prompts)
+                clip_val = self.evaluators['clip'].compute().item()
+                self.evaluators['clip'].reset()
+                
+                inference_metrics['clip_score'] = clip_val
+                print(f"  >> CLIP Score: {clip_val:.4f}")
+            except Exception as e:
+                print(f"  Error calculating CLIP Score: {e}")
+
+        if RM and generated_images and 'image_reward' in self.evaluators:
+            try:
+                rewards = []
+                for img, txt in zip(generated_images, target_prompts):
+                    score = self.evaluators['image_reward'].score(txt, img)
+                    rewards.append(score)
+                
+                if rewards:
+                    avg_reward = sum(rewards) / len(rewards)
+                    inference_metrics['image_reward'] = avg_reward
+                    print(f"  >> ImageReward: {avg_reward:.4f}")
+            except Exception as e:
+                print(f"  Error calculating ImageReward: {e}")
+
+        if inference_metrics:
+            metrics_to_log = {f"inference/{k}": v for k, v in inference_metrics.items()}
+            self.logger.log_scalars(metrics_to_log, global_step)
 
         setattr(self.pipe, model_attr_name, original_model_in_pipe)
         print(f"  Restored original model to pipe.{model_attr_name}")
@@ -1593,7 +1676,7 @@ class DiffusionModelTrainer:
 
                 self.global_step = custom_state.get("global_step", 0)
                 self.epoch = custom_state.get("epoch", 0)
-                self.best_val_metric = custom_state.get("best_val_metric", None)
+                self.best_metrics_state = custom_state.get("best_metrics_state", {})
 
                 saved_Ts = custom_state.get("shiva_Ts", None)
                 saved_Tk = custom_state.get("shiva_Tk", None)
@@ -1768,34 +1851,28 @@ class DiffusionModelTrainer:
 
         self.accelerator.wait_for_everyone()
 
-    def auto_save_best(self, val_metric: float, higher_is_better: bool = False):
-        if val_metric is None:
-            if self.accelerator.is_main_process:
-                print(f"Validation metric is None, skipping best model save.")
+    def save_specific_best(self, metric_name: str, metric_value: float, higher_is_better: bool = True):
+        if not self.accelerator.is_main_process:
             return
 
-        is_best = False
-        if not hasattr(self, "best_val_metric") or self.best_val_metric is None:
-            is_best = True
+        current_best = self.best_metrics_state.get(metric_name)
+        
+        is_new_best = False
+        if current_best is None:
+            is_new_best = True
         else:
             if higher_is_better:
-                is_best = val_metric > self.best_val_metric
+                is_new_best = metric_value > current_best
             else:
-                is_best = val_metric < self.best_val_metric
+                is_new_best = metric_value < current_best
 
-        if is_best:
-            self.best_val_metric = val_metric
-            save_path = os.path.join(self.config.output_dir, "best.pt")
+        if is_new_best:
+            self.best_metrics_state[metric_name] = metric_value
+            filename = f"best_{metric_name.replace('/', '_').replace(' ', '_')}.pt"
+            save_path = os.path.join(self.config.output_dir, filename)
 
+            print(f"New best for [{metric_name}]: {metric_value:.4f}. Saving to {filename}...")
             self.save_checkpoint(save_path)
-
-            if self.accelerator.is_main_process:
-                print(f"New best model saved at {save_path} (metric={val_metric:.4f})")
-        else:
-            if self.accelerator.is_main_process:
-                print(
-                    f"Validation metric {val_metric:.4f} not improved (best={self.best_val_metric:.4f})"
-                )
 
     def maybe_save_periodically(self):
         save_path_dir = os.path.join(
@@ -1815,7 +1892,7 @@ class DiffusionModelTrainer:
             custom_state = {
                 "global_step": self.global_step,
                 "epoch": self.epoch,
-                "best_val_metric": self.best_val_metric,
+                "best_metrics_state": self.best_metrics_state,
                 "shiva_Ts": current_Ts,
                 "shiva_Tk": current_Tk,
             }

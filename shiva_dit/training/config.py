@@ -62,7 +62,6 @@ class TrainerConfig:
     logging_steps: int = 50
     save_steps: int = 500
     save_best: bool = False
-    best_metric_higher_is_better: bool = False
 
     distillation_final_weight: float = 0.0 
     distillation_middle_weight: float = 0.0
