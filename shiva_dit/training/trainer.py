@@ -918,7 +918,7 @@ class DiffusionModelTrainer:
         aggregated_metrics["adaptive_fuse_prob/avg_fuse_prob"] = avg_fuse_prob
         self.step_per_layer_metrics.update(
             {
-                "adaptive_fuse_prob/per_layer_fuse_prob": per_layer_probs,
+                # "adaptive_fuse_prob/per_layer_fuse_prob": per_layer_probs,
                 "adaptive_ratio/per_layer_ratios": per_layer_ratios,
             }
         )
@@ -938,7 +938,10 @@ class DiffusionModelTrainer:
         per_timestep_avg_ratios = {}
         per_timestep_fuse_probs = {}
         try:
-            t_int = int(timestep[0].item())
+            t = timestep[0].item()
+            if self.model_type == "flux-dev" or self.model_type == "flux-kontext":
+                t = t * 1000
+            t_int = int(t)
             t_group = min(t_int // 100, 9)
 
             for layer_id, ratio_val in per_layer_ratios.items():
@@ -960,13 +963,13 @@ class DiffusionModelTrainer:
             pass
         for i in range(10):
             self.step_per_layer_metrics.update({
-                f"adaptive_ratio/t_group_{i}": per_t_layer_ratios[i],
+                # f"adaptive_ratio/t_group_{i}": per_t_layer_ratios[i],
                 # f"adaptive_fuse_prob/t_group_{i}": per_t_layer_fuse_probs[i],
             })
 
         self.step_per_layer_metrics.update({
-            "adaptive_ratio/per_timestep_ratios": per_timestep_avg_ratios,
-            "adaptive_fuse_prob/per_timestep_fuse_probs": per_timestep_fuse_probs,
+            # "adaptive_ratio/per_timestep_ratios": per_timestep_avg_ratios,
+            # "adaptive_fuse_prob/per_timestep_fuse_probs": per_timestep_fuse_probs,
         })
 
         return total_hook_loss, aggregated_metrics
@@ -976,7 +979,10 @@ class DiffusionModelTrainer:
             self._prepare_model_inputs(batch)
         )
 
-        global_context.update(current_timestep=timesteps.to(self.device))
+        if self.model_type == "flux-dev" or self.model_type == "flux-kontext":
+            global_context.update(current_timestep=(timesteps * 1000).to(self.device))
+        else:
+            global_context.update(current_timestep=timesteps.to(self.device))
 
         noisy_latents = noisy_latents.to(self.dtype).detach()
 

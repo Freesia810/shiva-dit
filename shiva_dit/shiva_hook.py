@@ -123,8 +123,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             raise ValueError("global_context.current_timestep is None")
         
         t_val = current_t.to(dtype)
-        if t_val.max() > 1.5:
-            t_val = t_val / 1000.0
+        t_val = t_val / 1000.0 # normalize
 
         if t_val.numel() == 1:
             t_scalar = t_val.view(1, 1).expand(B, 1)

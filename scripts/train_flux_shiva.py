@@ -85,13 +85,14 @@ trainer_config = {
                 "lr": [1e-5, 1e-4, 0.0, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [5.0, 5.0, 2.0, 2.0],
             },
-            # Stage 2: Warmup Cont. (3 epochs)
+            # Stage 2: Warmup Cont. (2 epochs)
             {
-                "steps": 5250, 
+                "steps": 3500, 
                 "weights": {"ratio": [0.0, 0.0, 0.0], "gate": 0.0, "distill": [0.0, 0.0]},
                 "lr": [1e-5, 1e-5, 0.0, 0.0, 0.0], # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [5.0, 5.0, 2.0, 2.0],
             },
+            # --------------------------------------------------
             # Stage 3: Train Ratio (4 epochs)
             {
                 "steps": 7000, 
@@ -108,25 +109,25 @@ trainer_config = {
             },
             # Stage 5: Finetune with High Temp (6 epochs)
             {
-                "steps": 10500, 
+                "steps": -1, 
                 "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0, "distill": [1.0, 0.0]},
                 "lr": [0.0, 1e-5, 1e-5, 0.0, 0.0], # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [10.0, 10.0, 50.0, 50.0],
             },
-            # Stage 6: Train Gate (4 epochs)
-            {
-                "steps": 7000, 
-                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.1, "distill": [1.0, 0.0]},
-                "lr": [0.0, 0.0, 0.0, 1e-4, 2e-4], # [Base, LoRA, Ratio, Gate, Fuser]
-                "temp": [10.0, 10.0, 50.0, 50.0],
-            },
-            # Final Stage
-            {
-                "steps": -1,
-                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.1, "distill": [1.0, 0.0]},
-                "lr": [0.0, 1e-5, 1e-5, 1e-5, 1e-5], # [Base, LoRA, Ratio, Gate, Fuser]
-                "temp": [10.0, 10.0, 50.0, 50.0],
-            },
+            # # Stage 6: Train Gate (4 epochs)
+            # {
+            #     "steps": 7000, 
+            #     "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.1, "distill": [1.0, 0.0]},
+            #     "lr": [0.0, 0.0, 0.0, 1e-4, 2e-4], # [Base, LoRA, Ratio, Gate, Fuser]
+            #     "temp": [10.0, 10.0, 50.0, 50.0],
+            # },
+            # # Final Stage
+            # {
+            #     "steps": -1,
+            #     "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.1, "distill": [1.0, 0.0]},
+            #     "lr": [0.0, 1e-5, 1e-5, 1e-5, 1e-5], # [Base, LoRA, Ratio, Gate, Fuser]
+            #     "temp": [10.0, 10.0, 50.0, 50.0],
+            # },
         ],
     },
     "log_with_tensorboard": True,
