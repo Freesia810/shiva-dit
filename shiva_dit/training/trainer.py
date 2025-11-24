@@ -1334,7 +1334,10 @@ class DiffusionModelTrainer:
             except Exception as e:
                 print(f"Failed to log input image: {e}")
 
-        target_layers = range(24)
+        num_layers = global_context.num_layers
+        if global_context.num_single_layers is not None:
+            num_layers += global_context.num_single_layers
+        target_layers = range(num_layers)
 
         from shiva_dit.hook import HookManager
         all_hooks = HookManager.get_all_hooks()
@@ -1345,20 +1348,18 @@ class DiffusionModelTrainer:
         for layer_idx in target_layers:
             target_hook = None
             for name, hook in all_hooks.items():
-                if hook.layer_idx == layer_idx and hasattr(hook, "last_sel_idx"):
+                if hook.layer_idx == layer_idx and hasattr(hook, "last_token_scores") and getattr(hook, "last_sel_idx", None) is not None:
                     target_hook = hook
                     break
 
-            if target_hook is not None and target_hook.last_sel_idx is not None:
+            if target_hook is not None and target_hook.last_token_scores is not None:
                 heatmap_tensor = shiva_metrics.generate_router_heatmap(
-                    target_hook.last_sel_idx, 
-                    target_hook.last_total_tokens, 
+                    target_hook.last_token_scores,
+                    target_hook.last_sel_idx,
                     H, W
                 )
 
                 if heatmap_tensor is not None:
-                    heatmap_tensor = heatmap_tensor.unsqueeze(1)
-
                     try:
                         import torchvision
                         grid_img_tensor = torchvision.utils.make_grid(
@@ -1368,6 +1369,7 @@ class DiffusionModelTrainer:
                     except ImportError:
                         self.logger.log_image(f"router_viz/layer_{layer_idx:02d}", heatmap_tensor[0], self.global_step)
 
+                target_hook.last_token_scores = None
                 target_hook.last_sel_idx = None
 
     def _log_trainable_parameters(self, description: str = ""):

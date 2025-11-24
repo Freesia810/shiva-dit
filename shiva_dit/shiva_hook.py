@@ -290,6 +290,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         if getattr(self, "capture_mask_for_viz", False):
             self.last_sel_idx = sel_idx.detach().cpu() # (B, k)
+            self.last_token_scores = torch.sigmoid(token_scores_logits).detach().cpu() 
             self.last_total_tokens = x.shape[1]
 
         remaining_x = torch.zeros_like(x)

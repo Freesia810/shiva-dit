@@ -248,16 +248,39 @@ def collect_router_stats(device: torch.device) -> dict:
     else:
         return {}
 
-def generate_router_heatmap(sel_idx, total_tokens, height, width):
-    B = sel_idx.shape[0]
-    heatmap = torch.zeros((B, total_tokens), dtype=torch.float32)
-
-    heatmap.scatter_(1, sel_idx.long(), 1.0)
-    
+def generate_router_heatmap(token_scores, sel_idx, height, width):
     try:
-        heatmap_img = heatmap.reshape(B, height, width)
-    except Exception as e:
-        print(f"Heatmap reshape failed: {e}. Tokens: {total_tokens}, H: {height}, W: {width}")
+        import matplotlib.cm
+    except ImportError:
+        print("matplotlib not found.")
         return None
 
-    return heatmap_img # Tensor (B, H, W)
+    if token_scores.dim() == 3:
+        token_scores = token_scores.squeeze(-1)
+    
+    B, total_tokens = token_scores.shape
+    
+    try:
+        score_map = token_scores.reshape(B, height, width)
+    except Exception as e:
+        print(f"Reshape failed: {e}")
+        return None
+
+    score_np = score_map.float().cpu().numpy() 
+    
+    cm = matplotlib.cm.get_cmap('jet') 
+    colored_np = cm(score_np) # (B, H, W, 4)
+    rgb_np = colored_np[..., :3] # (B, H, W, 3)
+
+    mask = torch.zeros((B, total_tokens), dtype=torch.float32)
+    mask.scatter_(1, sel_idx.long(), 1.0)
+    mask_map = mask.reshape(B, height, width).numpy() # (B, H, W)
+    mask_expanded = mask_map[..., None]
+
+
+    masked_rgb_np = rgb_np * mask_expanded
+
+    # (B, H, W, 3) -> (B, 3, H, W)
+    final_tensor = torch.from_numpy(masked_rgb_np).permute(0, 3, 1, 2).float()
+    
+    return final_tensor
