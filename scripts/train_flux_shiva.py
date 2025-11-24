@@ -35,7 +35,7 @@ trainer_config = {
     "image_dir": "../dataset/MJHQ-30K/",
     "model_type": "flux-dev",
     "model_path": None,
-    "output_dir": "./checkpoints_flux/",
+    "output_dir": "./checkpoints/",
     "training_mode": "lora",
     "hook_only_steps": 0,
     "lora_config": LoraConfig(**lora_config),
@@ -72,7 +72,7 @@ trainer_config = {
     "inference_metadata_file": "../dataset/MJHQ-30K/test.jsonl",
     "inference_seed": 42,
     "inference_num_inference_steps": 28,
-    "inference_output_dir": "inference_samples_flux",
+    "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",
 
     "extra_config": {
