@@ -1649,11 +1649,16 @@ class DiffusionModelTrainer:
                         self.evaluators['clip_iqa'].update(imgs_stack_float)
                         iqa_res = self.evaluators['clip_iqa'].compute()
                         self.evaluators['clip_iqa'].reset()
-                        
-                        for k, v in iqa_res.items():
-                            score = v.mean().item()
-                            inference_metrics[f'clip_iqa_{k}'] = score
-                            print(f"  >> CLIP-IQA ({k}): {score:.4f}")
+
+                        if isinstance(iqa_res, dict):
+                            for k, v in iqa_res.items():
+                                score = v.mean().item()
+                                inference_metrics[f'clip_iqa_{k}'] = score
+                                print(f"  >> CLIP-IQA ({k}): {score:.4f}")
+                        else:
+                            score = iqa_res.mean().item()
+                            inference_metrics['clip_iqa_quality'] = score
+                            print(f"  >> CLIP-IQA (quality): {score:.4f}")
                     except Exception as e:
                         print(f"  Error calculating CLIP-IQA: {e}")
 
