@@ -17,14 +17,14 @@ from dataclasses import asdict
 
 try:
     from torchmetrics.multimodal.clip_score import CLIPScore
-    from torchmetrics.image.fid import FrechetInceptionDistance
+    from torchmetrics.image.kid import KernelInceptionDistance
     from torchmetrics.multimodal import CLIPImageQualityAssessment
     import torchvision.transforms.functional as TF
 except ImportError:
     CLIPScore = None
-    FrechetInceptionDistance = None
+    KernelInceptionDistance = None
     CLIPImageQualityAssessment = None
-    print("Warning: torchmetrics not installed. Metrics (CLIP Score, FID, IQA) will not be calculated.")
+    print("Warning: torchmetrics not installed. Metrics (CLIP Score, KID, IQA) will not be calculated.")
 
 LOCAL_BERT_PATH = "../bert-base-uncased"
 
@@ -145,13 +145,15 @@ class DiffusionModelTrainer:
                 print("Loading ImageReward model...")
                 self.evaluators['image_reward'] = RM.load("../ImageReward/ImageReward.pt", device=self.device, med_config="../ImageReward/med_config.json")
 
-            if FrechetInceptionDistance:
-                print("Loading FID model...")
-                self.evaluators['fid'] = FrechetInceptionDistance(feature=2048, reset_real_features=False).to(self.device)
-                self.fid_stats_ready = False
+            if KernelInceptionDistance:
+                print("Loading KID model...")
+                self.evaluators['kid'] = KernelInceptionDistance(
+                    subset_size=10, reset_real_features=False, sync_on_compute=False
+                ).to(self.device)
+                self.kid_stats_ready = False
             if CLIPImageQualityAssessment:
                 print("Loading CLIP IQA model...")
-                self.evaluators['clip_iqa'] = CLIPImageQualityAssessment(prompts=("quality",)).to(self.device)
+                self.evaluators['clip_iqa'] = CLIPImageQualityAssessment(model_name_or_path="../openai-clip-vit-base-patch16", sync_on_compute=False).to(self.device)
 
         self._print_setup_summary()
 
@@ -814,80 +816,43 @@ class DiffusionModelTrainer:
 
         return img_latents, noise, noisy_latents, timesteps, model_kwargs
 
-    def _forward_pass_with_distillation(self, noisy_latents, timesteps, model_kwargs):
+    def _forward_pass_with_distillation(self, noisy_latents, timesteps, model_kwargs, dynamic_distill_weights=None):
         distill_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
 
-        with torch.amp.autocast(
-            device_type="cuda",
-            enabled=(self.config.mixed_precision != "no"),
-            dtype=(
-                torch.bfloat16
-                if self.config.mixed_precision == "bf16"
-                else (torch.float16 if self.config.mixed_precision == "fp16" else None)
-            ),
-        ):
-            distillation_enabled = self.teacher_model is not None and (
-                self.config.distillation_final_weight > 0
-                or self.config.distillation_middle_weight > 0
-            )
-
-            if distillation_enabled:
-                if self.config.distillation_middle_weight > 0:
-                    model_kwargs["output_hidden_states"] = True
-                    model_kwargs["output_hidden_states_step"] = (
-                        self.config.distillation_layer_skip
-                    )
-                else:
-                    model_kwargs["output_hidden_states"] = False
-
-                teacher_kwargs = copy.deepcopy(model_kwargs)
-
-                with torch.no_grad():
-                    teacher_output = self.teacher_model(
-                        hidden_states=noisy_latents,
-                        timestep=timesteps,
-                        **teacher_kwargs,
-                    )
-                    Y_s = teacher_output[0]
-
-                student_output = self.model(
+        if dynamic_distill_weights:
+            w_final = dynamic_distill_weights.get("distill_final_weight", 0.0)
+        else:
+            w_final = self.config.distillation_final_weight
+        
+        if self.teacher_model is not None and w_final > 0:
+            # Teacher Forward
+            teacher_kwargs = copy.deepcopy(model_kwargs)
+            teacher_kwargs["output_hidden_states"] = False
+            with torch.no_grad():
+                teacher_output = self.teacher_model(
                     hidden_states=noisy_latents,
                     timestep=timesteps,
-                    **model_kwargs,
+                    **teacher_kwargs,
                 )
-                Y_d = student_output[0]
-                noise_pred = Y_d
+                Y_s = teacher_output[0]
+            
+            # Student Forward
+            student_output = self.model(
+                hidden_states=noisy_latents,
+                timestep=timesteps,
+                **model_kwargs,
+            )
+            Y_d = student_output[0]
+            noise_pred = Y_d
 
-                loss_v = F.mse_loss(Y_d.float(), Y_s.float(), reduction="mean")
-                distill_loss += loss_v * self.config.distillation_final_weight
-
-                if self.config.distillation_middle_weight > 0:
-                    X_s_all = teacher_output[1]
-                    X_d_all = student_output[1]
-                    loss_u_total = torch.tensor(
-                        0.0, device=self.device, dtype=self.dtype
-                    )
-                    num_layers_compared = 0
-
-                    layer_indices = range(0, len(X_s_all))
-
-                    for l in layer_indices:
-                        loss_u_total += F.mse_loss(
-                            X_d_all[l].float(), X_s_all[l].float(), reduction="mean"
-                        )
-                        num_layers_compared += 1
-
-                    if num_layers_compared > 0:
-                        loss_u_avg = loss_u_total / num_layers_compared
-                        distill_loss += (
-                            loss_u_avg * self.config.distillation_middle_weight
-                        )
-            else:
-                noise_pred = self.model(
-                    hidden_states=noisy_latents,
-                    timestep=timesteps,
-                    **model_kwargs,
-                )[0]
+            loss_v = F.mse_loss(Y_d.float(), Y_s.float(), reduction="mean")
+            distill_loss += loss_v * w_final
+        else:
+            noise_pred = self.model(
+                hidden_states=noisy_latents,
+                timestep=timesteps,
+                **model_kwargs,
+            )[0]
 
         return noise_pred, distill_loss
 
@@ -918,6 +883,9 @@ class DiffusionModelTrainer:
         config = {}
         config["ratio_loss_weight"] = current_weights.get("ratio", [0.0, 0.0])
         config["gate_loss_weight"] = current_weights.get("gate", 0.0)
+        distill_weights = current_weights.get("distill", [0.0, 0.0])
+        config["distill_final_weight"] = distill_weights[0]
+        config["distill_middle_weight"] = distill_weights[1] if len(distill_weights) > 1 else 0.0
         config["target_ratio"] = self.config.extra_config['target_ratio']
 
         return config
@@ -1012,12 +980,20 @@ class DiffusionModelTrainer:
 
         noisy_latents = noisy_latents.to(self.dtype).detach()
 
+        loss_config = self._get_shiva_loss_config(global_step)
+
         noise_pred, distill_loss = self._forward_pass_with_distillation(
-            noisy_latents, timesteps, model_kwargs
+            noisy_latents, timesteps, model_kwargs, dynamic_distill_weights=loss_config
         )
 
         main_loss = self._calculate_main_loss(noise_pred, noise, img_latents)
         hook_loss, hook_metrics = self._calculate_hook_loss(global_step, timesteps)
+
+        hook_metrics["distill/weight_final"] = torch.tensor(
+            loss_config.get("distill_final_weight", 0.0), 
+            device=self.device
+        )
+
         total_loss = main_loss + hook_loss + distill_loss
 
         return total_loss, main_loss, hook_loss, distill_loss, hook_metrics
@@ -1647,28 +1623,25 @@ class DiffusionModelTrainer:
                     except Exception as e:
                         print(f"  Error calculating CLIP Score: {e}")
 
-                if FrechetInceptionDistance is not None and 'fid' in self.evaluators:
+                if KernelInceptionDistance and 'kid' in self.evaluators:
                     try:
-                        if not self.fid_stats_ready and self.val_dataloader is not None:
-                            print("  Computing FID real stats from val_dataloader (running once)...")
-                            max_real_batches = 10
+                        if not self.kid_stats_ready and self.val_dataloader is not None:
+                            real_size = 128
+                            print(f"  Computing KID real stats..., {real_size} imgs")
                             for i, batch in enumerate(self.val_dataloader):
-                                if i >= max_real_batches: break
-                                real_imgs = batch["pixel_values"].to(self.device)
-                                real_imgs = ((real_imgs + 1) * 127.5).clamp(0, 255).to(dtype=torch.uint8)
-                                self.evaluators['fid'].update(real_imgs, real=True)
-                            self.fid_stats_ready = True
+                                if i >= real_size: break
+                                real_imgs = ((batch["pixel_values"].to(self.device) + 1) * 127.5).clamp(0, 255).to(dtype=torch.uint8)
+                                self.evaluators['kid'].update(real_imgs, real=True)
+                            self.kid_stats_ready = True
                         
-                        if self.fid_stats_ready:
-                            self.evaluators['fid'].update(imgs_stack_uint8, real=False)
-                            fid_val = self.evaluators['fid'].compute().item()
-                            self.evaluators['fid'].reset()                             
-                            inference_metrics['fid'] = fid_val
-                            print(f"  >> FID: {fid_val:.4f}")
-                        else:
-                            print("  >> FID skipped (no val_dataloader for real stats)")
+                        self.evaluators['kid'].update(imgs_stack_uint8, real=False)
+                        kid_mean, kid_std = self.evaluators['kid'].compute()
+                        self.evaluators['kid'].reset()
+                        
+                        inference_metrics['kid_mean'] = kid_mean.item()
+                        print(f"  >> KID: {kid_mean.item():.5f} (±{kid_std.item():.5f})")
                     except Exception as e:
-                        print(f"  Error calculating FID: {e}")
+                        print(f"  Error calculating KID: {e}")
 
                 if CLIPImageQualityAssessment is not None and 'clip_iqa' in self.evaluators:
                     try:

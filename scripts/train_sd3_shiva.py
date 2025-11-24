@@ -50,6 +50,8 @@ trainer_config = {
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
     "lr_scheduler": "cosine",  # "linear", "cosine", "constant"
+    "distillation_final_weight": 1.0, 
+    "distillation_middle_weight": 0.0,
     "scheduler_num_warmup_steps": 0,
     "seed": 42,
     "logging_steps": 40,
@@ -68,18 +70,18 @@ trainer_config = {
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
     "extra_config": {
-        "target_ratio": 0.5,
+        "target_ratio": 0.8,
         "stage_schedule": [
             {
                 "steps": 1750, # 1 epoch
-                "weights": {"ratio": [0.0, 0.0, 0.0], "gate": 0.0},
+                "weights": {"ratio": [0.0, 0.0, 0.0], "gate": 0.0, "distill": [0.0, 0.0]},
                 "lr": [1e-5, 1e-4, 0.0, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [5.0, 5.0, 2.0, 2.0], # [Ts-start, Ts-end, Tk-start, Tk-end]
             },
             # ------------------------------------------------------------------
             {
                 "steps": 5250, # 3 epoch
-                "weights": {"ratio": [0.0, 0.0, 0.0], "gate": 0.0},
+                "weights": {"ratio": [0.0, 0.0, 0.0], "gate": 0.0, "distill": [0.0, 0.0]},
                 "lr": [1e-5, 1e-5, 0.0, 0.0, 0.0],
                 "temp": [5.0, 5.0, 2.0, 2.0],
             },
@@ -87,35 +89,35 @@ trainer_config = {
             # ------------------------------------------------------------------
             {
                 "steps": 7000, # 4 epoch
-                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0}, # [Budget(Hinge), Floor(Wall), MSE(Smooth)]
+                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0, "distill": [1.0, 0.0]}, # [Budget(Hinge), Floor(Wall), MSE(Smooth)]
                 "lr": [0.0, 1e-4, 5e-4, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [5.0, 10.0, 2.0, 10.0],
             },
             # ------------------------------------------------------------------
             {
                 "steps": 14000, # 8 epoch
-                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0},
+                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0, "distill": [1.0, 0.0]},
                 "lr": [0.0, 1e-5, 1e-5, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [10.0, 10.0, 10.0, 50.0],
             },
 
             {
                 "steps": 10500, # 6 epoch
-                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0},
+                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0, "distill": [1.0, 0.0]},
                 "lr": [0.0, 1e-5, 1e-5, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [10.0, 10.0, 50.0, 50.0],
             },
             # # ------------------------------------------------------------------
             {
                 "steps": 7000, # 4 epoch
-                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.1},
+                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.1, "distill": [1.0, 0.0]},
                 "lr": [0.0, 0.0, 0.0, 1e-4, 2e-4],  # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [10.0, 10.0, 50.0, 50.0],
             },
 
             {
                 "steps": -1,
-                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.1},
+                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.1, "distill": [1.0, 0.0]},
                 "lr": [0.0, 1e-5, 1e-5, 1e-5, 1e-5],  # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [10.0, 10.0, 50.0, 50.0],
             },

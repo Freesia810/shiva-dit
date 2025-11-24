@@ -76,8 +76,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             N,
         ) = self._prepare_inputs(func, module_self, *args, **kwargs)
 
-        self.sel_idx = sel_idx
-
         if self.training:
             final_topk_states = self._forward_train(x_sel, x_rej, N)
         else:
@@ -147,7 +145,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         )
 
         if is_random_training:
-            random_ratio_val = torch.rand(1, device=pure_temb.device).item() * 0.5 + 0.4
+            random_ratio_val = torch.rand(1, device=pure_temb.device).item() * 0.8 + 0.1
             random_ratio = torch.tensor(random_ratio_val, device=pure_temb.device, dtype=dtype)
             predicted_ratio = random_ratio + (0.0 * policy_ratio)
         else:
@@ -187,7 +185,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         x_sel, x_rej, remaining_x, sel_idx = self._select_topk(
             hidden_states, token_scores_logits, k_float, D
         )
-        self.sel_idx = sel_idx # for hook_after_module
         sel_rope = self._gather_rope(image_rotary_emb, sel_idx)
 
         return (
@@ -287,20 +284,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             return processed_encoder_states, final_hidden_states
         else:
             return final_hidden_states
-
-    def hook_after_module(
-        self, 
-        module_name: Literal["self-attn", "cross-attn", "ffn"],
-        hidden_output: torch.Tensor,
-        encoder_hidden_output: torch.Tensor = None,
-    ):
-        if module_name == "ffn":
-            # gate with topk scores, to maintain the grad
-            # selected_logits = torch.gather(self.token_scores_logits, 1, self.sel_idx)
-            # s_scale = (1.0 + torch.tanh(selected_logits)).to(hidden_output.dtype)
-            # hidden_output = hidden_output * s_scale.unsqueeze(2)
-            self.token_scores_logits = self.sel_idx = None
-        return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
 
     def _select_topk(self, x, token_scores_logits, k, C):
         x_sel, x_rej, sel_idx, rej_idx = self.prune_expert(x, token_scores_logits, k)
