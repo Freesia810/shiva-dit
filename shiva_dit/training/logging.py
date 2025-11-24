@@ -11,6 +11,10 @@ class AbstractLogger(ABC):
         pass
 
     @abstractmethod
+    def log_figure(self, tag, figure, step, prefix=""):
+        pass
+
+    @abstractmethod
     def add_scalars(self, main_tag, tag_scalar_dict, step, prefix=""):
         pass
 
@@ -24,7 +28,9 @@ class TensorBoardLogger(AbstractLogger):
             from torch.utils.tensorboard import SummaryWriter
             import torchvision.transforms as T
         except ImportError:
-            print("TensorBoardLogger Error: Install tensorboard and torchvision (pip install tensorboard torchvision)")
+            print(
+                "TensorBoardLogger Error: Install tensorboard and torchvision (pip install tensorboard torchvision)"
+            )
             raise
 
         os.makedirs(log_dir, exist_ok=True)
@@ -46,6 +52,12 @@ class TensorBoardLogger(AbstractLogger):
                 self.writer.add_image(f"{prefix}{tag}", image_tensor, step)
         except Exception as e:
             print(f"TensorBoard log_image Error: {e}")
+
+    def log_figure(self, tag, figure, step, prefix=""):
+        try:
+            self.writer.add_figure(f"{prefix}{tag}", figure, global_step=step)
+        except Exception as e:
+            print(f"TensorBoard log_figure Error: {e}")
 
     def add_scalars(self, main_tag, tag_scalar_dict, step, prefix=""):
         self.writer.add_scalars(f"{prefix}{main_tag}", tag_scalar_dict, step)
@@ -73,16 +85,25 @@ class WandbLogger(AbstractLogger):
     def log_image(self, tag, image, step, prefix=""):
         self.wandb.log({f"{prefix}{tag}": self.wandb.Image(image)}, step=step)
 
+    def log_figure(self, tag, figure, step, prefix=""):
+        self.wandb.log({f"{prefix}{tag}": self.wandb.Image(figure)}, step=step)
+
     def add_scalars(self, main_tag, tag_scalar_dict, step, prefix=""):
         chart_name = f"{prefix}{main_tag}"
-        log_data = { chart_name: tag_scalar_dict }
+        log_data = {chart_name: tag_scalar_dict}
         self.wandb.log(log_data, step=step)
 
     def close(self):
         self.wandb.finish()
 
 class MLflowLogger(AbstractLogger):
-    def __init__(self, experiment_name: str, run_name: str = None, config_dict: dict = None, tracking_uri: str = None):
+    def __init__(
+        self,
+        experiment_name: str,
+        run_name: str = None,
+        config_dict: dict = None,
+        tracking_uri: str = None,
+    ):
         try:
             import mlflow
         except ImportError:
@@ -97,10 +118,10 @@ class MLflowLogger(AbstractLogger):
         if config_dict:
             flat_config = self._flatten_dict(config_dict)
             for i in range(0, len(flat_config), 100):
-                batch = dict(list(flat_config.items())[i:i+100])
+                batch = dict(list(flat_config.items())[i : i + 100])
                 self.mlflow.log_params(batch)
 
-    def _flatten_dict(self, d, parent_key='', sep='.'):
+    def _flatten_dict(self, d, parent_key="", sep="."):
         items = {}
         for k, v in d.items():
             new_key = f"{parent_key}{sep}{k}" if parent_key else k
@@ -120,9 +141,21 @@ class MLflowLogger(AbstractLogger):
         try:
             full_tag_path = f"{prefix}{tag}"
             filename = f"step_{step:06d}.png"
-            self.mlflow.log_image(image, artifact_file=os.path.join(full_tag_path, filename))
+            self.mlflow.log_image(
+                image, artifact_file=os.path.join(full_tag_path, filename)
+            )
         except Exception as e:
             print(f"MLflow log_image Error: {e}")
+
+    def log_figure(self, tag, figure, step, prefix=""):
+        try:
+            full_tag_path = f"{prefix}{tag}"
+            filename = f"step_{step:06d}.png"
+            self.mlflow.log_figure(
+                figure, artifact_file=os.path.join(full_tag_path, filename)
+            )
+        except Exception as e:
+            print(f"MLflow log_figure Error: {e}")
 
     def add_scalars(self, main_tag, tag_scalar_dict, step, prefix=""):
         for k, v in tag_scalar_dict.items():
@@ -139,6 +172,9 @@ class NoOpLogger(AbstractLogger):
         pass
 
     def log_image(self, *args, **kwargs):
+        pass
+
+    def log_figure(self, *args, **kwargs):
         pass
 
     def add_scalars(self, *args, **kwargs):
@@ -159,6 +195,10 @@ class LoggerCollection(AbstractLogger):
     def log_image(self, tag, image, step, prefix=""):
         for logger in self.loggers:
             logger.log_image(tag, image, step, prefix)
+
+    def log_figure(self, tag, figure, step, prefix=""):
+        for logger in self.loggers:
+            logger.log_figure(tag, figure, step, prefix)
 
     def add_scalars(self, main_tag, tag_scalar_dict, step, prefix=""):
         for logger in self.loggers:
