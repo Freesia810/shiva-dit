@@ -17,10 +17,14 @@ from dataclasses import asdict
 
 try:
     from torchmetrics.multimodal.clip_score import CLIPScore
+    from torchmetrics.image.fid import FrechetInceptionDistance
+    from torchmetrics.multimodal import CLIPImageQualityAssessment
     import torchvision.transforms.functional as TF
 except ImportError:
     CLIPScore = None
-    print("Warning: torchmetrics not installed. CLIP Score will not be calculated.")
+    FrechetInceptionDistance = None
+    CLIPImageQualityAssessment = None
+    print("Warning: torchmetrics not installed. Metrics (CLIP Score, FID, IQA) will not be calculated.")
 
 LOCAL_BERT_PATH = "../bert-base-uncased"
 
@@ -140,6 +144,14 @@ class DiffusionModelTrainer:
             if RM:
                 print("Loading ImageReward model...")
                 self.evaluators['image_reward'] = RM.load("../ImageReward/ImageReward.pt", device=self.device, med_config="../ImageReward/med_config.json")
+
+            if FrechetInceptionDistance:
+                print("Loading FID model...")
+                self.evaluators['fid'] = FrechetInceptionDistance(feature=2048, reset_real_features=False).to(self.device)
+                self.fid_stats_ready = False
+            if CLIPImageQualityAssessment:
+                print("Loading CLIP IQA model...")
+                self.evaluators['clip_iqa'] = CLIPImageQualityAssessment(prompts=("quality",)).to(self.device)
 
         self._print_setup_summary()
 
@@ -1621,20 +1633,56 @@ class DiffusionModelTrainer:
         self.accelerator.wait_for_everyone()
 
         if self.accelerator.is_main_process:
-            # CLIP Score
-            if CLIPScore and generated_images_tensors and 'clip' in self.evaluators:
-                try:
-                    imgs_stack = torch.stack(generated_images_tensors)
-                    imgs_stack = (imgs_stack * 255).to(dtype=torch.uint8)
-                    
-                    self.evaluators['clip'].update(imgs_stack, target_prompts)
-                    clip_val = self.evaluators['clip'].compute().item()
-                    self.evaluators['clip'].reset()
-                    
-                    inference_metrics['clip_score'] = clip_val
-                    print(f"  >> CLIP Score: {clip_val:.4f}")
-                except Exception as e:
-                    print(f"  Error calculating CLIP Score: {e}")
+            if generated_images_tensors:
+                imgs_stack_float = torch.stack(generated_images_tensors) # [0, 1] float
+                imgs_stack_uint8 = (imgs_stack_float * 255).to(dtype=torch.uint8) # [0, 255] uint8
+
+                if CLIPScore and 'clip' in self.evaluators:
+                    try:
+                        self.evaluators['clip'].update(imgs_stack_uint8, target_prompts)
+                        clip_val = self.evaluators['clip'].compute().item()
+                        self.evaluators['clip'].reset()
+                        inference_metrics['clip_score'] = clip_val
+                        print(f"  >> CLIP Score: {clip_val:.4f}")
+                    except Exception as e:
+                        print(f"  Error calculating CLIP Score: {e}")
+
+                if FrechetInceptionDistance is not None and 'fid' in self.evaluators:
+                    try:
+                        if not self.fid_stats_ready and self.val_dataloader is not None:
+                            print("  Computing FID real stats from val_dataloader (running once)...")
+                            max_real_batches = 10
+                            for i, batch in enumerate(self.val_dataloader):
+                                if i >= max_real_batches: break
+                                real_imgs = batch["pixel_values"].to(self.device)
+                                real_imgs = ((real_imgs + 1) * 127.5).clamp(0, 255).to(dtype=torch.uint8)
+                                self.evaluators['fid'].update(real_imgs, real=True)
+                            self.fid_stats_ready = True
+                        
+                        if self.fid_stats_ready:
+                            self.evaluators['fid'].update(imgs_stack_uint8, real=False)
+                            fid_val = self.evaluators['fid'].compute().item()
+                            self.evaluators['fid'].reset()                             
+                            inference_metrics['fid'] = fid_val
+                            print(f"  >> FID: {fid_val:.4f}")
+                        else:
+                            print("  >> FID skipped (no val_dataloader for real stats)")
+                    except Exception as e:
+                        print(f"  Error calculating FID: {e}")
+
+                if CLIPImageQualityAssessment is not None and 'clip_iqa' in self.evaluators:
+                    try:
+                        # Update expects float [0, 1]
+                        self.evaluators['clip_iqa'].update(imgs_stack_float)
+                        iqa_res = self.evaluators['clip_iqa'].compute()
+                        self.evaluators['clip_iqa'].reset()
+                        
+                        for k, v in iqa_res.items():
+                            score = v.mean().item()
+                            inference_metrics[f'clip_iqa_{k}'] = score
+                            print(f"  >> CLIP-IQA ({k}): {score:.4f}")
+                    except Exception as e:
+                        print(f"  Error calculating CLIP-IQA: {e}")
 
             if RM and generated_images_pil and 'image_reward' in self.evaluators:
                 try:
