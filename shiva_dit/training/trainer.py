@@ -1582,11 +1582,6 @@ class DiffusionModelTrainer:
                 if val_metrics_to_log:
                     self.logger.log_scalars(val_metrics_to_log, step=global_step)
 
-                # if hasattr(self, "step_per_layer_metrics"):
-                #     for key, value_dict in self.step_per_layer_metrics.items():
-                #         if value_dict:
-                #             self.logger.add_scalars(f"validation/{key}", value_dict, global_step)
-
         elif self.accelerator.is_main_process:
             print(
                 f"Validation dataloader is empty or validation failed, skipping logging."
