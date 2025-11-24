@@ -52,6 +52,9 @@ def calculate_ratio_loss(
     ratios_for_logging = []
 
     for hook in _get_shiva_hooks():
+        if hook.layer_idx == 0:
+            # Skip the first layer
+            continue
         layer_name = f"layer_{hook.layer_idx:02d}"
         accumulator = hook.ratio_accumulator
 

@@ -88,7 +88,7 @@ trainer_config = {
             {
                 "steps": 7000, # 4 epoch
                 "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0}, # [Budget(Hinge), Floor(Wall), MSE(Smooth)]
-                "lr": [0.0, 0.0, 5e-4, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
+                "lr": [0.0, 1e-4, 5e-4, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [5.0, 10.0, 2.0, 10.0],
             },
             # ------------------------------------------------------------------
