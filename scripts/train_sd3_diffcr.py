@@ -30,24 +30,21 @@ trainer_config = {
     "model_path": None,
     "output_dir": "./checkpoints/",
     "training_mode": "lora",  # "hook_only" "finetune" "lora"
-    "hook_warmup_steps": 1750, # 1 epoch
     "hook_only_steps": 0,
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
     "caption_dropout_rate": 0.25,
-    "num_epochs": 1000,
+    "num_epochs": 50,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16,
     "learning_rate": 1e-4,
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
     "lr_scheduler": "cosine", # "linear", "cosine", "constant"
-    "num_warmup_steps": 0,
-    "main_loss_weight": 1.0,
-    "hook_loss_weight": 1.0,
     "seed": 42,
-    "logging_steps": 5,
-    "save_steps": 3500, # 2 epoch
+    "logging_steps": 40,
+    "save_steps": 1750, # 2 epoch
+    "save_best": True,
     "run_validation": True,
     "validation_steps": 875, # 0.5 epoch
     "val_batch_size": None,
@@ -65,7 +62,7 @@ trainer_config = {
         "target_ratio": 0.8,
     },
     "log_with_tensorboard": True,
-    "log_with_wandb": True,
+    "log_with_wandb": False,
     "wandb_project": "shiva-dit",
     "wandb_run_name": "sd3-diffcr",
     "log_with_mlflow": False,
