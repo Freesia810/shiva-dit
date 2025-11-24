@@ -1294,31 +1294,33 @@ class DiffusionModelTrainer:
         ratio_policy = getattr(hooks[0], "ratio_policy", None)
         total_layers = getattr(hooks[0], "total_layers", 1)
 
-        if ratio_policy is None:
-            return
-
-        t_steps = 50
-        t_values = torch.linspace(0, 1, t_steps, device=self.device) # (T,)
-        l_values = torch.arange(total_layers, device=self.device) # (L,)
-
-        t_grid, l_grid = torch.meshgrid(t_values, l_values, indexing='xy') # (T, L)
-
+        steps = 50
+        t_values = torch.linspace(0, 1, steps, device=self.device) 
+        l_values = torch.arange(total_layers, device=self.device, dtype=t_values.dtype)
+        t_grid, l_grid = torch.meshgrid(t_values, l_values, indexing='ij') 
+        
         t_flat = t_grid.reshape(-1, 1) # (T*L, 1)
         l_flat = l_grid.reshape(-1)    # (T*L,)
+        
+        if ratio_policy is not None:
+            with torch.no_grad():
+                model_params = next(ratio_policy.parameters(), None)
+                if model_params is not None:
+                    target_dtype = model_params.dtype
+                    t_flat = t_flat.to(dtype=target_dtype)
 
-        with torch.no_grad():
-            logits = ratio_policy(t_flat, l_flat)
-            ratios = torch.sigmoid(logits).reshape(t_steps, total_layers).cpu().numpy()
-
-        fig, ax = plt.subplots(figsize=(10, 6))
-        cax = ax.imshow(ratios, aspect='auto', origin='lower', extent=[0, total_layers, 0, 1], vmin=0, vmax=1, cmap='viridis')
-        ax.set_xlabel('Layer Index')
-        ax.set_ylabel('Timestep (0.0 -> 1.0)')
-        ax.set_title('Ratio Policy Visualization')
-        fig.colorbar(cax, ax=ax, label='Keep Ratio')
-
-        self.logger.log_figure("policy_viz/ratio_heatmap", fig, self.global_step)
-        plt.close(fig)
+                logits = ratio_policy(t_flat, l_flat.long())
+                ratios = torch.sigmoid(logits).reshape(steps, total_layers).float().cpu().numpy()
+            
+            fig, ax = plt.subplots(figsize=(8, 6))
+            cax = ax.imshow(ratios, aspect='auto', origin='lower', extent=[0, total_layers, 0, 1], vmin=0, vmax=1, cmap='viridis')
+            ax.set_xlabel('Layer Index')
+            ax.set_ylabel('Timestep (0.0 -> 1.0)')
+            ax.set_title('Adaptive Ratio Policy Landscape')
+            fig.colorbar(cax, ax=ax, label='Keep Ratio')
+            
+            self.logger.log_figure("policy_viz/ratio_landscape", fig, self.global_step)
+            plt.close(fig)
 
     def _log_router_visualization(self, batch=None):
         if not self.accelerator.is_main_process:
