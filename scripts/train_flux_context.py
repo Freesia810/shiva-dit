@@ -29,51 +29,46 @@ trainer_config = {
     "image_dir": DATA_DIR,
     "model_type": "flux-dev",
     "output_dir": "./checkpoints/",
-    
     "training_mode": "hook_only",
     "hook_only_steps": 10000,
-
     "caption_dropout_rate": 0.0,
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
-    
     "optimizer": "AdamW",
     "seed": 42,
-    
     "num_epochs": 500,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 1,
     "mixed_precision": "bf16",
-    
     "logging_steps": 5,
     "save_steps": 1000,
     "run_validation": False,
-    
     "run_inference_validation": True,
     "inference_steps": 50,
     "inference_metadata_file": META_FILE,
     "inference_num_inference_steps": 20,
-    
     "distillation_final_weight": 2.0,
-    
     "log_with_tensorboard": True,
     "wandb_run_name": "context-pruning-fixed",
-
     "extra_config": {
         # Target ratio is for logging/adaptive loss only, less relevant for fixed mode
-        "target_ratio": 1.0, 
-        
+        "target_ratio": 1.0,
         # LR Order: [Base, LoRA, Gate, ImageRatio, ContextRatio, ContextPruner]
         "stage_schedule": [
             {
-                "steps": -1, 
-                "weights": {"ratio": [0.0, 0.0, 0.0], "gate": 0.0, "distill": [2.0, 0.0]},
+                "steps": -1,
+                "weights": {
+                    "ratio": [0.0, 0.0, 0.0],
+                    "gate": 0.0,
+                    "distill": [2.0, 0.0],
+                    "aux": 0.1,
+                },
                 # Only optimize ContextPruner (last item)
-                "lr": [0.0, 0.0, 0.0, 0.0, 0.0, 1e-4], 
+                "lr": [0.0, 0.0, 0.0, 0.0, 0.0, 1e-4],
                 "temp": [2.0, 2.0, 2.0, 2.0],
             },
-        ]
-    }
+        ],
+    },
 }
 
 print("[Script] Starting Context Pruning Training (Fixed Ratio)...")

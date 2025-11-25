@@ -479,6 +479,7 @@ class DiffusionModelTrainer:
                 "loss/context_ratio/ratio_loss", 
                 "loss/gater/gate_loss",
                 "loss/diffcr_loss",
+                "loss/context_aux_loss",
             ],
             "loss/losses_raw": [
                 "loss/adaptive_ratio/floor_loss",
@@ -899,6 +900,7 @@ class DiffusionModelTrainer:
         config = {}
         config["ratio_loss_weight"] = current_weights.get("ratio", [0.0, 0.0])
         config["gate_loss_weight"] = current_weights.get("gate", 0.0)
+        config["aux_loss_weight"] = current_weights.get("aux", 0.0)
         distill_weights = current_weights.get("distill", [0.0, 0.0])
         config["distill_final_weight"] = distill_weights[0]
         config["distill_middle_weight"] = distill_weights[1] if len(distill_weights) > 1 else 0.0
@@ -950,10 +952,23 @@ class DiffusionModelTrainer:
         # 3. Context Ratio Loss
         ctx_ratio_loss, ctx_r_metrics = shiva_metrics.calculate_context_ratio_loss(loss_config, self.device)
 
+        # 4. Context Auxiliary Loss
+        ctx_aux_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
+        aux_weight = loss_config.get("aux_loss_weight", 0.0)
+        if aux_weight > 0:
+            all_aux_losses = []
+            for hook in HookManager.get_all_hooks().values():
+                if hasattr(hook, "context_aux_loss_accumulator") and hook.context_aux_loss_accumulator:
+                    layer_aux_losses = torch.stack(hook.context_aux_loss_accumulator)
+                    all_aux_losses.append(layer_aux_losses.sum())
+            if all_aux_losses:
+                ctx_aux_loss = torch.stack(all_aux_losses).sum() * aux_weight
+                aggregated_metrics["loss/context_aux_loss"] = ctx_aux_loss.detach()
+
         context_stats = shiva_metrics.collect_context_stats(self.device)
         aggregated_metrics.update(context_stats)
 
-        total_hook_loss = gate_loss + img_ratio_loss + ctx_ratio_loss
+        total_hook_loss = gate_loss + img_ratio_loss + ctx_ratio_loss + ctx_aux_loss
 
         aggregated_metrics.update(g_metrics)
         aggregated_metrics.update(img_r_metrics)

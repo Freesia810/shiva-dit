@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.utils.parametrizations as parametrizations
+import numpy as np
 
 from shiva_dit.utils.ste import ShivaTopkFunc
 
@@ -23,14 +24,14 @@ class ShivaContextPruner(nn.Module):
         parametrizations.orthogonal(self.q_proj, "weight")
         parametrizations.orthogonal(self.k_proj, "weight")
 
+        self.logit_scale = nn.Parameter(torch.tensor(np.log(10.0)))
+
         self.register_buffer("Ts", torch.tensor(float(init_Ts)), persistent=False)
         self.register_buffer("Tk", torch.tensor(float(init_Tk)), persistent=False)
 
-        self.scale = proj_dim ** -0.5
-
     def forward(self, hidden_states, encoder_hidden_states, k):
         original_dtype = hidden_states.dtype
-        
+
         h_in = hidden_states.to(torch.float32)
         e_in = encoder_hidden_states.to(torch.float32)
 
@@ -40,7 +41,9 @@ class ShivaContextPruner(nn.Module):
 
         q = F.normalize(q, p=2, dim=-1)
         k_proj = F.normalize(k_proj, p=2, dim=-1)
-        scores = (q * k_proj).sum(dim=-1) * 10.0 
+
+        logit_scale = self.logit_scale.exp()
+        scores = (q * k_proj).sum(dim=-1) * logit_scale
 
         self.last_scores = scores.detach()
 
@@ -52,3 +55,9 @@ class ShivaContextPruner(nn.Module):
         x_sel, x_rej, sel_idx, rej_idx = ShivaTopkFunc.apply(e_in, scores, k, self.Ts, self.Tk)
 
         return x_sel.to(original_dtype), x_rej.to(original_dtype), sel_idx, rej_idx
+
+    def get_aux_loss(self):
+        if not hasattr(self, "last_scores"):
+            return torch.tensor(0.0)
+
+        return -torch.var(self.last_scores)

@@ -47,7 +47,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         self.shiva_mode = shiva_mode
         self.total_layers = total_layers
-        
+
         # Image Modules
         self.router_layer_embedder = router_layer_embedder
         self.router = shared_router
@@ -79,10 +79,11 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.gater_fuse_prob_accumulator = []
         self.router_stats_accumulator = []
         self.image_ratio_accumulator = [] 
-        
+
         # Context
         self.context_score_accumulator = []
         self.context_ratio_accumulator = []
+        self.context_aux_loss_accumulator = []
 
         self.capture_mask_for_viz = True
 
@@ -106,7 +107,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         # 1. Spatial Pruning Forward (Image)
         # Default to x_sel (which is full hidden_states if image pruning is off)
         final_topk_states = x_sel 
-        
+
         if self.shiva_mode in ["image", "both"] and self.fuse_expert is not None:
             if self.training:
                 final_topk_states = self._forward_train_image(x_sel, x_rej, N)
@@ -149,7 +150,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         layer_id_tensor = torch.tensor(
             [self.layer_idx], device=pure_temb.device, dtype=torch.long
         ).expand(B)
-        
+
         router_layer_emb_vector = None
         if self.router_layer_embedder is not None:
             router_layer_emb_vector = self.router_layer_embedder(layer_id_tensor).to(dtype)
@@ -172,16 +173,16 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         ctx_sel = encoder_hidden_states
         remaining_ctx = None
         sel_idx_ctx = None
-        
+
         if self.shiva_mode in ["context", "both"] and self.context_pruner is not None:
             L = encoder_hidden_states.shape[1]
-            
+
             # Determine Context Ratio
             if self.context_ratio_policy is not None:
                 # Adaptive Ratio
                 ctx_ratio_logits = self.context_ratio_policy(t_scalar, layer_id_tensor)
                 ctx_ratio_pred = torch.sigmoid(ctx_ratio_logits).squeeze(-1).mean()
-                
+
                 is_random_training = (
                     self.training 
                     and getattr(global_context, "current_stage_idx", -1) == 1
@@ -200,7 +201,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             self.context_ratio_accumulator.append(ctx_ratio)
 
             k_ctx = int(max(1, L * ctx_ratio))
-            
+
             # Execute Context Pruning
             if k_ctx < L:
                 ctx_sel, remaining_ctx, sel_idx_ctx = self._select_topk_context(
@@ -208,7 +209,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                     encoder_hidden_states.to(dtype), 
                     k_ctx, D
                 )
-        
+
         pooled_encoder_vector = ctx_sel.mean(dim=1)
 
         # --- Image Pruning Logic ---
@@ -216,7 +217,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         x_rej = None
         remaining_x = None
         sel_idx = None
-        
+
         # Reset metrics placeholders
         self.current_gate_logits_for_loss = None
         self.current_ratio_for_loss = None
@@ -247,10 +248,10 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
             if self.layer_idx == 0:
                 predicted_ratio = torch.tensor(1.0, device=predicted_ratio.device, dtype=predicted_ratio.dtype)
-            
+
             clamped_ratio = predicted_ratio.clamp(min=0.01, max=1.0)
             self.current_ratio_for_loss = clamped_ratio
-            
+
             if self.training:
                 k_float = ceil_ste(clamped_ratio * N)
             else:
@@ -420,19 +421,23 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             k=k
         )
 
+        if self.training and hasattr(self.context_pruner, "get_aux_loss"):
+            aux_loss = self.context_pruner.get_aux_loss()
+            self.context_aux_loss_accumulator.append(aux_loss)
+
         if getattr(self, "capture_mask_for_viz", False) and self.training:
             B, L, _ = encoder_hidden_states.shape
             mask = torch.zeros((B, L), device=encoder_hidden_states.device)
             mask.scatter_(1, sel_idx.long(), 1.0)
             self.last_context_mask = mask.detach().cpu()
-            
+
             if hasattr(self.context_pruner, "last_scores"):
                 self.context_score_accumulator.append(self.context_pruner.last_scores.detach())
 
         B, L, D = encoder_hidden_states.shape
         remaining_ctx = torch.zeros_like(encoder_hidden_states)
         remaining_ctx.scatter_(1, rej_idx.unsqueeze(-1).expand(-1, -1, C), ctx_rej)
-        
+
         return ctx_sel, remaining_ctx, sel_idx
 
     def _gather_rope(self, image_rotary_emb, survivors_indices, context_survivors_indices=None):
@@ -492,6 +497,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.image_ratio_accumulator.clear()
         self.context_score_accumulator.clear()
         self.context_ratio_accumulator.clear()
+        self.context_aux_loss_accumulator.clear()
 
     def _collect_training_metrics_image(
         self,

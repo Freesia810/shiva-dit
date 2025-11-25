@@ -202,11 +202,81 @@ class QwenImageProcessor(BaseItemProcessor):
             "original_size": torch.tensor(original_size),
         }
 
+
+class QwenImageEditProcessor(BaseItemProcessor):
+    def __init__(
+        self,
+        image_dir: str,
+        tokenizers: Tuple[Callable],
+        image_processor: VaeImageProcessor,
+        pipe: Any = None,
+        **kwargs,
+    ):
+        super().__init__(image_dir, tokenizers, image_processor, pipe)
+        self.tokenizer_max_length = kwargs.get("tokenizer_max_length", 1024)
+        # Qwen Edit template logic might differ, but we rely on input_preparers to handle complex encoding
+        # Here we just return raw text and images.
+
+    def __call__(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        # 1. Target Image (GT)
+        processed_image, original_size = self._load_and_process_image(item)
+
+        # 2. Text Instruction (Raw Text, tokenization handled in preparer or here)
+        # To align with other processors, we tokenize here but keep it simple
+        prompt = item["text"]
+        txt_tokens = self.tokenizers[0](
+            [prompt],
+            max_length=self.tokenizer_max_length,
+            padding="max_length",
+            truncation=True,
+            return_tensors="pt",
+        )
+
+        result = {
+            "pixel_values": processed_image,  # Target Image
+            "input_ids": (txt_tokens.input_ids[0],),
+            "attention_mask": (txt_tokens.attention_mask[0],),
+            "original_size": torch.tensor(original_size),
+            # Pass raw prompt text for Qwen Pipeline encoding logic if needed
+            "raw_text": prompt,
+        }
+
+        # 3. Condition Image (Source)
+        if "condition_image" in item and item["condition_image"]:
+            # Support both absolute paths and relative to image_dir
+            cond_path = item["condition_image"]
+            if not os.path.isabs(cond_path):
+                cond_path = os.path.join(
+                    self.image_dir, "..", cond_path
+                )  # Adjust based on jsonl structure
+
+            if not os.path.exists(cond_path):
+                # Fallback: try directly in image_dir
+                cond_path = os.path.join(self.image_dir, item["condition_image"])
+
+            if os.path.exists(cond_path):
+                try:
+                    cond_image = load_image(cond_path)
+                    # Use the same image processor to resize/normalize
+                    # NOTE: Qwen-VL might expect different preprocessing,
+                    # but usually resizing to VAE size is a safe start or we assume pipeline handles raw if passed.
+                    # Here we return tensor for batching.
+                    cond_pixel_values = self.image_processor.preprocess(cond_image)
+                    result["condition_pixel_values"] = cond_pixel_values
+                except Exception as e:
+                    print(f"Warning: Failed to load condition image {cond_path}: {e}")
+            else:
+                print(f"Warning: Condition image not found at {cond_path}")
+
+        return result
+
+
 PROCESSOR_REGISTRY = {
     "flux-dev": FluxDevProcessor,
     "pixart-sigma": PixArtSigmaProcessor,
     "sd3": SD3Processor,
     "qwen-image": QwenImageProcessor,
+    "qwen-image-edit": QwenImageEditProcessor,
 }
 
 class ImageTextDataset(Dataset):
