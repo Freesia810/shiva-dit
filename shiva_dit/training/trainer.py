@@ -484,6 +484,7 @@ class DiffusionModelTrainer:
             "loss/losses_weighted": [
                 "loss/ratio/ratio_loss",
                 "loss/gater/gate_loss",
+                "loss/diffcr_loss",
             ],
             "loss/losses_raw": [
                 "loss/ratio/floor_loss",
@@ -538,6 +539,13 @@ class DiffusionModelTrainer:
                 "topkgrads/router_avg_norm",
                 "topkgrads/gater_policy_avg_norm",
                 "topkgrads/ratio_policy_avg_norm",
+            ],
+
+            "diffcr/stats": [
+                "diffcr/avg_ratio",
+                "diffcr/min_ratio",
+                "diffcr/max_ratio",
+                "diffcr/target_ratio",
             ],
         }
 
@@ -894,6 +902,27 @@ class DiffusionModelTrainer:
         total_hook_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
         aggregated_metrics = {}
         self.step_per_layer_metrics = {}
+
+        if self.hook_type == "diffcr":
+            loss_config = self.config.extra_config
+            total_hook_loss = DiffCRDitBlockHook.calculate_ratio_loss(loss_config, self.device)
+            aggregated_metrics["loss/diffcr_loss"] = total_hook_loss
+
+            ratios = []
+            for hook in HookManager.get_all_hooks().values():
+                if isinstance(hook, DiffCRDitBlockHook):
+                    ratios.append(hook.diff_ratio)
+            
+            if ratios:
+                stacked_ratios = torch.stack(ratios)
+                aggregated_metrics["diffcr/avg_ratio"] = torch.mean(stacked_ratios)
+                aggregated_metrics["diffcr/min_ratio"] = torch.min(stacked_ratios)
+                aggregated_metrics["diffcr/max_ratio"] = torch.max(stacked_ratios)
+                
+                target_r = loss_config.get("target_ratio", 0.0)
+                aggregated_metrics["diffcr/target_ratio"] = torch.tensor(target_r, device=self.device)
+
+            return total_hook_loss, aggregated_metrics
 
         if self.hook_type != "shiva":
             return total_hook_loss, aggregated_metrics
