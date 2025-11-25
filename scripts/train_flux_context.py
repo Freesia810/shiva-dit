@@ -40,13 +40,13 @@ trainer_config = {
     "lr_scheduler": "constant",
     "seed": 42,
     
-    "num_epochs": 200,
+    "num_epochs": 500,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 1,
     "mixed_precision": "bf16",
     
     "logging_steps": 5,
-    "save_steps": 50,
+    "save_steps": 1000,
     "run_validation": False,
     "run_inference_validation": True,
     "inference_steps": 50,

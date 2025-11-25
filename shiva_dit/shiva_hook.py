@@ -334,7 +334,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             k=k
         )
 
-        if getattr(self, "capture_mask_for_viz", False):
+        if getattr(self, "capture_mask_for_viz", False) and self.training:
             B, L, _ = encoder_hidden_states.shape
             mask = torch.zeros((B, L), device=encoder_hidden_states.device)
             mask.scatter_(1, sel_idx.long(), 1.0)
