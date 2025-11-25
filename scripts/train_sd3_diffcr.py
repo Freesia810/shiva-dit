@@ -59,7 +59,7 @@ trainer_config = {
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
     "extra_config": {
         "ratio_loss_weight": 0.3,
-        "target_ratio": 0.8,
+        "target_ratio": 0.5,
     },
     "log_with_tensorboard": True,
     "log_with_wandb": False,
