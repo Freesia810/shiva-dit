@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.nn.utils.parametrizations as parametrizations
 
 from shiva_dit.utils.ste import ShivaTopkFunc
@@ -29,7 +30,7 @@ class ShivaContextPruner(nn.Module):
         parametrizations.orthogonal(self.k_proj, "weight")
 
         self.ste = ShivaPrunerExpert(init_Ts, init_Tk)
-        
+
         self.scale = proj_dim ** -0.5
 
     def forward(self, hidden_states, encoder_hidden_states, k):
@@ -42,7 +43,9 @@ class ShivaContextPruner(nn.Module):
         q = self.q_proj(img_query).unsqueeze(1) # (B, 1, R)
         k_proj = self.k_proj(e_in)              # (B, L, R)
 
-        scores = (q * k_proj).sum(dim=-1) * self.scale
+        q = F.normalize(q, p=2, dim=-1)
+        k_proj = F.normalize(k_proj, p=2, dim=-1)
+        scores = (q * k_proj).sum(dim=-1) * 10.0 
 
         self.last_scores = scores.detach()
 

@@ -14,7 +14,6 @@ from tqdm import tqdm
 from accelerate import Accelerator
 from accelerate.utils import set_seed, DistributedDataParallelKwargs, broadcast_object_list
 from dataclasses import asdict
-from shiva_dit.utils.text_viz import render_token_importance
 
 try:
     from torchmetrics.multimodal.clip_score import CLIPScore

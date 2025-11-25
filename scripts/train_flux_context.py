@@ -7,7 +7,7 @@ META_FILE = os.path.join(DATA_DIR, "meta.jsonl")
 
 HookType = ShivaDitBlockHook
 hook_config = {
-    "context_pruning_ratio": 0.5,  
+    "context_pruning_ratio": 0.1,  
     "proj_dim": 128,
     "init_Ts": 2.0,
     "init_Tk": 2.0,
@@ -26,6 +26,8 @@ trainer_config = {
     
     "training_mode": "hook_only",
     "hook_only_steps": 1000000, 
+
+    "caption_dropout_rate": 0.0,
     
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
@@ -49,12 +51,21 @@ trainer_config = {
     "run_inference_validation": True,
     "inference_steps": 50,
     "inference_metadata_file": META_FILE,
+    "distillation_final_weight": 2.0,
     
     "log_with_tensorboard": True,
     "wandb_run_name": "context-pruning-clean",
 
     "extra_config": {
-        "target_ratio": 0.8,
+        "target_ratio": 1.0,
+        "stage_schedule": [
+            {
+                "steps": -1, 
+                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0, "distill": [2.0, 0.0]},
+                "lr": [0.0, 1e-5, 1e-5, 0.0, 0.0], # [Base, LoRA, Ratio, Gate, Fuser]
+                "temp": [2.0, 2.0, 2.0, 2.0],
+            },
+        ]
     }
 }
 

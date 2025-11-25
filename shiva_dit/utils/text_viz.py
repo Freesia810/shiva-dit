@@ -31,7 +31,7 @@ def render_token_importance(tokenizer, input_ids, mask=None, width=800, font_siz
                 bg_color = 'red' 
                 alpha = 0.3 
             else:
-                text_color = 'gray' 
+                text_color = 'blue'
                 alpha = 0.5
 
         ax.text(x, y, token_text, fontsize=font_size, color=text_color, 
