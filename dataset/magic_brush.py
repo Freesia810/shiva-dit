@@ -28,7 +28,7 @@ def parse_args():
     )
 
     parser.add_argument(
-        "-- ",
+        "--use_original_split",
         action="store_true",
         help="Use original dataset splits (train/dev/test).",
     )
