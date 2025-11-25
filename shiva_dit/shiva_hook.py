@@ -20,73 +20,98 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
     def __init__(
         self,
-        shared_layer_embedder: nn.Embedding,
-        shared_router: ShivaRouter,
-        shared_gater_policy: ShivaGaterPolicy,
-        shared_ratio_policy: ShivaRatioPolicy,
-        shared_pruner: ShivaPrunerExpert,
-        shared_context_pruner: ShivaContextPruner,
-        shared_fuse_expert: ShivaFuserExpert,
+        shiva_mode: str,  # "image", "context", "both"
+        total_layers: int,
+        
+        # --- Image Pruning Components ---
+        router_layer_embedder: nn.Embedding = None,
+        shared_router: ShivaRouter = None,
+        shared_gater_policy: ShivaGaterPolicy = None,
+        shared_image_ratio_policy: ShivaRatioPolicy = None,
+        shared_pruner: ShivaPrunerExpert = None,
+        shared_fuse_expert: ShivaFuserExpert = None,
+        fixed_image_ratio: float = 0.5,
+        
+        # --- Context Pruning Components ---
+        shared_context_pruner: ShivaContextPruner = None,
+        shared_context_ratio_policy: ShivaRatioPolicy = None,
+        fixed_context_ratio: float = 1.0,
+        
+        # --- Gater Settings ---
         use_gater_lut: bool = False,
         shared_gater_cache: torch.Tensor = None,
-        total_layers: int = 1,
-        context_pruning_ratio: float = 1.0,
+        
         **kwargs,
     ):
         super().__init__(**kwargs)
 
-        self.layer_embedder = shared_layer_embedder
+        self.shiva_mode = shiva_mode
+        self.total_layers = total_layers
+        
+        # Image Modules
+        self.router_layer_embedder = router_layer_embedder
         self.router = shared_router
         self.gater_policy = shared_gater_policy
-        self.ratio_policy = shared_ratio_policy
-        self.context_pruner = shared_context_pruner
+        self.image_ratio_policy = shared_image_ratio_policy
         self.prune_expert = shared_pruner
         self.fuse_expert = shared_fuse_expert
+        self.fixed_image_ratio = fixed_image_ratio
 
+        # Context Modules
+        self.context_pruner = shared_context_pruner
+        self.context_ratio_policy = shared_context_ratio_policy
+        self.fixed_context_ratio = fixed_context_ratio
+
+        # Gater LUT
         self.use_gater_lut = use_gater_lut
         self.gater_cache = shared_gater_cache
 
         if self.use_gater_lut and self.gater_cache is None:
-            raise ValueError(
-                f"ShivaDitBlockHook(layer_idx={self.layer_idx}): 'use_gater_lut' is True, "
-                "but 'shared_gater_cache' was not provided."
-            )
+            if self.shiva_mode in ["image", "both"]:
+                raise ValueError(
+                    f"ShivaDitBlockHook(layer_idx={self.layer_idx}): 'use_gater_lut' is True, "
+                    "but 'shared_gater_cache' was not provided."
+                )
 
-        self.total_layers = total_layers
-        self.context_pruning_ratio = context_pruning_ratio
-
+        # Metrics Accumulators
+        # Image
         self.gate_loss_accumulator = []
         self.gater_fuse_prob_accumulator = []
         self.router_stats_accumulator = []
-        self.k_accumulator = []
-        self.n_minus_k_accumulator = []
-        self.ratio_accumulator = []
+        self.image_ratio_accumulator = [] 
+        
+        # Context
         self.context_score_accumulator = []
+        self.context_ratio_accumulator = []
 
         self.capture_mask_for_viz = True
+
+        # Placeholders for loss calculation
+        self.current_gate_logits_for_loss = None
+        self.current_ratio_for_loss = None
+        self.token_scores_logits = None
+        self.k_float = None
 
     def delegated_call(self, func, module_self, *args, **kwargs):
         (
             bound,
-            x_sel,
-            x_rej,
-            remaining_x,
-            sel_idx,
-            ctx_sel,
-            remaining_ctx,
-            sel_idx_ctx,
-            sel_rope,
-            pure_temb,
-            layer_emb,
-            pooled_encoder_states,
-            N,
+            # Image Selection
+            x_sel, x_rej, remaining_x, sel_idx,
+            # Context Selection
+            ctx_sel, remaining_ctx, sel_idx_ctx,
+            # Meta
+            sel_rope, pure_temb, layer_id_tensor, pooled_encoder_states, N,
         ) = self._prepare_inputs(func, module_self, *args, **kwargs)
 
         # 1. Spatial Pruning Forward (Image)
-        if self.training:
-            final_topk_states = self._forward_train(x_sel, x_rej, N)
-        else:
-            final_topk_states = self._forward_eval(x_sel, x_rej, pure_temb, layer_emb)
+        # Default to x_sel (which is full hidden_states if image pruning is off)
+        final_topk_states = x_sel 
+        
+        if self.shiva_mode in ["image", "both"] and self.fuse_expert is not None:
+            if self.training:
+                final_topk_states = self._forward_train_image(x_sel, x_rej, N)
+            else:
+                final_topk_states = self._forward_eval_image(x_sel, x_rej, pure_temb, layer_id_tensor)
 
         # 2. Context Pruning Forward (Text)
         final_topk_context = ctx_sel
@@ -120,29 +145,21 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         pure_temb = global_context.pure_temb
 
-        ## context pruning
-        L = encoder_hidden_states.shape[1]
-        k_ctx = int(max(1, L * self.context_pruning_ratio))
-        ctx_sel, remaining_ctx, sel_idx_ctx = self._select_topk_context(
-            hidden_states.detach().to(dtype), 
-            encoder_hidden_states.to(dtype), 
-            k_ctx, D
-        )
-        pooled_encoder_vector = ctx_sel.mean(dim=1)
-
+        # --- Metadata Preparation ---
         layer_id_tensor = torch.tensor(
             [self.layer_idx], device=pure_temb.device, dtype=torch.long
         ).expand(B)
-        layer_emb_vector = self.layer_embedder(layer_id_tensor).to(dtype)
+        
+        router_layer_emb_vector = None
+        if self.router_layer_embedder is not None:
+            router_layer_emb_vector = self.router_layer_embedder(layer_id_tensor).to(dtype)
 
-        l_val = self.layer_idx / max(1, self.total_layers - 1)
-        l_scalar = torch.tensor([l_val], device=pure_temb.device, dtype=dtype).expand(B, 1)
         current_t = global_context.current_timestep
         if current_t is None:
             raise ValueError("global_context.current_timestep is None")
 
         t_val = current_t.to(dtype)
-        t_val = t_val / 1000.0 # normalize
+        t_val = t_val / 1000.0  # normalize
 
         if t_val.numel() == 1:
             t_scalar = t_val.view(1, 1).expand(B, 1)
@@ -150,72 +167,135 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             t_scalar = t_val.view(B, 1)
         else:
             raise ValueError(f"t_val.shape: {t_val.shape}")
-        l_scalar = l_scalar.view(B, 1)
 
-        gate_logits = self.gater_policy(pure_temb, layer_emb_vector)
-
-        predicted_ratio_logits = self.ratio_policy(t_scalar, layer_id_tensor)
-        policy_ratio = torch.sigmoid(predicted_ratio_logits).squeeze(-1).mean()
-
-        is_random_training = (
-            self.training 
-            and getattr(global_context, "current_stage_idx", -1) == 1
-        )
-
-        if is_random_training:
-            random_ratio_val = torch.rand(1, device=pure_temb.device).item() * 0.8 + 0.1
-            random_ratio = torch.tensor(random_ratio_val, device=pure_temb.device, dtype=dtype)
-            predicted_ratio = random_ratio + (0.0 * policy_ratio)
-        else:
-            predicted_ratio = policy_ratio
-
-        if self.layer_idx == 0:
-            predicted_ratio = torch.tensor(1.0, device=predicted_ratio.device, dtype=predicted_ratio.dtype)
+        # --- Context Pruning Logic ---
+        ctx_sel = encoder_hidden_states
+        remaining_ctx = None
+        sel_idx_ctx = None
         
-        # TODO:
-        predicted_ratio = torch.tensor(1.0, device=predicted_ratio.device, dtype=predicted_ratio.dtype)
+        if self.shiva_mode in ["context", "both"] and self.context_pruner is not None:
+            L = encoder_hidden_states.shape[1]
+            
+            # Determine Context Ratio
+            if self.context_ratio_policy is not None:
+                # Adaptive Ratio
+                ctx_ratio_logits = self.context_ratio_policy(t_scalar, layer_id_tensor)
+                ctx_ratio_pred = torch.sigmoid(ctx_ratio_logits).squeeze(-1).mean()
+                
+                is_random_training = (
+                    self.training 
+                    and getattr(global_context, "current_stage_idx", -1) == 1
+                )
+                if is_random_training:
+                    noise = torch.rand(1, device=pure_temb.device, dtype=dtype) * 0.8 + 0.1
+                    ctx_ratio = noise + (0.0 * ctx_ratio_pred)
+                else:
+                    ctx_ratio = ctx_ratio_pred
+            else:
+                # Fixed Ratio
+                ctx_ratio = torch.tensor(self.fixed_context_ratio, device=pure_temb.device, dtype=dtype)
 
-        clamped_ratio = predicted_ratio.clamp(min=0.01)
-        if self.training:
-            k_float = ceil_ste(clamped_ratio * N)
-        else:
-            with torch.no_grad():
-                k_float = torch.ceil(clamped_ratio * N)
+            # Safety clamp
+            ctx_ratio = ctx_ratio.clamp(min=0.01, max=1.0)
+            self.context_ratio_accumulator.append(ctx_ratio)
 
-        token_scores_logits = self.router(
-            hidden_states=hidden_states.to(dtype), 
-            pooled_encoder_states=pooled_encoder_vector,
-            temb=pure_temb, 
-            layer_emb=layer_emb_vector
-        )
+            k_ctx = int(max(1, L * ctx_ratio))
+            
+            # Execute Context Pruning
+            if k_ctx < L:
+                ctx_sel, remaining_ctx, sel_idx_ctx = self._select_topk_context(
+                    hidden_states.detach().to(dtype), 
+                    encoder_hidden_states.to(dtype), 
+                    k_ctx, D
+                )
+        
+        pooled_encoder_vector = ctx_sel.mean(dim=1)
 
-        if token_scores_logits.shape[0] % 2 == 0 and token_scores_logits.shape[0] > 1:
-            B_half = token_scores_logits.shape[0] // 2
+        # --- Image Pruning Logic ---
+        x_sel = hidden_states
+        x_rej = None
+        remaining_x = None
+        sel_idx = None
+        
+        # Reset metrics placeholders
+        self.current_gate_logits_for_loss = None
+        self.current_ratio_for_loss = None
+        self.token_scores_logits = None
+        self.k_float = None
 
-            scores_uncond, scores_cond = token_scores_logits.chunk(2, dim=0)
-            unified_scores = torch.maximum(scores_uncond, scores_cond)
-            token_scores_logits = torch.cat([unified_scores, unified_scores], dim=0)
+        if self.shiva_mode in ["image", "both"] and self.router is not None:
+            # Determine Image Ratio
+            if self.image_ratio_policy is not None:
+                # Adaptive Ratio
+                img_ratio_logits = self.image_ratio_policy(t_scalar, layer_id_tensor)
+                policy_ratio = torch.sigmoid(img_ratio_logits).squeeze(-1).mean()
 
-        self.current_gate_logits_for_loss = gate_logits
-        self.current_ratio_for_loss = clamped_ratio
-        self.current_raw_predicted_ratio = predicted_ratio
-        self.token_scores_logits = token_scores_logits
-        self.k_float = k_float
-        # ------------------------------------------------
+                is_random_training = (
+                    self.training 
+                    and getattr(global_context, "current_stage_idx", -1) == 1
+                )
 
-        x_sel, x_rej, remaining_x, sel_idx = self._select_topk(
-            hidden_states, token_scores_logits, k_float, D
-        )
+                if is_random_training:
+                    random_ratio_val = torch.rand(1, device=pure_temb.device).item() * 0.8 + 0.1
+                    random_ratio = torch.tensor(random_ratio_val, device=pure_temb.device, dtype=dtype)
+                    predicted_ratio = random_ratio + (0.0 * policy_ratio)
+                else:
+                    predicted_ratio = policy_ratio
+            else:
+                # Fixed Ratio
+                predicted_ratio = torch.tensor(self.fixed_image_ratio, device=pure_temb.device, dtype=dtype)
+
+            if self.layer_idx == 0:
+                predicted_ratio = torch.tensor(1.0, device=predicted_ratio.device, dtype=predicted_ratio.dtype)
+            
+            clamped_ratio = predicted_ratio.clamp(min=0.01, max=1.0)
+            self.current_ratio_for_loss = clamped_ratio
+            
+            if self.training:
+                k_float = ceil_ste(clamped_ratio * N)
+            else:
+                with torch.no_grad():
+                    k_float = torch.ceil(clamped_ratio * N)
+            self.k_float = k_float
+
+            # Gater Call
+            gate_logits = self.gater_policy(pure_temb, layer_id_tensor)
+            self.current_gate_logits_for_loss = gate_logits
+
+            # Router Call
+            token_scores_logits = self.router(
+                hidden_states=hidden_states.to(dtype), 
+                pooled_encoder_states=pooled_encoder_vector,
+                temb=pure_temb, 
+                layer_emb=router_layer_emb_vector
+            )
+
+            if token_scores_logits.shape[0] % 2 == 0 and token_scores_logits.shape[0] > 1:
+                scores_uncond, scores_cond = token_scores_logits.chunk(2, dim=0)
+                unified_scores = torch.maximum(scores_uncond, scores_cond)
+                token_scores_logits = torch.cat([unified_scores, unified_scores], dim=0)
+
+            self.token_scores_logits = token_scores_logits
+
+            # Execute Image Pruning
+            x_sel, x_rej, remaining_x, sel_idx = self._select_topk(
+                hidden_states, token_scores_logits, k_float, D
+            )
+
+        # --- RoPE Gathering ---
         sel_rope = self._gather_rope(image_rotary_emb, sel_idx, sel_idx_ctx)
 
         return (
             bound,
-            x_sel, x_rej, remaining_x, sel_idx, # Image
-            ctx_sel, remaining_ctx, sel_idx_ctx, # Context
-            sel_rope, pure_temb, layer_emb_vector, pooled_encoder_vector, N,
+            # Image
+            x_sel, x_rej, remaining_x, sel_idx,
+            # Context
+            ctx_sel, remaining_ctx, sel_idx_ctx,
+            # Meta
+            sel_rope, pure_temb, layer_id_tensor, pooled_encoder_vector, N,
         )
 
-    def _forward_train(self, x_sel, x_rej, N):
+    def _forward_train_image(self, x_sel, x_rej, N):
         dtype = x_sel.dtype
 
         gating_weights = F.softmax(self.current_gate_logits_for_loss, dim=-1)
@@ -233,7 +313,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         final_topk_states = (g_prune * output_prune) + (g_fuse * output_fuse)
 
-        self._collect_training_metrics(
+        self._collect_training_metrics_image(
             load_balancing_loss=load_balancing_loss,
             avg_fuse_prob=avg_fuse_prob,
             token_scores_logits=self.token_scores_logits,
@@ -242,12 +322,12 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         )
         return final_topk_states
 
-    def _forward_eval(self, x_sel, x_rej, pure_temb, layer_emb):
+    def _forward_eval_image(self, x_sel, x_rej, pure_temb, layer_id_tensor):
         dtype = x_sel.dtype
 
         if getattr(self, "is_validating", False):
             try:
-                self._collect_training_metrics(
+                self._collect_training_metrics_image(
                     load_balancing_loss=torch.tensor(0.0, device=x_sel.device),
                     avg_fuse_prob=torch.tensor(0.0, device=x_sel.device),
                     token_scores_logits=self.token_scores_logits,
@@ -261,7 +341,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             current_t_index = global_context.current_iteration
             decision = self.gater_cache[self.layer_idx, current_t_index].item()
         else:
-            gater_logits = self.gater_policy(pure_temb, layer_emb)
+            gater_logits = self.gater_policy(pure_temb, layer_id_tensor)
             decision = torch.argmax(gater_logits[0], dim=-1).item()
 
         if decision == 0:
@@ -287,11 +367,17 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             processed_encoder_states, processed_hidden_states = processed_output
         else:
             processed_hidden_states = processed_output
+            processed_encoder_states = None
 
-        final_hidden_states = self._scatter_add(
-            processed_hidden_states, remaining_x, sel_idx
-        )
+        # Scatter Image
+        if remaining_x is not None and sel_idx is not None:
+            final_hidden_states = self._scatter_add(
+                processed_hidden_states, remaining_x, sel_idx
+            )
+        else:
+            final_hidden_states = processed_hidden_states
 
+        # Scatter Context
         if processed_encoder_states is not None and sel_idx_ctx is not None:
             B, k, D = processed_encoder_states.shape
             final_encoder_states = remaining_ctx.scatter_add(
@@ -351,10 +437,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
     def _gather_rope(self, image_rotary_emb, survivors_indices, context_survivors_indices=None):
         if image_rotary_emb is not None:
-            assert (
-                survivors_indices.shape[0] == 1
-            ), "image_rotary_emb only supports batch size 1"
-            
+            if survivors_indices is not None:
+                assert survivors_indices.shape[0] == 1, "image_rotary_emb hook currently optimized for BS=1"
             if context_survivors_indices is not None:
                 assert context_survivors_indices.shape[0] == 1
 
@@ -366,14 +450,15 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 split_extra=False,
             )
 
-            hidden_emb = tuple(
-                torch.gather(
-                    x,
-                    dim=0,
-                    index=survivors_indices[0].unsqueeze(-1).expand(-1, x.shape[-1]),
+            if survivors_indices is not None:
+                hidden_emb = tuple(
+                    torch.gather(
+                        x,
+                        dim=0,
+                        index=survivors_indices[0].unsqueeze(-1).expand(-1, x.shape[-1]),
+                    )
+                    for x in hidden_emb
                 )
-                for x in hidden_emb
-            )
 
             if context_survivors_indices is not None and encoder_emb is not None:
                 encoder_emb = tuple(
@@ -404,12 +489,11 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.gate_loss_accumulator.clear()
         self.gater_fuse_prob_accumulator.clear()
         self.router_stats_accumulator.clear()
-        self.k_accumulator.clear()
-        self.n_minus_k_accumulator.clear()
-        self.ratio_accumulator.clear()
+        self.image_ratio_accumulator.clear()
         self.context_score_accumulator.clear()
+        self.context_ratio_accumulator.clear()
 
-    def _collect_training_metrics(
+    def _collect_training_metrics_image(
         self,
         load_balancing_loss,
         avg_fuse_prob,
@@ -419,12 +503,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
     ):
         self.gate_loss_accumulator.append(load_balancing_loss)
         self.gater_fuse_prob_accumulator.append(avg_fuse_prob)
-        self.ratio_accumulator.append(self.current_ratio_for_loss)
+        self.image_ratio_accumulator.append(self.current_ratio_for_loss)
 
         token_scores = torch.sigmoid(token_scores_logits)
-        # s_scale = (1.0 + torch.tanh(token_scores_logits))
-        # s_scale_mean = s_scale.mean()
-        # s_scale_std = s_scale.std()
         self.router_stats_accumulator.append(
             {
                 "scores_tensor": token_scores,
@@ -432,12 +513,5 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 "std": token_scores.std(),
                 "min": token_scores.min(),
                 "max": token_scores.max(),
-                # "s_scale_mean": s_scale_mean,
-                # "s_scale_std": s_scale_std,
             }
         )
-
-        k_val = int(k_float.item())
-        n_minus_k_val = N - k_val
-        self.k_accumulator.append(k_val)
-        self.n_minus_k_accumulator.append(n_minus_k_val)

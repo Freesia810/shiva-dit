@@ -7,12 +7,18 @@ META_FILE = os.path.join(DATA_DIR, "meta.jsonl")
 
 HookType = ShivaDitBlockHook
 hook_config = {
-    "context_pruning_ratio": 0.1,  
+    # --- Mode Selection ---
+    "shiva_mode": "context",
+    
+    # --- Context Configs ---
+    "context_ratio_mode": "fixed",
+    "fixed_context_ratio": 0.1,  
     "proj_dim": 128,
+    
+    # --- Common ---
     "init_Ts": 2.0,
     "init_Tk": 2.0,
-    
-    "num_router_groups": 1,
+
     "use_gater_lut": False,
 }
 
@@ -25,19 +31,13 @@ trainer_config = {
     "output_dir": "./checkpoints/",
     
     "training_mode": "hook_only",
-    "hook_only_steps": 1000000, 
+    "hook_only_steps": 10000,
 
     "caption_dropout_rate": 0.0,
-    
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
     
-    "learning_rate": 0.0,
-    "policy_learning_rate": 0.0,
-    "context_learning_rate": 1e-4,
-    
     "optimizer": "AdamW",
-    "lr_scheduler": "constant",
     "seed": 42,
     
     "num_epochs": 500,
@@ -48,28 +48,35 @@ trainer_config = {
     "logging_steps": 5,
     "save_steps": 1000,
     "run_validation": False,
+    
     "run_inference_validation": True,
     "inference_steps": 50,
     "inference_metadata_file": META_FILE,
+    "inference_num_inference_steps": 20,
+    
     "distillation_final_weight": 2.0,
     
     "log_with_tensorboard": True,
-    "wandb_run_name": "context-pruning-clean",
+    "wandb_run_name": "context-pruning-fixed",
 
     "extra_config": {
-        "target_ratio": 1.0,
+        # Target ratio is for logging/adaptive loss only, less relevant for fixed mode
+        "target_ratio": 1.0, 
+        
+        # LR Order: [Base, LoRA, Gate, ImageRatio, ContextRatio, ContextPruner]
         "stage_schedule": [
             {
                 "steps": -1, 
-                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0, "distill": [2.0, 0.0]},
-                "lr": [0.0, 1e-5, 1e-5, 0.0, 0.0], # [Base, LoRA, Ratio, Gate, Fuser]
+                "weights": {"ratio": [0.0, 0.0, 0.0], "gate": 0.0, "distill": [2.0, 0.0]},
+                # Only optimize ContextPruner (last item)
+                "lr": [0.0, 0.0, 0.0, 0.0, 0.0, 1e-4], 
                 "temp": [2.0, 2.0, 2.0, 2.0],
             },
         ]
     }
 }
 
-print("[Script] Starting Context Pruning Training...")
+print("[Script] Starting Context Pruning Training (Fixed Ratio)...")
 config = TrainerConfig(**trainer_config)
 trainer = DiffusionModelTrainer(config=config)
 trainer.train()

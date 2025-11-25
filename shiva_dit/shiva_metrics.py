@@ -15,6 +15,7 @@ def _get_shiva_hooks():
         if isinstance(hook, ShivaDitBlockHook):
             yield hook
 
+
 def calculate_gate_loss(config: dict, device: torch.device) -> torch.Tensor:
     gate_losses = []
 
@@ -32,55 +33,30 @@ def calculate_gate_loss(config: dict, device: torch.device) -> torch.Tensor:
         "loss/gater/gate_loss_raw": 0.0,
         "loss/gater/gate_loss": 0.0,
     }
-    loss_weight = config["gate_loss_weight"]
+    
     if gate_losses:
+        loss_weight = config.get("gate_loss_weight", 0.0)
         raw_loss = torch.stack(gate_losses).mean()
         final_loss = raw_loss * loss_weight
-        metrics["loss/gater/gate_loss_raw"] = raw_loss
-        metrics["loss/gater/gate_loss"] = final_loss
+        
+        # Move to requested device if needed, though usually they are on same GPU
+        final_loss = final_loss.to(device)
+        
+        metrics["loss/gater/gate_loss_raw"] = raw_loss.detach()
+        metrics["loss/gater/gate_loss"] = final_loss.detach()
         return final_loss, metrics
     else:
         return torch.tensor(0.0, device=device), metrics
 
 
-def calculate_ratio_loss(
-    config: dict, device: torch.device, timestep: torch.Tensor = None
-) -> tuple[torch.Tensor, dict, dict]:
+def _calc_ratio_loss_common(ratios_list, config, device, prefix="adaptive_ratio"):
+    """
+    Common logic for calculating budget/floor/mse loss for a list of ratios.
+    """
+    if not ratios_list:
+        return torch.tensor(0.0, device=device), {}
 
-    ratios_per_layer = {}
-    ratios_for_loss = []
-    ratios_for_logging = []
-
-    for hook in _get_shiva_hooks():
-        if hook.layer_idx == 0:
-            # Skip the first layer
-            continue
-        layer_name = f"layer_{hook.layer_idx:02d}"
-        accumulator = hook.ratio_accumulator
-
-        if accumulator:
-            avg_ratio_for_hook = torch.stack(accumulator).mean()
-            ratios_for_loss.append(avg_ratio_for_hook)
-
-            avg_ratio_item = avg_ratio_for_hook.detach().item()
-            ratios_per_layer[layer_name] = avg_ratio_item
-            ratios_for_logging.append(avg_ratio_item)
-
-        hook.ratio_accumulator.clear()
-
-    metrics = {
-        "adaptive_ratio/avg_ratio": 0.0,
-        "adaptive_ratio/target_ratio": 0.0,
-        "loss/ratio/budget_loss": 0.0,
-        "loss/ratio/floor_loss": 0.0,
-        "loss/ratio/mse_loss": 0.0,
-        "loss/ratio/ratio_loss": 0.0,
-    }
-
-    if not ratios_for_loss:
-        return torch.tensor(0.0, device=device), metrics, ratios_per_layer
-
-    # [1.0, 20.0, 1.0]
+    # Config parsing: [budget_weight, floor_weight, mse_weight]
     w_config = config.get("ratio_loss_weight", 1.0)
     if isinstance(w_config, list):
         w_budget = w_config[0]
@@ -93,14 +69,16 @@ def calculate_ratio_loss(
 
     current_target_ratio = config.get("target_ratio", 0.8)
 
-    all_ratios = torch.stack(ratios_for_loss) # (Num_Layers,)
+    all_ratios = torch.stack(ratios_list) # (Num_Active_Layers,)
     
     global_avg_ratio = torch.mean(all_ratios)
     target = torch.tensor(current_target_ratio, device=device, dtype=all_ratios.dtype)
 
+    # 1. Budget Loss (Hinge Loss)
     diff = global_avg_ratio - target
     budget_loss = w_budget * torch.relu(diff)
 
+    # 2. Floor Loss (Penalty for going too low)
     if w_floor > 0.0:
         min_allowed = 0.1
         floor_penalties = torch.relu(min_allowed - all_ratios)
@@ -108,6 +86,7 @@ def calculate_ratio_loss(
     else:
         floor_loss = torch.tensor(0.0, device=device)
 
+    # 3. MSE Loss (Target adherence)
     if w_mse > 0.0:
         target_full = torch.full_like(all_ratios, current_target_ratio)
         mse_loss_val = F.mse_loss(all_ratios, target_full)
@@ -117,17 +96,71 @@ def calculate_ratio_loss(
 
     final_loss = budget_loss + floor_loss + mse_loss
 
-    with torch.no_grad():
-        metrics.update({
-            "adaptive_ratio/avg_ratio": global_avg_ratio.detach(),
-            "adaptive_ratio/target_ratio": target,
-            "loss/ratio/budget_loss": budget_loss.detach(),
-            "loss/ratio/floor_loss": floor_loss.detach(),
-            "loss/ratio/mse_loss": mse_loss.detach(),
-            "loss/ratio/ratio_loss": final_loss.detach(),
-        })
+    metrics = {
+        f"{prefix}/avg_ratio": global_avg_ratio.detach(),
+        f"{prefix}/target_ratio": target,
+        f"loss/{prefix}/budget_loss": budget_loss.detach(),
+        f"loss/{prefix}/floor_loss": floor_loss.detach(),
+        f"loss/{prefix}/mse_loss": mse_loss.detach(),
+        f"loss/{prefix}/ratio_loss": final_loss.detach(),
+    }
+    return final_loss, metrics
 
-    return final_loss, metrics, ratios_per_layer
+
+def calculate_image_ratio_loss(
+    config: dict, device: torch.device
+) -> tuple[torch.Tensor, dict, dict]:
+    """
+    Calculates loss for Image Token Pruning ratios.
+    """
+    ratios_for_loss = []
+    per_layer_ratios = {}
+
+    for hook in _get_shiva_hooks():
+        # Usually skip the first layer for loss calculation as it is often fixed to 1.0
+        if hook.layer_idx == 0:
+            # Clear accumulator to prevent memory leak even if ignored
+            if hasattr(hook, "image_ratio_accumulator"):
+                hook.image_ratio_accumulator.clear()
+            continue
+            
+        accumulator = getattr(hook, "image_ratio_accumulator", [])
+        if accumulator:
+            avg_ratio = torch.stack(accumulator).mean()
+            ratios_for_loss.append(avg_ratio)
+            per_layer_ratios[f"layer_{hook.layer_idx:02d}"] = avg_ratio.item()
+        
+        # Clear after reading
+        if hasattr(hook, "image_ratio_accumulator"):
+            hook.image_ratio_accumulator.clear()
+
+    # Use 'adaptive_ratio' prefix for backward compatibility/standard image naming
+    loss, metrics = _calc_ratio_loss_common(ratios_for_loss, config, device, prefix="image_ratio")
+    
+    return loss, metrics, per_layer_ratios
+
+
+def calculate_context_ratio_loss(
+    config: dict, device: torch.device
+) -> tuple[torch.Tensor, dict]:
+    """
+    Calculates loss for Context Pruning ratios.
+    """
+    ratios_for_loss = []
+    
+    for hook in _get_shiva_hooks():
+        accumulator = getattr(hook, "context_ratio_accumulator", [])
+        if accumulator:
+            avg_ratio = torch.stack(accumulator).mean()
+            ratios_for_loss.append(avg_ratio)
+        
+        if hasattr(hook, "context_ratio_accumulator"):
+            hook.context_ratio_accumulator.clear()
+            
+    loss, metrics = _calc_ratio_loss_common(ratios_for_loss, config, device, prefix="context_ratio")
+    
+    return loss, metrics
+
 
 def collect_context_stats(device: torch.device) -> dict:
     total_mean = []
@@ -135,21 +168,17 @@ def collect_context_stats(device: torch.device) -> dict:
     total_max = []
     total_min = []
     
-    from shiva_dit.hook import HookManager
-    from shiva_dit.shiva_hook import ShivaDitBlockHook
-
-    for hook in HookManager.get_all_hooks().values():
-        if isinstance(hook, ShivaDitBlockHook):
-            acc = getattr(hook, "context_score_accumulator", [])
-            if acc:
-                stacked = torch.stack(acc)
-                total_mean.append(stacked.mean())
-                total_std.append(stacked.std())
-                total_max.append(stacked.max())
-                total_min.append(stacked.min())
+    for hook in _get_shiva_hooks():
+        acc = getattr(hook, "context_score_accumulator", [])
+        if acc:
+            stacked = torch.stack(acc)
+            total_mean.append(stacked.mean())
+            total_std.append(stacked.std())
+            total_max.append(stacked.max())
+            total_min.append(stacked.min())
             
-            if hasattr(hook, "context_score_accumulator"):
-                hook.context_score_accumulator.clear()
+        if hasattr(hook, "context_score_accumulator"):
+            hook.context_score_accumulator.clear()
 
     if total_mean:
         return {
@@ -161,8 +190,9 @@ def collect_context_stats(device: torch.device) -> dict:
     else:
         return {}
 
+
 @torch.no_grad()
-def calculate_shiva_gate_prob(device: torch.device) -> tuple[torch.Tensor, dict]:
+def collect_shiva_gate_prob(device: torch.device) -> tuple[torch.Tensor, dict]:
     gate_probs_per_hook = []
     gate_probs_per_layer = {}
 
@@ -172,9 +202,7 @@ def calculate_shiva_gate_prob(device: torch.device) -> tuple[torch.Tensor, dict]
         if accumulator:
             avg_prob_for_hook = torch.stack(accumulator).mean()
             gate_probs_per_hook.append(avg_prob_for_hook)
-
-            layer_name = f"layer_{hook.layer_idx:02d}"
-            gate_probs_per_layer[layer_name] = avg_prob_for_hook
+            gate_probs_per_layer[f"layer_{hook.layer_idx:02d}"] = avg_prob_for_hook
 
         hook.gater_fuse_prob_accumulator.clear()
 
@@ -184,55 +212,44 @@ def calculate_shiva_gate_prob(device: torch.device) -> tuple[torch.Tensor, dict]
     else:
         return torch.tensor(0.0, device=device), {}
 
+
 def collect_autograd_stats(device):
     stats = {}
+    # Check static stats from the Function
     if (
         hasattr(ShivaTopkFunc, "_last_grad_probs_stats")
         and ShivaTopkFunc._last_grad_probs_stats
     ):
-        stats["topkgrads/grad_probs_norm"] = ShivaTopkFunc._last_grad_probs_stats[
-            "norm"
-        ]
-        stats["topkgrads/grad_probs_sum"] = ShivaTopkFunc._last_grad_probs_stats[
-            "sum"
-        ]
-        stats["topkgrads/grad_probs_std"] = ShivaTopkFunc._last_grad_probs_stats[
-            "std"
-        ]
+        stats["topkgrads/grad_probs_norm"] = ShivaTopkFunc._last_grad_probs_stats.get("norm", 0.0)
+        stats["topkgrads/grad_probs_sum"] = ShivaTopkFunc._last_grad_probs_stats.get("sum", 0.0)
+        stats["topkgrads/grad_probs_std"] = ShivaTopkFunc._last_grad_probs_stats.get("std", 0.0)
 
     if (
         hasattr(ShivaTopkFunc, "_last_soft_ranks_stats")
         and ShivaTopkFunc._last_soft_ranks_stats
     ):
-        stats["topkgrads/soft_ranks_std"] = ShivaTopkFunc._last_soft_ranks_stats[
-            "std"
-        ]
-        stats["topkgrads/soft_ranks_mean"] = ShivaTopkFunc._last_soft_ranks_stats[
-            "mean"
-        ]
-        stats["topkgrads/soft_ranks_min"] = ShivaTopkFunc._last_soft_ranks_stats[
-            "min"
-        ]
-        stats["topkgrads/soft_ranks_max"] = ShivaTopkFunc._last_soft_ranks_stats[
-            "max"
-        ]
+        stats["topkgrads/soft_ranks_std"] = ShivaTopkFunc._last_soft_ranks_stats.get("std", 0.0)
+        stats["topkgrads/soft_ranks_mean"] = ShivaTopkFunc._last_soft_ranks_stats.get("mean", 0.0)
+        stats["topkgrads/soft_ranks_min"] = ShivaTopkFunc._last_soft_ranks_stats.get("min", 0.0)
+        stats["topkgrads/soft_ranks_max"] = ShivaTopkFunc._last_soft_ranks_stats.get("max", 0.0)
 
     if hasattr(ShivaTopkFunc, "_last_z_stats") and ShivaTopkFunc._last_z_stats:
-        stats["topkgrads/z_std"] = ShivaTopkFunc._last_z_stats["std"]
-        stats["topkgrads/z_mean"] = ShivaTopkFunc._last_z_stats["mean"]
+        stats["topkgrads/z_std"] = ShivaTopkFunc._last_z_stats.get("std", 0.0)
+        stats["topkgrads/z_mean"] = ShivaTopkFunc._last_z_stats.get("mean", 0.0)
 
     if (
         hasattr(ShivaTopkFunc, "_last_selection_probs_stats")
         and ShivaTopkFunc._last_selection_probs_stats
     ):
         stats["topkgrads/sigmoid_prime_mean"] = (
-            ShivaTopkFunc._last_selection_probs_stats["grad_mean"]
+            ShivaTopkFunc._last_selection_probs_stats.get("grad_mean", 0.0)
         )
         stats["topkgrads/sigmoid_prime_std"] = (
-            ShivaTopkFunc._last_selection_probs_stats["grad_std"]
+            ShivaTopkFunc._last_selection_probs_stats.get("grad_std", 0.0)
         )
 
     return stats
+
 
 @torch.no_grad()
 def collect_router_stats(device: torch.device) -> dict:
@@ -240,13 +257,12 @@ def collect_router_stats(device: torch.device) -> dict:
     total_std = []
     total_min = []
     total_max = []
+    
+    # Quantiles might be expensive, check if accumulator has data first
+    q_tensor = torch.tensor([0.25, 0.50, 0.75], device=device)
     total_p25 = []
     total_p50 = []
     total_p75 = []
-    q_tensor = torch.tensor([0.25, 0.50, 0.75], device=device)
-
-    total_s_scale_mean = []
-    total_s_scale_std = []
 
     for hook in _get_shiva_hooks():
         acc = hook.router_stats_accumulator
@@ -255,30 +271,35 @@ def collect_router_stats(device: torch.device) -> dict:
             total_std.append(torch.stack([x["std"] for x in acc]).mean())
             total_min.append(torch.stack([x["min"] for x in acc]).min())
             total_max.append(torch.stack([x["max"] for x in acc]).max())
-            # total_s_scale_mean.append(torch.stack([x["s_scale_mean"] for x in acc]).mean())
-            # total_s_scale_std.append(torch.stack([x["s_scale_std"] for x in acc]).mean())
 
             all_scores = torch.stack([x["scores_tensor"] for x in acc]) 
-            quantiles = torch.quantile(all_scores.to(torch.float32), q_tensor.to(torch.float32), dim=None) 
-            total_p25.append(quantiles[0])
-            total_p50.append(quantiles[1])
-            total_p75.append(quantiles[2])
-        acc.clear()
+            # Reshape to flat for quantile
+            all_scores_flat = all_scores.float().view(-1)
+            if all_scores_flat.numel() > 0:
+                quantiles = torch.quantile(all_scores_flat, q_tensor.float()) 
+                total_p25.append(quantiles[0])
+                total_p50.append(quantiles[1])
+                total_p75.append(quantiles[2])
+        
+        hook.router_stats_accumulator.clear()
 
     if total_mean:
-        return {
+        stats = {
             "router/mean_score": torch.stack(total_mean).mean(),
             "router/std_score": torch.stack(total_std).mean(),
             "router/min_score": torch.stack(total_min).min(),
             "router/max_score": torch.stack(total_max).max(),
-            # "router/s_scale_mean": torch.stack(total_s_scale_mean).mean(),
-            # "router/s_scale_std": torch.stack(total_s_scale_std).mean(),
-            "router/p25_score": torch.stack(total_p25).mean(),
-            "router/p50_score": torch.stack(total_p50).mean(),
-            "router/p75_score": torch.stack(total_p75).mean(),
         }
+        if total_p25:
+            stats.update({
+                "router/p25_score": torch.stack(total_p25).mean(),
+                "router/p50_score": torch.stack(total_p50).mean(),
+                "router/p75_score": torch.stack(total_p75).mean(),
+            })
+        return stats
     else:
         return {}
+
 
 def generate_router_heatmap(token_scores, sel_idx, height, width):
     try:
@@ -305,10 +326,11 @@ def generate_router_heatmap(token_scores, sel_idx, height, width):
     rgb_np = colored_np[..., :3] # (B, H, W, 3)
 
     mask = torch.zeros((B, total_tokens), dtype=torch.float32)
-    mask.scatter_(1, sel_idx.long(), 1.0)
+    if sel_idx.max() < total_tokens:
+        mask.scatter_(1, sel_idx.long(), 1.0)
+    
     mask_map = mask.reshape(B, height, width).numpy() # (B, H, W)
     mask_expanded = mask_map[..., None]
-
 
     masked_rgb_np = rgb_np * mask_expanded
 

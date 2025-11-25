@@ -158,18 +158,11 @@ class DiffusionModelTrainer:
         self._print_setup_summary()
 
     def _scale_steps(self, steps: int) -> int:
-        """
-        Helper method to scale a step count by the number of DDP processes.
-        Ensures the result is at least 1.
-        """
         if steps <= 0:
             return steps
         return max(1, steps // self.accelerator.num_processes)
 
     def _setup_scaled_steps(self):
-        """
-        Pre-calculates all step counts scaled by the number of processes.
-        """
         config = self.config
 
         self.processed_stage_schedule = []
@@ -482,14 +475,15 @@ class DiffusionModelTrainer:
     def _setup_metric_manager(self):
         self.metric_grouping_rules = {
             "loss/losses_weighted": [
-                "loss/ratio/ratio_loss",
+                "loss/adaptive_ratio/ratio_loss",
+                "loss/context_ratio/ratio_loss", 
                 "loss/gater/gate_loss",
                 "loss/diffcr_loss",
             ],
             "loss/losses_raw": [
-                "loss/ratio/floor_loss",
-                "loss/ratio/mse_loss",
-                "loss/ratio/budget_loss",
+                "loss/adaptive_ratio/floor_loss",
+                "loss/adaptive_ratio/mse_loss",
+                "loss/adaptive_ratio/budget_loss",
                 "loss/gater/gate_loss_raw",
             ],
             "router/scores": [
@@ -507,6 +501,10 @@ class DiffusionModelTrainer:
                 "adaptive_ratio/target_ratio",
                 "adaptive_ratio/avg_ratio",
             ],
+            "context_ratio": [ 
+                "context/ratio/avg_ratio",
+                "context/ratio/target_ratio",
+            ],
             "adaptive_fuse_prob": [
                 "adaptive_fuse_prob/avg_fuse_prob",
             ],
@@ -523,26 +521,17 @@ class DiffusionModelTrainer:
                 "topkgrads/soft_ranks_min",
                 "topkgrads/soft_ranks_max",
             ],
-            "topkgrads/soft_ranks_distribution": [
-                "topkgrads/soft_ranks_std",
-            ],
-            # "topkgrads/z_stats": [
-            #     "topkgrads/z_std",
-            #     "topkgrads/z_mean",
-            # ],
             "topkgrads/grad_probs": [
                 "topkgrads/grad_probs_norm",
                 "topkgrads/grad_probs_sum",
                 "topkgrads/grad_probs_std",
             ],
-            # "topkgrads/sigmoid_prime": [
-            #     "topkgrads/sigmoid_prime_mean",
-            #     "topkgrads/sigmoid_prime_std",
-            # ],
             "topkgrads/module": [
                 "topkgrads/router_avg_norm",
                 "topkgrads/gater_policy_avg_norm",
-                "topkgrads/ratio_policy_avg_norm",
+                "topkgrads/image_ratio_policy_avg_norm",
+                "topkgrads/context_ratio_policy_avg_norm",
+                "topkgrads/context_pruner_avg_norm",
             ],
 
             "diffcr/stats": [
@@ -629,46 +618,43 @@ class DiffusionModelTrainer:
 
         lora_params = []
         gate_policy_params = []
-        ratio_policy_params = []
+        image_ratio_policy_params = []
+        context_ratio_policy_params = []
         context_pruner_params = []
-        fuser_params = []
         other_model_params = []
 
-        gate_policy_modules = []
-        ratio_policy_modules = []
-        context_pruner_modules = []
-        for hook in HookManager.get_all_hooks().values():
-            if hasattr(hook, "gater_policy"):
-                gate_policy_modules.append(hook.gater_policy)
-            if hasattr(hook, "ratio_policy"):
-                ratio_policy_modules.append(hook.ratio_policy)
-            if hasattr(hook, "context_pruner") and isinstance(hook.context_pruner, nn.Module):
-                context_pruner_modules.append(hook.context_pruner)
-
         gate_policy_param_ids = set()
-        ratio_policy_param_ids = set()
+        image_ratio_policy_param_ids = set()
+        context_ratio_policy_param_ids = set()
         context_pruner_param_ids = set()
-        for mod in gate_policy_modules:
-            for param in mod.parameters():
-                gate_policy_param_ids.add(id(param))
-        for mod in ratio_policy_modules:
-            for param in mod.parameters():
-                ratio_policy_param_ids.add(id(param))
-        for mod in context_pruner_modules:
-            for param in mod.parameters():
-                context_pruner_param_ids.add(id(param))
+
+        # Identify parameters belonging to specific modules
+        for hook in HookManager.get_all_hooks().values():
+            if hasattr(hook, "gater_policy") and hook.gater_policy is not None:
+                for param in hook.gater_policy.parameters():
+                    gate_policy_param_ids.add(id(param))
+            if hasattr(hook, "image_ratio_policy") and hook.image_ratio_policy is not None:
+                for param in hook.image_ratio_policy.parameters():
+                    image_ratio_policy_param_ids.add(id(param))
+            if hasattr(hook, "context_ratio_policy") and hook.context_ratio_policy is not None:
+                for param in hook.context_ratio_policy.parameters():
+                    context_ratio_policy_param_ids.add(id(param))
+            if hasattr(hook, "context_pruner") and isinstance(hook.context_pruner, nn.Module):
+                for param in hook.context_pruner.parameters():
+                    context_pruner_param_ids.add(id(param))
 
         for name, param in self.model.named_parameters():
             if not param.requires_grad:
                 continue
 
-            if "fuse_expert" in name:
-                fuser_params.append(param)
-            elif id(param) in gate_policy_param_ids:
+            pid = id(param)
+            if pid in gate_policy_param_ids:
                 gate_policy_params.append(param)
-            elif id(param) in ratio_policy_param_ids:
-                ratio_policy_params.append(param)
-            elif id(param) in context_pruner_param_ids:
+            elif pid in image_ratio_policy_param_ids:
+                image_ratio_policy_params.append(param)
+            elif pid in context_ratio_policy_param_ids:
+                context_ratio_policy_params.append(param)
+            elif pid in context_pruner_param_ids:
                 context_pruner_params.append(param)
             elif "lora" in name:
                 lora_params.append(param)
@@ -679,10 +665,13 @@ class DiffusionModelTrainer:
 
         if self.accelerator.is_main_process:
             print(f"Optimizing {len(lora_params)} LoRA params")
-            print(f"Optimizing {len(gate_policy_params)}, {len(ratio_policy_params)} Policy params")
-            print(f"Optimizing {len(fuser_params)} Fuser params")
+            print(f"Optimizing {len(gate_policy_params)} Gate params")
+            print(f"Optimizing {len(image_ratio_policy_params)} Image Ratio params")
+            print(f"Optimizing {len(context_ratio_policy_params)} Context Ratio params")
+            print(f"Optimizing {len(context_pruner_params)} Context Pruner params")
             print(f"Optimizing {len(base_lr_params)} other params")
 
+        # Define explicit groups
         optimizer_grouped_parameters = [
             {
                 "params": lora_params,
@@ -697,22 +686,22 @@ class DiffusionModelTrainer:
                 "name": "gate_policy"
             },
             {
-                "params": ratio_policy_params,
+                "params": image_ratio_policy_params,
                 "lr": self.config.policy_learning_rate,
                 "weight_decay": 0.0,
-                "name": "ratio_policy"
+                "name": "image_ratio_policy"
+            },
+            {
+                "params": context_ratio_policy_params,
+                "lr": self.config.policy_learning_rate,
+                "weight_decay": 0.0,
+                "name": "context_ratio_policy"
             },
             {
                 "params": context_pruner_params,
                 "lr": self.config.context_learning_rate, 
                 "weight_decay": 0.0,
                 "name": "context_pruner"
-            },
-            {
-                "params": fuser_params, 
-                "lr": 0.0, 
-                "weight_decay": 0.0, 
-                "name": "fuser"
             },
             {
                 "params": base_lr_params,
@@ -722,6 +711,7 @@ class DiffusionModelTrainer:
             },
         ]
 
+        # Filter out empty groups
         optimizer_grouped_parameters = [g for g in optimizer_grouped_parameters if g["params"]]
 
         if not optimizer_grouped_parameters:
@@ -732,7 +722,6 @@ class DiffusionModelTrainer:
                 optimizer_grouped_parameters,
             )
         else:
-            # TODO: add more optimizers if needed
             raise ValueError(f"Unknown optimizer: {self.config.optimizer}")
 
         return optimizer
@@ -813,7 +802,6 @@ class DiffusionModelTrainer:
         )
 
         # update global context
-        # TODO: support all attr in global_context
         patch_size = 2
         hidden_seq_height = noise.shape[2] // patch_size
         hidden_seq_width = noise.shape[3] // patch_size
@@ -949,23 +937,30 @@ class DiffusionModelTrainer:
 
         loss_config = self._get_shiva_loss_config(global_step)
 
+        # 1. Gate Loss
         gate_loss, g_metrics = shiva_metrics.calculate_gate_loss(
             loss_config, self.device
         )
-        ratio_loss, r_metrics, per_layer_ratios = (
-            shiva_metrics.calculate_ratio_loss(loss_config, self.device, timestep=timestep)
+        
+        # 2. Image Ratio Loss
+        img_ratio_loss, img_r_metrics, per_layer_ratios = (
+            shiva_metrics.calculate_image_ratio_loss(loss_config, self.device)
         )
+        
+        # 3. Context Ratio Loss
+        ctx_ratio_loss, ctx_r_metrics = shiva_metrics.calculate_context_ratio_loss(loss_config, self.device)
 
         context_stats = shiva_metrics.collect_context_stats(self.device)
         aggregated_metrics.update(context_stats)
 
-        total_hook_loss = gate_loss + ratio_loss
+        total_hook_loss = gate_loss + img_ratio_loss + ctx_ratio_loss
 
         aggregated_metrics.update(g_metrics)
-        aggregated_metrics.update(r_metrics)
+        aggregated_metrics.update(img_r_metrics)
+        aggregated_metrics.update(ctx_r_metrics)
 
         avg_fuse_prob, per_layer_probs = (
-            shiva_metrics.calculate_shiva_gate_prob(self.device)
+            shiva_metrics.collect_shiva_gate_prob(self.device)
         )
         aggregated_metrics["adaptive_fuse_prob/avg_fuse_prob"] = avg_fuse_prob
         self.step_per_layer_metrics.update(
@@ -1068,12 +1063,16 @@ class DiffusionModelTrainer:
         if current_lrs is None:
             return
 
-        # Mapping: config [Base, LoRA, Ratio, Gate, Fuser] -> optimizer groups
+        # Strict 6-item mapping as requested
+        # [Base, LoRA, Gate, ImageRatio, ContextRatio, ContextPruner]
+        # Fuser is optional/appended if exists, or uses Gate's LR if not specified explicitly in a 7th slot.
+        
         lr_base = current_lrs[0]
         lr_lora = current_lrs[1]
-        lr_ratio_policy = current_lrs[2]
-        lr_gate_policy = current_lrs[3]
-        lr_fuser = current_lrs[4]
+        lr_gate = current_lrs[2]
+        lr_img_ratio = current_lrs[3]
+        lr_ctx_ratio = current_lrs[4]
+        lr_ctx_pruner = current_lrs[5]
 
         for param_group in self.optimizer.param_groups:
             group_name = param_group.get("name", "")
@@ -1083,11 +1082,13 @@ class DiffusionModelTrainer:
             elif group_name == "lora":
                 param_group["lr"] = lr_lora
             elif group_name == "gate_policy":
-                param_group["lr"] = lr_gate_policy
-            elif group_name == "ratio_policy":
-                param_group["lr"] = lr_ratio_policy
-            elif group_name == "fuser":
-                param_group["lr"] = lr_fuser
+                param_group["lr"] = lr_gate
+            elif group_name == "image_ratio_policy":
+                param_group["lr"] = lr_img_ratio
+            elif group_name == "context_ratio_policy":
+                param_group["lr"] = lr_ctx_ratio
+            elif group_name == "context_pruner":
+                param_group["lr"] = lr_ctx_pruner
 
     def _update_temperature(self):
         current_Ts = None
@@ -1128,12 +1129,21 @@ class DiffusionModelTrainer:
         tk_val = torch.tensor(current_Tk, device=self.device, dtype=self.dtype)
 
         for hook in HookManager.get_all_hooks().values():
-            if hasattr(hook, "prune_expert"):
+            # Image Pruner Expert
+            if hasattr(hook, "prune_expert") and hook.prune_expert is not None:
                 if hasattr(hook.prune_expert, "Ts"):
                     hook.prune_expert.Ts = ts_val
                 if hasattr(hook.prune_expert, "Tk"):
                     hook.prune_expert.Tk = tk_val
-                break
+            
+            # Context Pruner
+            if hasattr(hook, "context_pruner") and hook.context_pruner is not None:
+                if hasattr(hook.context_pruner, "Ts"):
+                    hook.context_pruner.Ts = ts_val.float()
+                if hasattr(hook.context_pruner, "Tk"):
+                    hook.context_pruner.Tk = tk_val.float()
+
+            pass
 
     def _on_update_step_end(self, gathered_losses, progress_bar, batch=None):
         log_trigger = self.log_trigger
@@ -1169,25 +1179,28 @@ class DiffusionModelTrainer:
 
         metrics_to_log_tensors = self.step_metrics.copy()
 
-        current_base_lr = 0.0
-        current_lora_lr = 0.0
-        current_policy_lr = 0.0
-
-        if len(self.optimizer.param_groups) > 0:
-            current_lora_lr = self.optimizer.param_groups[0]['lr']
-        if len(self.optimizer.param_groups) > 1:
-            current_policy_lr = self.optimizer.param_groups[1]['lr']
-        if len(self.optimizer.param_groups) > 2:
-            current_base_lr = self.optimizer.param_groups[2]['lr']
+        # Extract LRs for logging
+        lrs_to_log = {}
+        for pg in self.optimizer.param_groups:
+            name = pg.get("name", "unknown")
+            lrs_to_log[f"train/lr_{name}"] = torch.tensor(pg["lr"], device=self.device)
+        
+        metrics_to_log_tensors.update(lrs_to_log)
 
         current_Ts = 0.0
         current_Tk = 0.0
         for hook in HookManager.get_all_hooks().values():
-            if hasattr(hook, "prune_expert"):
-                if hasattr(hook.prune_expert, "Ts"):
-                    current_Ts = hook.prune_expert.Ts.item()
-                if hasattr(hook.prune_expert, "Tk"):
-                    current_Tk = hook.prune_expert.Tk.item()
+            if hasattr(hook, "prune_expert") and hook.prune_expert:
+                current_Ts = hook.prune_expert.Ts.item()
+                current_Tk = hook.prune_expert.Tk.item()
+                break
+        
+        context_Ts = 0.0
+        context_Tk = 0.0
+        for hook in HookManager.get_all_hooks().values():
+            if hasattr(hook, "context_pruner") and hook.context_pruner:
+                context_Ts = hook.context_pruner.Ts.item()
+                context_Tk = hook.context_pruner.Tk.item()
                 break
 
         metrics_to_log_tensors.update({
@@ -1195,11 +1208,10 @@ class DiffusionModelTrainer:
             "train/main_loss": gathered_losses["main"],
             "train/extra_loss": gathered_losses["hook"],
             "train/distill_loss": gathered_losses["distill"],
-            "train/lr_base": torch.tensor(current_base_lr, device=self.device),
-            "train/lr_lora": torch.tensor(current_lora_lr, device=self.device),
-            "train/lr_policy": torch.tensor(current_policy_lr, device=self.device),
             "train/Ts": torch.tensor(current_Ts, device=self.device),
             "train/Tk": torch.tensor(current_Tk, device=self.device),
+            "train/context_Ts": torch.tensor(context_Ts, device=self.device),
+            "train/context_Tk": torch.tensor(context_Tk, device=self.device),
         })
 
         if self.config.training_mode == 'lora':
@@ -1241,30 +1253,30 @@ class DiffusionModelTrainer:
 
         if self.hook_type == "shiva":
             shiva_grad_metrics = {}
-            router_grad_norms = []
-            gater_policy_grad_norms = []
-            ratio_policy_grad_norms = []
+            # Helper to collect grads
+            grads_router = []
+            grads_gate = []
+            grads_img_ratio = []
+            grads_ctx_ratio = []
+            grads_ctx_pruner = []
 
             unwrapped_model = self.accelerator.unwrap_model(self.model)
             for name, param in unwrapped_model.named_parameters():
                 if param.grad is None:
                     continue
+                gn = torch.norm(param.grad.detach())
+                
+                if "router." in name: grads_router.append(gn)
+                elif "gater_policy." in name: grads_gate.append(gn)
+                elif "image_ratio_policy." in name: grads_img_ratio.append(gn)
+                elif "context_ratio_policy." in name: grads_ctx_ratio.append(gn)
+                elif "context_pruner." in name: grads_ctx_pruner.append(gn)
 
-                grad_norm_tensor = torch.norm(param.grad.detach())
-
-                if "router." in name:
-                    router_grad_norms.append(grad_norm_tensor)
-                elif "gater_policy." in name:
-                    gater_policy_grad_norms.append(grad_norm_tensor)
-                elif "ratio_policy." in name:
-                    ratio_policy_grad_norms.append(grad_norm_tensor)
-
-            if router_grad_norms:
-                shiva_grad_metrics["topkgrads/router_avg_norm"] = torch.stack(router_grad_norms).mean()
-            if gater_policy_grad_norms:
-                shiva_grad_metrics["topkgrads/gater_policy_avg_norm"] = torch.stack(gater_policy_grad_norms).mean()
-            if ratio_policy_grad_norms:
-                shiva_grad_metrics["topkgrads/ratio_policy_avg_norm"] = torch.stack(ratio_policy_grad_norms).mean()
+            if grads_router: shiva_grad_metrics["topkgrads/router_avg_norm"] = torch.stack(grads_router).mean()
+            if grads_gate: shiva_grad_metrics["topkgrads/gater_policy_avg_norm"] = torch.stack(grads_gate).mean()
+            if grads_img_ratio: shiva_grad_metrics["topkgrads/image_ratio_policy_avg_norm"] = torch.stack(grads_img_ratio).mean()
+            if grads_ctx_ratio: shiva_grad_metrics["topkgrads/context_ratio_policy_avg_norm"] = torch.stack(grads_ctx_ratio).mean()
+            if grads_ctx_pruner: shiva_grad_metrics["topkgrads/context_pruner_avg_norm"] = torch.stack(grads_ctx_pruner).mean()
 
             metrics_to_log_tensors.update(shiva_grad_metrics)
 
@@ -1316,13 +1328,14 @@ class DiffusionModelTrainer:
                     "loss": f"{self.metric_manager.get_metric('train/total_loss'):.4f}",
                     "main_loss": f"{self.metric_manager.get_metric('train/main_loss'):.4f}",
                     "extra_loss": f"{self.metric_manager.get_metric('train/extra_loss'):.4f}",
-                    "distill_loss": f"{self.metric_manager.get_metric('train/distill_loss'):.4f}",
-                    "lr": f"[base: {self.metric_manager.get_metric('train/lr_base'):.2e}, lora: {self.metric_manager.get_metric('train/lr_lora'):.2e}, policy: {self.metric_manager.get_metric('train/lr_policy'):.2e}]",
                     "step": self.global_step,
                 }
 
                 if self.hook_type == "shiva":
-                    postfix_dict["ratio_loss"] = f"{self.metric_manager.get_metric('loss/ratio/ratio_loss', 0.0):.4f}"
+                    # Use get_metric with default 0.0 to avoid errors if mode is off
+                    img_rl = self.metric_manager.get_metric('loss/adaptive_ratio/ratio_loss', 0.0)
+                    ctx_rl = self.metric_manager.get_metric('loss/context_ratio/ratio_loss', 0.0)
+                    postfix_dict["r_loss"] = f"I:{img_rl:.3f}/C:{ctx_rl:.3f}"
 
                 progress_bar.set_postfix(postfix_dict)
                 self._log_router_visualization(batch=batch)
@@ -1348,7 +1361,16 @@ class DiffusionModelTrainer:
         if not hooks:
             return
 
-        ratio_policy = getattr(hooks[0], "ratio_policy", None)
+        # Try to visualize Image Policy first, then Context Policy
+        policy = getattr(hooks[0], "image_ratio_policy", None)
+        policy_name = "image_ratio"
+        if policy is None:
+            policy = getattr(hooks[0], "context_ratio_policy", None)
+            policy_name = "context_ratio"
+        
+        if policy is None:
+            return
+
         total_layers = getattr(hooks[0], "total_layers", 1)
 
         steps = 50
@@ -1356,28 +1378,27 @@ class DiffusionModelTrainer:
         l_values = torch.arange(total_layers, device=self.device, dtype=t_values.dtype)
         t_grid, l_grid = torch.meshgrid(t_values, l_values, indexing='ij') 
         
-        t_flat = t_grid.reshape(-1, 1) # (T*L, 1)
-        l_flat = l_grid.reshape(-1)    # (T*L,)
+        t_flat = t_grid.reshape(-1, 1) 
+        l_flat = l_grid.reshape(-1)    
         
-        if ratio_policy is not None:
-            with torch.no_grad():
-                model_params = next(ratio_policy.parameters(), None)
-                if model_params is not None:
-                    target_dtype = model_params.dtype
-                    t_flat = t_flat.to(dtype=target_dtype)
+        with torch.no_grad():
+            model_params = next(policy.parameters(), None)
+            if model_params is not None:
+                target_dtype = model_params.dtype
+                t_flat = t_flat.to(dtype=target_dtype)
 
-                logits = ratio_policy(t_flat, l_flat.long())
-                ratios = torch.sigmoid(logits).reshape(steps, total_layers).float().cpu().numpy()
-            
-            fig, ax = plt.subplots(figsize=(8, 6))
-            cax = ax.imshow(ratios, aspect='auto', origin='lower', extent=[0, total_layers, 0, 1], vmin=0, vmax=1, cmap='viridis')
-            ax.set_xlabel('Layer Index')
-            ax.set_ylabel('Timestep (0.0 -> 1.0)')
-            ax.set_title('Adaptive Ratio Policy Landscape')
-            fig.colorbar(cax, ax=ax, label='Keep Ratio')
-            
-            self.logger.log_figure("policy_viz/ratio_landscape", fig, self.global_step)
-            plt.close(fig)
+            logits = policy(t_flat, l_flat.long())
+            ratios = torch.sigmoid(logits).reshape(steps, total_layers).float().cpu().numpy()
+        
+        fig, ax = plt.subplots(figsize=(8, 6))
+        cax = ax.imshow(ratios, aspect='auto', origin='lower', extent=[0, total_layers, 0, 1], vmin=0, vmax=1, cmap='viridis')
+        ax.set_xlabel('Layer Index')
+        ax.set_ylabel('Timestep (0.0 -> 1.0)')
+        ax.set_title(f'Adaptive {policy_name.title()} Policy Landscape')
+        fig.colorbar(cax, ax=ax, label='Keep Ratio')
+        
+        self.logger.log_figure(f"policy_viz/{policy_name}_landscape", fig, self.global_step)
+        plt.close(fig)
 
     def _log_router_visualization(self, batch=None):
         if not self.accelerator.is_main_process:
@@ -1664,9 +1685,11 @@ class DiffusionModelTrainer:
                 val_metrics_to_log = {}
                 if all_hook_metrics:
                     keys_to_log = [
-                        "loss/ratio/ratio_loss",
+                        "loss/adaptive_ratio/ratio_loss",
+                        "loss/context_ratio/ratio_loss",
                         "loss/gater/gate_loss",
                         "adaptive_ratio/avg_ratio",
+                        "context/ratio/avg_ratio",
                         "adaptive_fuse_prob/avg_fuse_prob"
                     ]
 
@@ -1679,12 +1702,7 @@ class DiffusionModelTrainer:
                             except Exception:
                                 pass
                     val_metrics_to_log.update(avg_hook_metrics)
-                if "validation/adaptive_ratio/avg_ratio" in val_metrics_to_log:
-                    print(f"  Avg Ratio (Val): {val_metrics_to_log['validation/adaptive_ratio/avg_ratio']:.4f}")
-                if "validation/adaptive_fuse_prob/avg_fuse_prob" in val_metrics_to_log:
-                    print(f"  Avg Fuse Prob (Val): {val_metrics_to_log['validation/adaptive_fuse_prob/avg_fuse_prob']:.4f}")
-                print(f"--------------------------------------")
-
+                
                 self.logger.log_scalars(
                     {
                         "validation/total_loss": avg_val_loss,
@@ -1928,12 +1946,14 @@ class DiffusionModelTrainer:
                     t_val_Ts = torch.tensor(saved_Ts, device=self.device, dtype=self.dtype)
                     t_val_Tk = torch.tensor(saved_Tk, device=self.device, dtype=self.dtype)
                     for hook in HookManager.get_all_hooks().values():
-                        if hasattr(hook, "prune_expert"):
-                            if hasattr(hook.prune_expert, "Ts"):
-                                hook.prune_expert.Ts = t_val_Ts
-                            if hasattr(hook.prune_expert, "Tk"):
-                                hook.prune_expert.Tk = t_val_Tk
-                            break
+                        if hasattr(hook, "prune_expert") and hook.prune_expert:
+                            hook.prune_expert.Ts = t_val_Ts
+                            hook.prune_expert.Tk = t_val_Tk
+                        # Also update context pruner
+                        if hasattr(hook, "context_pruner") and hook.context_pruner:
+                            if hasattr(hook.context_pruner, "Ts"): hook.context_pruner.Ts = t_val_Ts.float()
+                            if hasattr(hook.context_pruner, "Tk"): hook.context_pruner.Tk = t_val_Tk.float()
+                        break
 
                 resumed = True
                 if self.accelerator.is_main_process:
@@ -2016,9 +2036,10 @@ class DiffusionModelTrainer:
                 if is_update_step or is_last_step:
                     if self.accelerator.sync_gradients:
                         self.accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
-                        policy_params = [p for n, p in self.model.named_parameters() if "policy" in n]
+                        # Optional: tighter clip for policies
+                        policy_params = [p for n, p in self.model.named_parameters() if "policy" in n or "pruner" in n]
                         if policy_params:
-                            self.accelerator.clip_grad_norm_(policy_params, 0.1)
+                            self.accelerator.clip_grad_norm_(policy_params, 0.5)
 
                     self.optimizer.step()
                     self.global_step += 1
@@ -2125,7 +2146,7 @@ class DiffusionModelTrainer:
             current_Ts = 0.0
             current_Tk = 0.0
             for hook in HookManager.get_all_hooks().values():
-                if hasattr(hook, "prune_expert"):
+                if hasattr(hook, "prune_expert") and hook.prune_expert:
                     current_Ts = hook.prune_expert.Ts.item()
                     current_Tk = hook.prune_expert.Tk.item()
                     break

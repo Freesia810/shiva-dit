@@ -20,26 +20,32 @@ def install_shiva_hooks(
     hook_cls_to_install: Type[ShivaDitBlockHook],
     **kwargs,
 ):
+    shiva_mode = kwargs.pop("shiva_mode", "image")  # "image", "context", "both"
+    
+    # Image Configs
+    image_ratio_mode = kwargs.pop("image_ratio_mode", "adaptive")
+    fixed_image_ratio = kwargs.pop("fixed_image_ratio", 0.5)
     bottleneck_dim = kwargs.pop("bottleneck_dim", 64)
     ratio_bottleneck_dim = kwargs.pop("ratio_bottleneck_dim", 32)
     num_router_groups = kwargs.pop("num_router_groups", 4)
     layer_embed_dim = kwargs.pop("layer_embed_dim", 256)
     fuse_expert_ffn_mult = kwargs.pop("fuse_expert_ffn_mult", 2)
-    context_pruning_ratio = kwargs.pop("context_pruning_ratio", 1.0)
+    
+    # Context Configs
+    context_ratio_mode = kwargs.pop("context_ratio_mode", "fixed")
+    fixed_context_ratio = kwargs.pop("fixed_context_ratio", 1.0)
+    proj_dim = kwargs.pop("proj_dim", 128)
+    
+    # Common Configs
     init_Ts = kwargs.pop("init_Ts", 30.0)
     init_Tk = kwargs.pop("init_Tk", 30.0)
-
-    # TODO:
-    proj_dim = kwargs.pop("proj_dim", 128)
 
     model_dim = global_context.hidden_dim
     prompt_embed_dim = global_context.encoder_hidden_dim
     if model_dim is None:
         raise ValueError("[ShivaInstaller] 'hidden_dim' not found in global_context.")
     if prompt_embed_dim is None:
-        raise ValueError(
-            "[ShivaInstaller] 'encoder_hidden_dim' not found in global_context."
-        )
+        raise ValueError("[ShivaInstaller] 'encoder_hidden_dim' not found in global_context.")
 
     time_embed_dim = model_dim
 
@@ -63,33 +69,39 @@ def install_shiva_hooks(
     except StopIteration:
         raise RuntimeError("Cannot infer device/dtype: First block has no parameters.")
 
-    print(
-        f"[ShivaInstaller] Found {num_layers} blocks. Instantiating shared modules..."
-    )
-    print(
-        f"  > model_dim: {model_dim}, prompt_embed_dim: {prompt_embed_dim}, layer_embed_dim: {layer_embed_dim}"
-    )
+    print(f"[ShivaInstaller] Found {num_layers} blocks. Mode: {shiva_mode}")
 
-    shared_layer_embedder = nn.Embedding(num_layers, layer_embed_dim).to(device, dtype)
-    shared_gater_policy = ShivaGaterPolicy(
-        time_embed_dim=time_embed_dim, layer_embed_dim=layer_embed_dim, bottleneck_dim=bottleneck_dim
-    ).to(device, dtype)
-    shared_ratio_policy = ShivaRatioPolicy(
-        total_layers=num_layers, ratio_bottleneck_dim=ratio_bottleneck_dim
-    ).to(device, dtype)
-    shared_context_pruner = ShivaContextPruner(
-        img_dim=model_dim,
-        txt_dim=prompt_embed_dim,
-        proj_dim=proj_dim,
-        init_Ts=init_Ts,
-        init_Tk=init_Tk,
-    ).to(device, torch.float32)
-    shared_pruner_expert = ShivaPrunerExpert(init_Ts=init_Ts, init_Tk=init_Tk).to(device, dtype)
-    shared_fuse_expert = ShivaFuserExpert(
-        hidden_dim=model_dim, ffn_mult=fuse_expert_ffn_mult
-    ).to(device, dtype)
-    grouped_routers = nn.ModuleList(
-        [
+    # --- 1. Image Pruning Modules ---
+    router_layer_embedder = None
+    shared_gater_policy = None
+    shared_image_ratio_policy = None
+    shared_pruner_expert = None
+    shared_fuse_expert = None
+    grouped_routers = None
+
+    if shiva_mode in ["image", "both"]:
+        print("  > Instantiating Image Pruning Modules...")
+        
+        router_layer_embedder = nn.Embedding(num_layers, layer_embed_dim).to(device, dtype)
+        
+        shared_gater_policy = ShivaGaterPolicy(
+            time_embed_dim=time_embed_dim, 
+            layer_embed_dim=layer_embed_dim, 
+            bottleneck_dim=bottleneck_dim,
+            num_layers=num_layers
+        ).to(device, dtype)
+        
+        if image_ratio_mode == "adaptive":
+            shared_image_ratio_policy = ShivaRatioPolicy(
+                total_layers=num_layers, ratio_bottleneck_dim=ratio_bottleneck_dim
+            ).to(device, dtype)
+        
+        shared_pruner_expert = ShivaPrunerExpert(init_Ts=init_Ts, init_Tk=init_Tk).to(device, dtype)
+        shared_fuse_expert = ShivaFuserExpert(
+            hidden_dim=model_dim, ffn_mult=fuse_expert_ffn_mult
+        ).to(device, dtype)
+        
+        grouped_routers = nn.ModuleList([
             ShivaRouter(
                 hidden_dim=model_dim,
                 time_embed_dim=time_embed_dim,
@@ -98,26 +110,54 @@ def install_shiva_hooks(
                 bottleneck_dim=bottleneck_dim,
             )
             for _ in range(num_router_groups)
-        ]
-    ).to(device, dtype)
+        ]).to(device, dtype)
 
-    layers_per_group = num_layers // num_router_groups
+    # --- 2. Context Pruning Modules ---
+    shared_context_pruner = None
+    shared_context_ratio_policy = None
+
+    if shiva_mode in ["context", "both"]:
+        print("  > Instantiating Context Pruning Modules...")
+        shared_context_pruner = ShivaContextPruner(
+            img_dim=model_dim,
+            txt_dim=prompt_embed_dim,
+            proj_dim=proj_dim,
+            init_Ts=init_Ts,
+            init_Tk=init_Tk,
+        ).to(device, torch.float32)
+
+        if context_ratio_mode == "adaptive":
+            shared_context_ratio_policy = ShivaRatioPolicy(
+                total_layers=num_layers, ratio_bottleneck_dim=ratio_bottleneck_dim
+            ).to(device, dtype)
+
+    layers_per_group = num_layers // num_router_groups if num_router_groups > 0 else num_layers
 
     injected = 0
     for i, (hook_name, module) in enumerate(all_blocks):
-        router_group_id = min(i // layers_per_group, num_router_groups - 1)
-        injected_router = grouped_routers[router_group_id]
+        injected_router = None
+        if grouped_routers is not None:
+            router_group_id = min(i // layers_per_group, num_router_groups - 1)
+            injected_router = grouped_routers[router_group_id]
 
         hook_kwargs = {
-            "shared_layer_embedder": shared_layer_embedder,
+            "shiva_mode": shiva_mode,
+            "total_layers": num_layers,
+            
+            # Image Modules & Embeddings
+            "router_layer_embedder": router_layer_embedder,
             "shared_router": injected_router,
             "shared_gater_policy": shared_gater_policy,
-            "shared_ratio_policy": shared_ratio_policy,
+            "shared_image_ratio_policy": shared_image_ratio_policy,
             "shared_pruner": shared_pruner_expert,
-            "shared_context_pruner": shared_context_pruner,
             "shared_fuse_expert": shared_fuse_expert,
-            "total_layers": num_layers,
-            "context_pruning_ratio": context_pruning_ratio,
+            "fixed_image_ratio": fixed_image_ratio,
+            
+            # Context Modules
+            "shared_context_pruner": shared_context_pruner,
+            "shared_context_ratio_policy": shared_context_ratio_policy,
+            "fixed_context_ratio": fixed_context_ratio,
+            
             **kwargs,
         }
 
@@ -126,17 +166,13 @@ def install_shiva_hooks(
         if hasattr(module, "register_hook"):
             module.register_hook(hook_name, hook)
         else:
-            raise RuntimeError(
-                f"Module '{hook_name}' does not support hook registration."
-            )
+            raise RuntimeError(f"Module '{hook_name}' does not support hook registration.")
 
         hook_manager_cls._hook_map[hook_name] = hook
         hook_manager_cls._weak_blocks[hook_name] = module
         injected += 1
 
-    print(
-        f"[ShivaInstaller] Injected {injected} shared hooks (using {num_router_groups} router groups)."
-    )
+    print(f"[ShivaInstaller] Injected {injected} shared hooks.")
 
 if __name__ == "__main__":
     from shiva_dit.utils import get_pipeline, process_quick_start

@@ -3,14 +3,19 @@ from shiva_dit.shiva_hook import ShivaDitBlockHook
 
 HookType = ShivaDitBlockHook
 hook_config = {
+    # --- Mode Selection ---
+    "shiva_mode": "image",
+
+    # --- Image Configs ---
+    "image_ratio_mode": "adaptive",
     "num_router_groups": 19,
     "bottleneck_dim": 512,
     "ratio_bottleneck_dim": 32,
     "layer_embed_dim": 256,
     "fuse_expert_ffn_mult": 2,
     "use_gater_lut": False,
-    "context_pruning_threshold": None,
-    "context_pruning_ratio": None,
+
+    # --- Common ---
     "init_Ts": 10.0,
     "init_Tk": 10.0,
 }
@@ -45,19 +50,14 @@ trainer_config = {
     "num_epochs": 50,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16, # 1750 steps * 16 = 28000 images (approx 1 epoch)
-    
-    "learning_rate": 1e-5,
-    "lora_learning_rate": 1e-4,
-    "policy_learning_rate": 1e-5,
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
-    "lr_scheduler": "cosine",
+
     "distillation_final_weight": 1.0, 
     "distillation_middle_weight": 0.0,
-    "scheduler_num_warmup_steps": 0,
+
     "seed": 42,
     "logging_steps": 20,
-    
     # 1 epoch = 1750 steps
     "save_steps": 1750,
     "save_best": True,
@@ -77,19 +77,20 @@ trainer_config = {
 
     "extra_config": {
         "target_ratio": 0.8,
+        # LR Order: [Base, LoRA, Gate, ImageRatio, ContextRatio, ContextPruner]
         "stage_schedule": [
             # Stage 1: Warmup (1 epoch)
             {
                 "steps": 1750, 
                 "weights": {"ratio": [0.0, 0.0, 0.0], "gate": 0.0, "distill": [0.0, 0.0]},
-                "lr": [1e-5, 1e-4, 0.0, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
+                "lr": [1e-5, 1e-4, 0.0, 0.0, 0.0, 0.0],
                 "temp": [5.0, 5.0, 2.0, 2.0],
             },
             # Stage 2: Warmup Cont. (2 epochs)
             {
                 "steps": 3500, 
                 "weights": {"ratio": [0.0, 0.0, 0.0], "gate": 0.0, "distill": [0.0, 0.0]},
-                "lr": [1e-5, 1e-5, 0.0, 0.0, 0.0], # [Base, LoRA, Ratio, Gate, Fuser]
+                "lr": [1e-5, 1e-5, 0.0, 0.0, 0.0, 0.0],
                 "temp": [5.0, 5.0, 2.0, 2.0],
             },
             # --------------------------------------------------
@@ -97,37 +98,23 @@ trainer_config = {
             {
                 "steps": 7000, 
                 "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0, "distill": [1.0, 0.0]},
-                "lr": [0.0, 1e-4, 5e-4, 0.0, 0.0], # [Base, LoRA, Ratio, Gate, Fuser]
+                "lr": [0.0, 1e-4, 0.0, 5e-4, 0.0, 0.0],
                 "temp": [5.0, 10.0, 2.0, 10.0],
             },
             # Stage 4: Finetune Model (8 epochs)
             {
                 "steps": 14000, 
                 "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0, "distill": [1.0, 0.0]},
-                "lr": [0.0, 1e-5, 1e-5, 0.0, 0.0], # [Base, LoRA, Ratio, Gate, Fuser]
+                "lr": [0.0, 1e-5, 0.0, 1e-5, 0.0, 0.0],
                 "temp": [10.0, 10.0, 10.0, 50.0],
             },
             # Stage 5: Finetune with High Temp (6 epochs)
             {
                 "steps": -1, 
                 "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0, "distill": [1.0, 0.0]},
-                "lr": [0.0, 1e-5, 1e-5, 0.0, 0.0], # [Base, LoRA, Ratio, Gate, Fuser]
+                "lr": [0.0, 1e-5, 0.0, 1e-5, 0.0, 0.0],
                 "temp": [10.0, 10.0, 50.0, 50.0],
             },
-            # # Stage 6: Train Gate (4 epochs)
-            # {
-            #     "steps": 7000, 
-            #     "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.1, "distill": [1.0, 0.0]},
-            #     "lr": [0.0, 0.0, 0.0, 1e-4, 2e-4], # [Base, LoRA, Ratio, Gate, Fuser]
-            #     "temp": [10.0, 10.0, 50.0, 50.0],
-            # },
-            # # Final Stage
-            # {
-            #     "steps": -1,
-            #     "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.1, "distill": [1.0, 0.0]},
-            #     "lr": [0.0, 1e-5, 1e-5, 1e-5, 1e-5], # [Base, LoRA, Ratio, Gate, Fuser]
-            #     "temp": [10.0, 10.0, 50.0, 50.0],
-            # },
         ],
     },
     "log_with_tensorboard": True,

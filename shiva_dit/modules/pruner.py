@@ -5,20 +5,14 @@ import torch.nn.utils.parametrizations as parametrizations
 
 from shiva_dit.utils.ste import ShivaTopkFunc
 
-
 class ShivaPrunerExpert(torch.nn.Module):
     def __init__(self, init_Ts, init_Tk):
         super().__init__()
-
         self.register_buffer("Ts", torch.tensor(float(init_Ts)), persistent=False)
         self.register_buffer("Tk", torch.tensor(float(init_Tk)), persistent=False)
 
     def forward(self, x, logits, k):
-        """
-        support both training and eval
-        """
         return ShivaTopkFunc.apply(x, logits, k, self.Ts, self.Tk)
-
 
 class ShivaContextPruner(nn.Module):
     def __init__(self, img_dim, txt_dim, proj_dim, init_Ts, init_Tk):
@@ -29,7 +23,8 @@ class ShivaContextPruner(nn.Module):
         parametrizations.orthogonal(self.q_proj, "weight")
         parametrizations.orthogonal(self.k_proj, "weight")
 
-        self.ste = ShivaPrunerExpert(init_Ts, init_Tk)
+        self.register_buffer("Ts", torch.tensor(float(init_Ts)), persistent=False)
+        self.register_buffer("Tk", torch.tensor(float(init_Tk)), persistent=False)
 
         self.scale = proj_dim ** -0.5
 
@@ -54,6 +49,6 @@ class ShivaContextPruner(nn.Module):
         else:
             k = k.to(dtype=torch.float32)
 
-        x_sel, x_rej, sel_idx, rej_idx = self.ste(e_in, scores, k)
+        x_sel, x_rej, sel_idx, rej_idx = ShivaTopkFunc.apply(e_in, scores, k, self.Ts, self.Tk)
 
         return x_sel.to(original_dtype), x_rej.to(original_dtype), sel_idx, rej_idx

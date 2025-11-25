@@ -2,23 +2,30 @@ import torch
 import torch.nn as nn
 
 class ShivaGaterPolicy(nn.Module):
-    def __init__(self, time_embed_dim: int, layer_embed_dim: int, bottleneck_dim: int):
+    def __init__(self, time_embed_dim, layer_embed_dim, bottleneck_dim, num_layers):
         super().__init__()
-        fused_dim = time_embed_dim + layer_embed_dim
-        self.net = nn.Sequential(
-            nn.Linear(fused_dim, bottleneck_dim),
-            nn.SiLU(),
-            nn.Linear(bottleneck_dim, 2),  # 2-way Logits: [Prune, Fuse]
-        )
+        self.layer_embedder = nn.Embedding(num_layers, layer_embed_dim)
+        
+        self.in_layer = nn.Linear(time_embed_dim + layer_embed_dim, bottleneck_dim)
+        self.out_layer = nn.Linear(bottleneck_dim, 2)  # [Keep, Fuse]
+        self.act = nn.SiLU()
 
-        nn.init.constant_(self.net[-1].bias, 0.0)
+        nn.init.constant_(self.out_layer.bias, 0.0)
         with torch.no_grad():
-            self.net[-1].bias[0] = 3.0   # Prune Logit
-            self.net[-1].bias[1] = 0.0  # Fuse Logit
+            self.out_layer.bias[0] = 3.0   # Prune Logit
+            self.out_layer.bias[1] = 0.0  # Fuse Logit
 
-    def forward(self, temb: torch.Tensor, layer_emb: torch.Tensor) -> torch.Tensor:
-        fused_input = torch.cat([temb, layer_emb], dim=-1)
-        return self.net(fused_input)
+    def forward(self, temb, layer_idx_tensor):
+        # temb: (B, D)
+        # layer_idx: (B,)
+        
+        layer_emb = self.layer_embedder(layer_idx_tensor) # (B, layer_dim)
+
+        x = torch.cat([temb, layer_emb], dim=-1)
+        x = self.in_layer(x)
+        x = self.act(x)
+        logits = self.out_layer(x)
+        return logits
 
 
 class ShivaRatioPolicy(nn.Module):

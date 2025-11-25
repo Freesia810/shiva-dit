@@ -59,8 +59,6 @@ class TrainerConfig:
     )
     optimizer: str = "AdamW" # "Adam", "AdamW", "SGD"
     weight_decay: float = 1e-2
-    lr_scheduler: str = "cosine" # "linear", "cosine", "constant"
-    scheduler_num_warmup_steps: int = None
 
     seed: int = 42
     logging_steps: int = 50
