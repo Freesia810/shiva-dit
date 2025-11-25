@@ -63,6 +63,6 @@ class ShivaContextPruner(nn.Module):
             k = k.to(dtype=torch.float32)
 
         # 7. STE 选择
-        x_sel, _, sel_idx, _ = self.ste(e_in, scores, k)
+        x_sel, x_rej, sel_idx, rej_idx = self.ste(e_in, scores, k)
 
-        return x_sel.to(original_dtype), sel_idx
+        return x_sel.to(original_dtype), x_rej.to(original_dtype), sel_idx, rej_idx

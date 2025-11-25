@@ -14,6 +14,7 @@ from tqdm import tqdm
 from accelerate import Accelerator
 from accelerate.utils import set_seed, DistributedDataParallelKwargs, broadcast_object_list
 from dataclasses import asdict
+from shiva_dit.utils.text_viz import render_token_importance
 
 try:
     from torchmetrics.multimodal.clip_score import CLIPScore
@@ -1326,6 +1327,7 @@ class DiffusionModelTrainer:
 
                 progress_bar.set_postfix(postfix_dict)
                 self._log_router_visualization(batch=batch)
+                self._log_context_visualization(batch=batch)
 
             self.metric_manager.log_step(self.global_step)
             if hasattr(self, "step_per_layer_metrics"):
@@ -1496,6 +1498,65 @@ class DiffusionModelTrainer:
 
                 target_hook.last_token_scores = None
                 target_hook.last_sel_idx = None
+
+    def _log_context_visualization(self, batch):
+        if not self.accelerator.is_main_process:
+            return
+        if batch is None:
+            return
+
+        input_ids = None
+        if "input_ids" in batch:
+            val = batch["input_ids"]
+            if isinstance(val, list) or isinstance(val, tuple):
+                input_ids = val[-1]
+            else:
+                input_ids = val
+        
+        if input_ids is None:
+            return
+
+        if isinstance(input_ids, torch.Tensor):
+            input_ids = input_ids[0].detach().cpu()
+        
+        tokenizer = self.tokenizers[-1]
+
+        try:
+            from shiva_dit.utils.text_viz import render_token_importance
+        except ImportError:
+            return
+
+        num_layers = global_context.num_layers
+        if global_context.num_single_layers is not None:
+            num_layers += global_context.num_single_layers
+        target_layers = range(num_layers)
+
+        from shiva_dit.hook import HookManager
+        all_hooks = HookManager.get_all_hooks()
+
+        for layer_idx in target_layers:
+            target_hook = None
+            for name, hook in all_hooks.items():
+                if hook.layer_idx == layer_idx and hasattr(hook, "last_context_mask"):
+                    target_hook = hook
+                    break
+            
+            if target_hook is not None and target_hook.last_context_mask is not None:
+                try:
+                    mask = target_hook.last_context_mask[0].cpu()
+                    viz_img = render_token_importance(
+                        tokenizer, 
+                        input_ids, 
+                        mask=mask,
+                        width=1000
+                    )
+                    
+                    self.logger.log_image(f"context_viz/layer_{layer_idx:02d}", viz_img, self.global_step)
+                
+                except Exception as e:
+                    print(f"Failed to log context viz for layer {layer_idx}: {e}")
+                finally:
+                    target_hook.last_context_mask = None
 
     def _log_trainable_parameters(self, description: str = ""):
         if not self.accelerator.is_main_process:

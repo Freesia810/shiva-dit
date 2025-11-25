@@ -72,26 +72,36 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             x_rej,
             remaining_x,
             sel_idx,
+            ctx_sel,
+            remaining_ctx,
+            sel_idx_ctx,
             sel_rope,
             pure_temb,
             layer_emb,
-            pruned_encoder_states,
+            pooled_encoder_states,
             N,
         ) = self._prepare_inputs(func, module_self, *args, **kwargs)
 
+        # 1. Spatial Pruning Forward (Image)
         if self.training:
             final_topk_states = self._forward_train(x_sel, x_rej, N)
         else:
             final_topk_states = self._forward_eval(x_sel, x_rej, pure_temb, layer_emb)
 
+        # 2. Context Pruning Forward (Text)
+        final_topk_context = ctx_sel
+
         processed_output = self._process_outputs(
             func,
             bound,
             final_topk_states,
+            final_topk_context,
             sel_rope,
-            pruned_encoder_states,
+            pooled_encoder_states,
             remaining_x,
             sel_idx,
+            remaining_ctx,
+            sel_idx_ctx,
         )
 
         return processed_output
@@ -113,14 +123,12 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         ## context pruning
         L = encoder_hidden_states.shape[1]
         k_ctx = int(max(1, L * self.context_pruning_ratio))
-        pruned_encoder_states, sel_idx_ctx = self.context_pruner(
-            hidden_states=hidden_states.detach().to(dtype), 
-            encoder_hidden_states=encoder_hidden_states.to(dtype),
-            k=k_ctx
+        ctx_sel, remaining_ctx, sel_idx_ctx = self._select_topk_context(
+            hidden_states.detach().to(dtype), 
+            encoder_hidden_states.to(dtype), 
+            k_ctx, D
         )
-        pooled_encoder_vector = pruned_encoder_states.mean(dim=1)
-        if hasattr(self.context_pruner, "last_scores"):
-            self.context_score_accumulator.append(self.context_pruner.last_scores.detach())
+        pooled_encoder_vector = ctx_sel.mean(dim=1)
 
         layer_id_tensor = torch.tensor(
             [self.layer_idx], device=pure_temb.device, dtype=torch.long
@@ -202,15 +210,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         return (
             bound,
-            x_sel,
-            x_rej,
-            remaining_x,
-            sel_idx,
-            sel_rope,
-            pure_temb,
-            layer_emb_vector,
-            pruned_encoder_states,
-            N,
+            x_sel, x_rej, remaining_x, sel_idx, # Image
+            ctx_sel, remaining_ctx, sel_idx_ctx, # Context
+            sel_rope, pure_temb, layer_emb_vector, pooled_encoder_vector, N,
         )
 
     def _forward_train(self, x_sel, x_rej, N):
@@ -269,18 +271,15 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         return final_topk_states
 
     def _process_outputs(
-        self,
-        func,
-        bound,
-        final_topk_states,
-        sel_rope,
-        pruned_encoder_states,
-        remaining_x,
-        sel_idx,
+        self, func, bound, 
+        final_topk_states, final_topk_context,
+        sel_rope, pooled_encoder_states, 
+        remaining_x, sel_idx, 
+        remaining_ctx, sel_idx_ctx
     ):
         bound.arguments["hidden_states"] = final_topk_states
         bound.arguments["image_rotary_emb"] = sel_rope
-        bound.arguments["encoder_hidden_states"] = pruned_encoder_states
+        bound.arguments["encoder_hidden_states"] = final_topk_context
 
         processed_output = func(*bound.args, **bound.kwargs)
 
@@ -293,8 +292,18 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             processed_hidden_states, remaining_x, sel_idx
         )
 
+        if processed_encoder_states is not None and sel_idx_ctx is not None:
+            B, k, D = processed_encoder_states.shape
+            final_encoder_states = remaining_ctx.scatter_add(
+                1,
+                sel_idx_ctx.unsqueeze(-1).expand(-1, -1, D),
+                processed_encoder_states,
+            )
+        else:
+            final_encoder_states = processed_encoder_states
+
         if isinstance(processed_output, tuple):
-            return processed_encoder_states, final_hidden_states
+            return final_encoder_states, final_hidden_states
         else:
             return final_hidden_states
 
@@ -317,6 +326,28 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         remaining_x = torch.zeros_like(x)
         remaining_x.scatter_(1, rej_idx.unsqueeze(-1).expand(-1, -1, C), x_rej)
         return x_sel, x_rej, remaining_x, sel_idx
+
+    def _select_topk_context(self, hidden_states, encoder_hidden_states, k, C):
+        ctx_sel, ctx_rej, sel_idx, rej_idx = self.context_pruner(
+            hidden_states=hidden_states, 
+            encoder_hidden_states=encoder_hidden_states, 
+            k=k
+        )
+
+        if getattr(self, "capture_mask_for_viz", False):
+            B, L, _ = encoder_hidden_states.shape
+            mask = torch.zeros((B, L), device=encoder_hidden_states.device)
+            mask.scatter_(1, sel_idx.long(), 1.0)
+            self.last_context_mask = mask.detach().cpu()
+            
+            if hasattr(self.context_pruner, "last_scores"):
+                self.context_score_accumulator.append(self.context_pruner.last_scores.detach())
+
+        B, L, D = encoder_hidden_states.shape
+        remaining_ctx = torch.zeros_like(encoder_hidden_states)
+        remaining_ctx.scatter_(1, rej_idx.unsqueeze(-1).expand(-1, -1, C), ctx_rej)
+        
+        return ctx_sel, remaining_ctx, sel_idx
 
     def _gather_rope(self, image_rotary_emb, survivors_indices, context_survivors_indices=None):
         if image_rotary_emb is not None:
