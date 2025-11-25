@@ -52,12 +52,12 @@ trainer_config = {
     "hook_only_steps": 100000,
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
+    "caption_dropout_rate": 0.0,
     
     "num_epochs": 200, 
     "train_batch_size": 1,
     "gradient_accumulation_steps": 1, 
     
-    # 学习率设置
     "learning_rate": 0.0,       # DiT 不训
     "lora_learning_rate": 0.0,  # LoRA 不训
     "policy_learning_rate": 0.0,
