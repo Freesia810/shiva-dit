@@ -502,11 +502,7 @@ class DiffusionModelTrainer:
             ],
             "router/distribution": [
                 "router/std_score",
-                # "router/s_scale_std",
             ],
-            # "router/s_scale": [
-            #     "router/s_scale_mean",
-            # ],
             "adaptive_ratio": [
                 "adaptive_ratio/target_ratio",
                 "adaptive_ratio/avg_ratio",
@@ -831,7 +827,7 @@ class DiffusionModelTrainer:
             w_final = dynamic_distill_weights.get("distill_final_weight", 0.0)
         else:
             w_final = self.config.distillation_final_weight
-        
+
         if self.teacher_model is not None and w_final > 0:
             # Teacher Forward
             teacher_kwargs = copy.deepcopy(model_kwargs)
@@ -843,7 +839,7 @@ class DiffusionModelTrainer:
                     **teacher_kwargs,
                 )
                 Y_s = teacher_output[0]
-            
+
             # Student Forward
             student_output = self.model(
                 hidden_states=noisy_latents,
@@ -962,42 +958,6 @@ class DiffusionModelTrainer:
             if hasattr(hook, "clear_accumulators"):
                 hook.clear_accumulators()
 
-        per_t_layer_ratios = [{} for _ in range(10)]
-        per_t_layer_fuse_probs = [{} for _ in range(10)]
-        per_timestep_avg_ratios = {}
-        per_timestep_fuse_probs = {}
-        try:
-            t_int = int(timestep[0].item())
-            t_group = min(t_int // 100, 9)
-
-            for layer_id, ratio_val in per_layer_ratios.items():
-                per_t_layer_ratios[t_group][layer_id] = ratio_val
-            for layer_id, prob_val in per_layer_probs.items():
-                per_t_layer_fuse_probs[t_group][layer_id] = prob_val
-
-            current_avg_ratio = r_metrics.get("adaptive_ratio/avg_ratio")
-            if current_avg_ratio is not None:
-                per_timestep_avg_ratios = {
-                    f"t_group_{t_group}": current_avg_ratio
-                }
-            current_fuse_probs = avg_fuse_prob
-            if current_fuse_probs is not None:
-                per_timestep_fuse_probs = {
-                    f"t_group_{t_group}": current_fuse_probs
-                }
-        except Exception:
-            pass
-        for i in range(10):
-            self.step_per_layer_metrics.update({
-                f"adaptive_ratio/t_group_{i}": per_t_layer_ratios[i],
-                # f"adaptive_fuse_prob/t_group_{i}": per_t_layer_fuse_probs[i],
-            })
-
-        self.step_per_layer_metrics.update({
-            "adaptive_ratio/per_timestep_ratios": per_timestep_avg_ratios,
-            "adaptive_fuse_prob/per_timestep_fuse_probs": per_timestep_fuse_probs,
-        })
-
         return total_hook_loss, aggregated_metrics
 
     def _compute_loss(self, batch, global_step: int):
@@ -1005,7 +965,10 @@ class DiffusionModelTrainer:
             self._prepare_model_inputs(batch)
         )
 
-        global_context.update(current_timestep=timesteps.to(self.device))
+        if self.model_type == "flux-dev" or self.model_type == "flux-kontext":
+            global_context.update(current_timestep=(timesteps * 1000).to(self.device))
+        else:
+            global_context.update(current_timestep=timesteps.to(self.device))
 
         noisy_latents = noisy_latents.to(self.dtype).detach()
 
@@ -1161,10 +1124,10 @@ class DiffusionModelTrainer:
                     metric_value=val_metric, 
                     higher_is_better=False
                 )
-        
+
         if inference_trigger and self.global_step % inference_trigger == 0:
             inf_metrics = self.run_inference_validation(self.global_step)
-            
+
             if self.config.save_best and inf_metrics:
                 for name, value in inf_metrics.items():
                     self.save_specific_best(
@@ -1343,23 +1306,129 @@ class DiffusionModelTrainer:
                     if value_dict:
                         self.logger.add_scalars(key, value_dict, self.global_step)
 
+    def _log_policy_visualization(self):
+        if not self.accelerator.is_main_process:
+            return
+
+        try:
+            import matplotlib.pyplot as plt
+        except ImportError:
+            return
+
+        from shiva_dit.hook import HookManager
+        hooks = list(HookManager.get_all_hooks().values())
+        if not hooks:
+            return
+
+        ratio_policy = getattr(hooks[0], "ratio_policy", None)
+        total_layers = getattr(hooks[0], "total_layers", 1)
+
+        steps = 50
+        t_values = torch.linspace(0, 1, steps, device=self.device) 
+        l_values = torch.arange(total_layers, device=self.device, dtype=t_values.dtype)
+        t_grid, l_grid = torch.meshgrid(t_values, l_values, indexing='ij') 
+        
+        t_flat = t_grid.reshape(-1, 1) # (T*L, 1)
+        l_flat = l_grid.reshape(-1)    # (T*L,)
+        
+        if ratio_policy is not None:
+            with torch.no_grad():
+                model_params = next(ratio_policy.parameters(), None)
+                if model_params is not None:
+                    target_dtype = model_params.dtype
+                    t_flat = t_flat.to(dtype=target_dtype)
+
+                logits = ratio_policy(t_flat, l_flat.long())
+                ratios = torch.sigmoid(logits).reshape(steps, total_layers).float().cpu().numpy()
+            
+            fig, ax = plt.subplots(figsize=(8, 6))
+            cax = ax.imshow(ratios, aspect='auto', origin='lower', extent=[0, total_layers, 0, 1], vmin=0, vmax=1, cmap='viridis')
+            ax.set_xlabel('Layer Index')
+            ax.set_ylabel('Timestep (0.0 -> 1.0)')
+            ax.set_title('Adaptive Ratio Policy Landscape')
+            fig.colorbar(cax, ax=ax, label='Keep Ratio')
+            
+            self.logger.log_figure("policy_viz/ratio_landscape", fig, self.global_step)
+            plt.close(fig)
+
     def _log_router_visualization(self, batch=None):
         if not self.accelerator.is_main_process:
             return
-        
+
         if batch is not None and "pixel_values" in batch:
             try:
                 import torchvision
+
+                try:
+                    import cv2
+                    import numpy as np
+                except ImportError:
+                    cv2 = None
+
                 images = batch["pixel_values"].detach().cpu().float()
-                
+
+                timesteps = global_context.current_timestep
+                if timesteps is not None:
+                    timesteps = timesteps.detach().cpu().flatten()
+
                 images = (images + 1.0) / 2.0
                 images = images.clamp(0.0, 1.0)
-                
+
+                annotated_images = []
+                for i in range(images.shape[0]):
+                    img_tensor = images[i]  # (C, H, W)
+
+                    if cv2 is not None and timesteps is not None and i < len(timesteps):
+                        # Tensor (C, H, W) -> Numpy (H, W, C)
+                        img_np = img_tensor.permute(1, 2, 0).numpy()
+                        img_np = (img_np * 255).astype(np.uint8)
+                        img_np = np.ascontiguousarray(img_np)
+
+                        t_val = timesteps[i].item()
+                        if t_val <= 1.0:
+                            text = f"t={t_val:.3f}"
+                        else:
+                            text = f"t={int(t_val)}"
+
+                        cv2.putText(
+                            img_np,
+                            text,
+                            (5, 20),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.6,
+                            (0, 0, 0),
+                            2,
+                        )
+                        cv2.putText(
+                            img_np,
+                            text,
+                            (5, 20),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.6,
+                            (255, 255, 255),
+                            1,
+                        )
+
+                        # Numpy (H, W, C) -> Tensor (C, H, W)
+                        img_tensor = (
+                            torch.from_numpy(img_np).permute(2, 0, 1).float() / 255.0
+                        )
+
+                    annotated_images.append(img_tensor)
+
+                if annotated_images:
+                    images = torch.stack(annotated_images)
+
                 grid_input = torchvision.utils.make_grid(
-                    images, nrow=images.shape[0], normalize=False, pad_value=1.0
+                    images,
+                    nrow=int(len(images) ** 0.5) or 1,
+                    normalize=False,
+                    pad_value=1.0,
                 )
-                
-                self.logger.log_image("router_viz/input_image", grid_input, self.global_step)
+
+                self.logger.log_image(
+                    "router_viz/input_image", grid_input, self.global_step
+                )
             except Exception as e:
                 print(f"Failed to log input image: {e}")
 
@@ -1542,15 +1611,13 @@ class DiffusionModelTrainer:
                 if val_metrics_to_log:
                     self.logger.log_scalars(val_metrics_to_log, step=global_step)
 
-                # if hasattr(self, "step_per_layer_metrics"):
-                #     for key, value_dict in self.step_per_layer_metrics.items():
-                #         if value_dict:
-                #             self.logger.add_scalars(f"validation/{key}", value_dict, global_step)
-
         elif self.accelerator.is_main_process:
             print(
                 f"Validation dataloader is empty or validation failed, skipping logging."
             )
+
+        if self.accelerator.is_main_process:
+            self._log_policy_visualization()
 
         self.model.train()
         if self.hook_type == "shiva":
@@ -1587,7 +1654,7 @@ class DiffusionModelTrainer:
         original_model_in_pipe = None
         original_scheduler = None
         model_attr_name = self.model_attrs[0]
-        
+
         inference_metrics = {}
         generated_images_tensors = [] 
         generated_images_pil = []     
@@ -1597,12 +1664,12 @@ class DiffusionModelTrainer:
             unwrapped_model = self.accelerator.unwrap_model(self.model)
             original_model_in_pipe = getattr(self.pipe, model_attr_name)
             setattr(self.pipe, model_attr_name, unwrapped_model)
-            
+
             inference_generator = torch.Generator(device=self.device).manual_seed(self.config.inference_seed)
             original_scheduler = copy.deepcopy(self.scheduler)
-            
+
             self.model.eval()
-            
+
             sample_dir = os.path.join(
                 self.config.output_dir,
                 self.config.inference_output_dir,
@@ -1615,7 +1682,7 @@ class DiffusionModelTrainer:
                     try:
                         if self.device.type == 'cuda':
                             torch.cuda.empty_cache()
-                        
+
                         with self.accelerator.autocast():
                             image = self.pipe(
                                 prompt=prompt,
@@ -1664,11 +1731,11 @@ class DiffusionModelTrainer:
                                 real_imgs = ((batch["pixel_values"].to(self.device) + 1) * 127.5).clamp(0, 255).to(dtype=torch.uint8)
                                 self.evaluators['kid'].update(real_imgs, real=True)
                             self.kid_stats_ready = True
-                        
+
                         self.evaluators['kid'].update(imgs_stack_uint8, real=False)
                         kid_mean, kid_std = self.evaluators['kid'].compute()
                         self.evaluators['kid'].reset()
-                        
+
                         inference_metrics['kid_mean'] = kid_mean.item()
                         print(f"  >> KID: {kid_mean.item():.5f} (±{kid_std.item():.5f})")
                     except Exception as e:
@@ -1943,7 +2010,7 @@ class DiffusionModelTrainer:
             return
 
         current_best = self.best_metrics_state.get(metric_name)
-        
+
         is_new_best = False
         if current_best is None:
             is_new_best = True

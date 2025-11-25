@@ -50,7 +50,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 f"ShivaDitBlockHook(layer_idx={self.layer_idx}): 'use_gater_lut' is True, "
                 "but 'shared_gater_cache' was not provided."
             )
-        
+
         self.total_layers = total_layers
 
         self.gate_loss_accumulator = []
@@ -121,10 +121,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         current_t = global_context.current_timestep
         if current_t is None:
             raise ValueError("global_context.current_timestep is None")
-        
+
         t_val = current_t.to(dtype)
-        if t_val.max() > 1.5:
-            t_val = t_val / 1000.0
+        t_val = t_val / 1000.0 # normalize
 
         if t_val.numel() == 1:
             t_scalar = t_val.view(1, 1).expand(B, 1)
@@ -170,7 +169,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         if token_scores_logits.shape[0] % 2 == 0 and token_scores_logits.shape[0] > 1:
             B_half = token_scores_logits.shape[0] // 2
-            
+
             scores_uncond, scores_cond = token_scores_logits.chunk(2, dim=0)
             unified_scores = torch.maximum(scores_uncond, scores_cond)
             token_scores_logits = torch.cat([unified_scores, unified_scores], dim=0)
@@ -292,6 +291,14 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             self.last_sel_idx = sel_idx.detach().cpu() # (B, k)
             self.last_token_scores = torch.sigmoid(token_scores_logits).detach().cpu() 
             self.last_total_tokens = x.shape[1]
+            current_t = global_context.current_timestep
+            if current_t is not None:
+                t_val = current_t.flatten()[0].item()
+                if t_val > 1.0:
+                    t_val /= 1000.0
+                self.last_t_val = t_val
+            else:
+                self.last_t_val = -1.0
 
         remaining_x = torch.zeros_like(x)
         remaining_x.scatter_(1, rej_idx.unsqueeze(-1).expand(-1, -1, C), x_rej)
