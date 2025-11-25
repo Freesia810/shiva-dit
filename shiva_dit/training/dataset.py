@@ -5,6 +5,15 @@ import os
 import json
 from diffusers.image_processor import VaeImageProcessor
 from diffusers.utils import load_image
+from PIL import Image
+
+try:
+    from datasets import load_dataset
+except ImportError:
+    load_dataset = None
+    print(
+        "Warning: 'datasets' library not found. HF dataset loading (hf://) will not work."
+    )
 
 try:
     from diffusers.pipelines.pixart_alpha.pipeline_pixart_alpha import (
@@ -28,12 +37,98 @@ class BaseItemProcessor:
         self.tokenizers = tokenizers
         self.image_processor = image_processor
         self.pipe = pipe
+        self.hf_datasets_cache = {}
+
+    def _load_image_entry(self, entry: Any) -> Image.Image:
+        """
+        Robust image loader supporting paths (rel/abs), URLs, HF URIs, and PIL Images.
+        HF URI format: hf://dataset_name/split/index/column_name
+        """
+        if isinstance(entry, Image.Image):
+            return entry
+
+        if isinstance(entry, str):
+            # 0. Check for HF Dataset URI
+            if entry.startswith("hf://"):
+                if load_dataset is None:
+                    raise ImportError(
+                        "The 'datasets' library is required to load 'hf://' URIs."
+                    )
+
+                # Parse URI: hf://dataset_name/split/index/column_name
+                # Example: hf://osu-nlp/MagicBrush/train/123/source_img
+                try:
+                    content = entry[5:]  # Strip 'hf://'
+                    parts = content.split("/")
+
+                    # We assume the last 3 parts are split/index/column
+                    # The rest at the beginning is the dataset name
+                    if len(parts) < 4:
+                        raise ValueError(f"Invalid HF URI format: {entry}")
+
+                    col_name = parts[-1]
+                    row_idx = int(parts[-2])
+                    split = parts[-3]
+                    dataset_name = "/".join(parts[:-3])
+
+                    # Cache key for the dataset split
+                    cache_key = f"{dataset_name}/{split}"
+
+                    if cache_key not in self.hf_datasets_cache:
+                        print(
+                            f"[Dataset] Loading HF dataset split into memory: {dataset_name} [{split}]..."
+                        )
+                        # Loading dataset with keep_in_memory=False by default (uses disk cache / mmap)
+                        self.hf_datasets_cache[cache_key] = load_dataset(
+                            dataset_name, split=split
+                        )
+
+                    dataset = self.hf_datasets_cache[cache_key]
+                    image = dataset[row_idx][col_name]
+
+                    if not isinstance(image, Image.Image):
+                        # In case the column is a path string, recursive load
+                        return self._load_image_entry(image)
+
+                    if image.mode != "RGB":
+                        image = image.convert("RGB")
+                    return image
+
+                except Exception as e:
+                    raise ValueError(f"Failed to load HF URI '{entry}': {e}")
+
+            # 1. Check if absolute path exists
+            if os.path.exists(entry):
+                return load_image(entry)
+
+            # 2. Check relative to image_dir
+            if self.image_dir:
+                full_path = os.path.join(self.image_dir, entry)
+                if os.path.exists(full_path):
+                    return load_image(full_path)
+
+                # Try looking in parent dir (common issue with dataset structures)
+                parent_path = os.path.join(os.path.dirname(self.image_dir), entry)
+                if os.path.exists(parent_path):
+                    return load_image(parent_path)
+
+            # 3. Try loading as URL or fallback (load_image handles URLs)
+            try:
+                return load_image(entry)
+            except Exception:
+                pass
+
+        raise FileNotFoundError(f"Could not load image from entry: {entry}")
 
     def _load_and_process_image(
         self, item: Dict[str, Any]
     ) -> Tuple[torch.Tensor, Tuple[int, int]]:
-        image_path = os.path.join(self.image_dir, item["file_name"])
-        image = load_image(image_path)
+        # Use "file_name" by default, but fall back if item is different
+        image_entry = item.get("file_name") or item.get("image")
+        if image_entry is None:
+            raise ValueError(f"Item missing 'file_name' or 'image' key: {item.keys()}")
+
+        image = self._load_image_entry(image_entry)
         original_size = (image.height, image.width)
         processed_image = self.image_processor.preprocess(image)
         return processed_image, original_size
@@ -65,12 +160,15 @@ class FluxDevProcessor(BaseItemProcessor):
             "original_size": torch.tensor(original_size),
         }
 
+
 class PixArtSigmaProcessor(BaseItemProcessor):
     def _load_and_process_image(
         self, item: Dict[str, Any]
     ) -> Tuple[torch.Tensor, Tuple[int, int]]:
-        image_path = os.path.join(self.image_dir, item["file_name"])
-        image = load_image(image_path)
+        # Override to add specialized resizing logic
+        image_entry = item.get("file_name") or item.get("image")
+        image = self._load_image_entry(image_entry)
+
         original_size = (image.height, image.width)
         processed_image = self.image_processor.preprocess(image)
 
@@ -166,7 +264,12 @@ class QwenImageProcessor(BaseItemProcessor):
         pipe: Any = None,
         **kwargs,
     ):
-        super().__init__(image_dir, tokenizers, image_processor, pipe)
+        super().__init__(
+            image_dir,
+            tokenizers,
+            image_processor,
+            pipe,
+        )
         self.tokenizer_max_length = kwargs.get("tokenizer_max_length", 1024)
         self.prompt_template_encode = kwargs.get(
             "prompt_template_encode",
@@ -212,17 +315,18 @@ class QwenImageEditProcessor(BaseItemProcessor):
         pipe: Any = None,
         **kwargs,
     ):
-        super().__init__(image_dir, tokenizers, image_processor, pipe)
+        super().__init__(
+            image_dir,
+            tokenizers,
+            image_processor,
+            pipe,
+        )
+
         self.tokenizer_max_length = kwargs.get("tokenizer_max_length", 1024)
-        # Qwen Edit template logic might differ, but we rely on input_preparers to handle complex encoding
-        # Here we just return raw text and images.
 
     def __call__(self, item: Dict[str, Any]) -> Dict[str, Any]:
-        # 1. Target Image (GT)
         processed_image, original_size = self._load_and_process_image(item)
 
-        # 2. Text Instruction (Raw Text, tokenization handled in preparer or here)
-        # To align with other processors, we tokenize here but keep it simple
         prompt = item["text"]
         txt_tokens = self.tokenizers[0](
             [prompt],
@@ -233,40 +337,21 @@ class QwenImageEditProcessor(BaseItemProcessor):
         )
 
         result = {
-            "pixel_values": processed_image,  # Target Image
+            "pixel_values": processed_image,
             "input_ids": (txt_tokens.input_ids[0],),
             "attention_mask": (txt_tokens.attention_mask[0],),
             "original_size": torch.tensor(original_size),
-            # Pass raw prompt text for Qwen Pipeline encoding logic if needed
             "raw_text": prompt,
         }
 
-        # 3. Condition Image (Source)
-        if "condition_image" in item and item["condition_image"]:
-            # Support both absolute paths and relative to image_dir
-            cond_path = item["condition_image"]
-            if not os.path.isabs(cond_path):
-                cond_path = os.path.join(
-                    self.image_dir, "..", cond_path
-                )  # Adjust based on jsonl structure
-
-            if not os.path.exists(cond_path):
-                # Fallback: try directly in image_dir
-                cond_path = os.path.join(self.image_dir, item["condition_image"])
-
-            if os.path.exists(cond_path):
-                try:
-                    cond_image = load_image(cond_path)
-                    # Use the same image processor to resize/normalize
-                    # NOTE: Qwen-VL might expect different preprocessing,
-                    # but usually resizing to VAE size is a safe start or we assume pipeline handles raw if passed.
-                    # Here we return tensor for batching.
-                    cond_pixel_values = self.image_processor.preprocess(cond_image)
-                    result["condition_pixel_values"] = cond_pixel_values
-                except Exception as e:
-                    print(f"Warning: Failed to load condition image {cond_path}: {e}")
-            else:
-                print(f"Warning: Condition image not found at {cond_path}")
+        if "condition_image" in item:
+            try:
+                # robust loader
+                cond_image = self._load_image_entry(item["condition_image"])
+                cond_pixel_values = self.image_processor.preprocess(cond_image)
+                result["condition_pixel_values"] = cond_pixel_values
+            except Exception as e:
+                print(f"Warning: Failed to load condition image: {e}")
 
         return result
 
@@ -278,6 +363,7 @@ PROCESSOR_REGISTRY = {
     "qwen-image": QwenImageProcessor,
     "qwen-image-edit": QwenImageEditProcessor,
 }
+
 
 class ImageTextDataset(Dataset):
     def __init__(
@@ -307,10 +393,10 @@ class ImageTextDataset(Dataset):
         )
 
     def process_metadata(self, metadata_file):
-        with open(metadata_file, 'r', encoding='utf-8') as f:
+        with open(metadata_file, "r", encoding="utf-8") as f:
             for line in f:
                 item = json.loads(line)
-                if 'file_name' in item and 'text' in item:
+                if "text" in item:
                     self.metadata.append(item)
 
     def __len__(self):
@@ -365,5 +451,17 @@ def collate_fn(batch):
         )
     else:
         collated_batch["attention_mask"] = None
+
+    if "condition_pixel_values" in elem:
+        cond_list = [
+            item["condition_pixel_values"]
+            for item in batch
+            if "condition_pixel_values" in item
+        ]
+        if len(cond_list) == len(batch):
+            collated_batch["condition_pixel_values"] = torch.concat(cond_list, dim=0)
+
+    if "raw_text" in elem:
+        collated_batch["raw_text"] = [item["raw_text"] for item in batch]
 
     return collated_batch
