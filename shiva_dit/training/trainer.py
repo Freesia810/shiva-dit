@@ -510,6 +510,14 @@ class DiffusionModelTrainer:
             "adaptive_fuse_prob": [
                 "adaptive_fuse_prob/avg_fuse_prob",
             ],
+            "context/scores": [
+                "context/align_score_mean",
+                "context/align_score_max",
+                "context/align_score_min",
+            ],
+            "context/distribution": [
+                "context/align_score_std",
+            ],
             "topkgrads/soft_ranks": [
                 "topkgrads/soft_ranks_mean",
                 "topkgrads/soft_ranks_min",
@@ -622,25 +630,33 @@ class DiffusionModelTrainer:
         lora_params = []
         gate_policy_params = []
         ratio_policy_params = []
+        context_pruner_params = []
         fuser_params = []
         other_model_params = []
 
         gate_policy_modules = []
         ratio_policy_modules = []
+        context_pruner_modules = []
         for hook in HookManager.get_all_hooks().values():
             if hasattr(hook, "gater_policy"):
                 gate_policy_modules.append(hook.gater_policy)
             if hasattr(hook, "ratio_policy"):
                 ratio_policy_modules.append(hook.ratio_policy)
+            if hasattr(hook, "context_pruner") and isinstance(hook.context_pruner, nn.Module):
+                context_pruner_modules.append(hook.context_pruner)
 
         gate_policy_param_ids = set()
         ratio_policy_param_ids = set()
+        context_pruner_param_ids = set()
         for mod in gate_policy_modules:
             for param in mod.parameters():
                 gate_policy_param_ids.add(id(param))
         for mod in ratio_policy_modules:
             for param in mod.parameters():
                 ratio_policy_param_ids.add(id(param))
+        for mod in context_pruner_modules:
+            for param in mod.parameters():
+                context_pruner_param_ids.add(id(param))
 
         for name, param in self.model.named_parameters():
             if not param.requires_grad:
@@ -652,6 +668,8 @@ class DiffusionModelTrainer:
                 gate_policy_params.append(param)
             elif id(param) in ratio_policy_param_ids:
                 ratio_policy_params.append(param)
+            elif id(param) in context_pruner_param_ids:
+                context_pruner_params.append(param)
             elif "lora" in name:
                 lora_params.append(param)
             else:
@@ -683,6 +701,12 @@ class DiffusionModelTrainer:
                 "lr": self.config.policy_learning_rate,
                 "weight_decay": 0.0,
                 "name": "ratio_policy"
+            },
+            {
+                "params": context_pruner_params,
+                "lr": self.config.context_learning_rate, 
+                "weight_decay": 0.0,
+                "name": "context_pruner"
             },
             {
                 "params": fuser_params, 
@@ -931,6 +955,9 @@ class DiffusionModelTrainer:
         ratio_loss, r_metrics, per_layer_ratios = (
             shiva_metrics.calculate_ratio_loss(loss_config, self.device, timestep=timestep)
         )
+
+        context_stats = shiva_metrics.collect_context_stats(self.device)
+        aggregated_metrics.update(context_stats)
 
         total_hook_loss = gate_loss + ratio_loss
 

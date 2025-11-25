@@ -30,6 +30,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         use_gater_lut: bool = False,
         shared_gater_cache: torch.Tensor = None,
         total_layers: int = 1,
+        context_pruning_ratio: float = 1.0,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -52,6 +53,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             )
 
         self.total_layers = total_layers
+        self.context_pruning_ratio = context_pruning_ratio
 
         self.gate_loss_accumulator = []
         self.gater_fuse_prob_accumulator = []
@@ -59,6 +61,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.k_accumulator = []
         self.n_minus_k_accumulator = []
         self.ratio_accumulator = []
+        self.context_score_accumulator = []
 
         self.capture_mask_for_viz = True
 
@@ -107,9 +110,17 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         pure_temb = global_context.pure_temb
 
-        pruned_encoder_states, pooled_encoder_vector = self.context_pruner(
-            encoder_hidden_states.to(dtype)
+        ## context pruning
+        L = encoder_hidden_states.shape[1]
+        k_ctx = int(max(1, L * self.context_pruning_ratio))
+        pruned_encoder_states, sel_idx_ctx = self.context_pruner(
+            hidden_states=hidden_states.detach().to(dtype), 
+            encoder_hidden_states=encoder_hidden_states.to(dtype),
+            k=k_ctx
         )
+        pooled_encoder_vector = pruned_encoder_states.mean(dim=1)
+        if hasattr(self.context_pruner, "last_scores"):
+            self.context_score_accumulator.append(self.context_pruner.last_scores.detach())
 
         layer_id_tensor = torch.tensor(
             [self.layer_idx], device=pure_temb.device, dtype=torch.long
@@ -152,6 +163,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         if self.layer_idx == 0:
             predicted_ratio = torch.tensor(1.0, device=predicted_ratio.device, dtype=predicted_ratio.dtype)
+        
+        # TODO:
+        predicted_ratio = torch.tensor(1.0, device=predicted_ratio.device, dtype=predicted_ratio.dtype)
 
         clamped_ratio = predicted_ratio.clamp(min=0.01)
         if self.training:
@@ -184,7 +198,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         x_sel, x_rej, remaining_x, sel_idx = self._select_topk(
             hidden_states, token_scores_logits, k_float, D
         )
-        sel_rope = self._gather_rope(image_rotary_emb, sel_idx)
+        sel_rope = self._gather_rope(image_rotary_emb, sel_idx, sel_idx_ctx)
 
         return (
             bound,
@@ -304,11 +318,15 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         remaining_x.scatter_(1, rej_idx.unsqueeze(-1).expand(-1, -1, C), x_rej)
         return x_sel, x_rej, remaining_x, sel_idx
 
-    def _gather_rope(self, image_rotary_emb, survivors_indices):
+    def _gather_rope(self, image_rotary_emb, survivors_indices, context_survivors_indices=None):
         if image_rotary_emb is not None:
             assert (
                 survivors_indices.shape[0] == 1
             ), "image_rotary_emb only supports batch size 1"
+            
+            if context_survivors_indices is not None:
+                assert context_survivors_indices.shape[0] == 1
+
             hidden_emb, encoder_emb, _ = parse_image_rotary_emb(
                 self.model_type,
                 image_rotary_emb,
@@ -325,6 +343,16 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 )
                 for x in hidden_emb
             )
+
+            if context_survivors_indices is not None and encoder_emb is not None:
+                encoder_emb = tuple(
+                    torch.gather(
+                        x,
+                        dim=0,
+                        index=context_survivors_indices[0].unsqueeze(-1).expand(-1, x.shape[-1]),
+                    )
+                    for x in encoder_emb
+                )
 
             image_rotary_emb = join_image_rotary_emb(
                 self.model_type, hidden_emb, encoder_emb
@@ -348,6 +376,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.k_accumulator.clear()
         self.n_minus_k_accumulator.clear()
         self.ratio_accumulator.clear()
+        self.context_score_accumulator.clear()
 
     def _collect_training_metrics(
         self,

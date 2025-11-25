@@ -53,6 +53,10 @@ class TrainerConfig:
         default=1e-4,
         metadata={"help": "Learning rate for policy parameters (ratio)."},
     )
+    context_learning_rate: float = field(
+        default=1e-4,
+        metadata={"help": "Learning rate for context parameters (k)."},
+    )
     optimizer: str = "AdamW" # "Adam", "AdamW", "SGD"
     weight_decay: float = 1e-2
     lr_scheduler: str = "cosine" # "linear", "cosine", "constant"

@@ -25,10 +25,12 @@ def install_shiva_hooks(
     num_router_groups = kwargs.pop("num_router_groups", 4)
     layer_embed_dim = kwargs.pop("layer_embed_dim", 256)
     fuse_expert_ffn_mult = kwargs.pop("fuse_expert_ffn_mult", 2)
-    context_pruning_threshold = kwargs.pop("context_pruning_threshold", None)
-    context_pruning_ratio = kwargs.pop("context_pruning_ratio", None)
+    context_pruning_ratio = kwargs.pop("context_pruning_ratio", 1.0)
     init_Ts = kwargs.pop("init_Ts", 30.0)
     init_Tk = kwargs.pop("init_Tk", 30.0)
+
+    # TODO:
+    proj_dim = kwargs.pop("proj_dim", 128)
 
     model_dim = global_context.hidden_dim
     prompt_embed_dim = global_context.encoder_hidden_dim
@@ -76,8 +78,12 @@ def install_shiva_hooks(
         total_layers=num_layers, ratio_bottleneck_dim=ratio_bottleneck_dim
     ).to(device, dtype)
     shared_context_pruner = ShivaContextPruner(
-        threshold=context_pruning_threshold, ratio=context_pruning_ratio
-    )
+        img_dim=model_dim,
+        txt_dim=prompt_embed_dim,
+        proj_dim=proj_dim,
+        init_Ts=init_Ts,
+        init_Tk=init_Tk,
+    ).to(device, torch.float32)
     shared_pruner_expert = ShivaPrunerExpert(init_Ts=init_Ts, init_Tk=init_Tk).to(device, dtype)
     shared_fuse_expert = ShivaFuserExpert(
         hidden_dim=model_dim, ffn_mult=fuse_expert_ffn_mult
@@ -111,6 +117,7 @@ def install_shiva_hooks(
             "shared_context_pruner": shared_context_pruner,
             "shared_fuse_expert": shared_fuse_expert,
             "total_layers": num_layers,
+            "context_pruning_ratio": context_pruning_ratio,
             **kwargs,
         }
 

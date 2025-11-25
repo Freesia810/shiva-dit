@@ -129,6 +129,38 @@ def calculate_ratio_loss(
 
     return final_loss, metrics, ratios_per_layer
 
+def collect_context_stats(device: torch.device) -> dict:
+    total_mean = []
+    total_std = []
+    total_max = []
+    total_min = []
+    
+    from shiva_dit.hook import HookManager
+    from shiva_dit.shiva_hook import ShivaDitBlockHook
+
+    for hook in HookManager.get_all_hooks().values():
+        if isinstance(hook, ShivaDitBlockHook):
+            acc = getattr(hook, "context_score_accumulator", [])
+            if acc:
+                stacked = torch.stack(acc)
+                total_mean.append(stacked.mean())
+                total_std.append(stacked.std())
+                total_max.append(stacked.max())
+                total_min.append(stacked.min())
+            
+            if hasattr(hook, "context_score_accumulator"):
+                hook.context_score_accumulator.clear()
+
+    if total_mean:
+        return {
+            "context/align_score_mean": torch.stack(total_mean).mean(),
+            "context/align_score_std": torch.stack(total_std).mean(),
+            "context/align_score_max": torch.stack(total_max).max(),
+            "context/align_score_min": torch.stack(total_min).min(),
+        }
+    else:
+        return {}
+
 @torch.no_grad()
 def calculate_shiva_gate_prob(device: torch.device) -> tuple[torch.Tensor, dict]:
     gate_probs_per_hook = []
