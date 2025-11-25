@@ -5,6 +5,7 @@ HookType = ShivaDitBlockHook
 hook_config = {
     "num_router_groups": 24,
     "bottleneck_dim": 256,
+    "ratio_bottleneck_dim": 32,
     "layer_embed_dim": 256,
     "fuse_expert_ffn_mult": 2,
     "use_gater_lut": False,
@@ -49,10 +50,13 @@ trainer_config = {
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
     "lr_scheduler": "cosine",  # "linear", "cosine", "constant"
+    "distillation_final_weight": 1.0, 
+    "distillation_middle_weight": 0.0,
     "scheduler_num_warmup_steps": 0,
     "seed": 42,
-    "logging_steps": 5,
+    "logging_steps": 40,
     "save_steps": 1750,  # 2 epoch
+    "save_best": True,
     "run_validation": True,
     "validation_steps": 875,  # 0.5 epoch
     "val_batch_size": None,
@@ -68,10 +72,55 @@ trainer_config = {
     "extra_config": {
         "target_ratio": 0.8,
         "stage_schedule": [
-            {"steps": 3500,  "weights": {"ratio": 0.5, "gate": 0.0}, "lr": [1e-5, 1e-4, 2e-5], "temp": [1.0, 2.0]}, 
-            {"steps": 21000, "weights": {"ratio": 0.01, "gate": 0.0}, "lr": [1e-5, 1e-4, 1e-5], "temp": [2.0, 5.0]}, 
-            {"steps": 17500, "weights": {"ratio": 0.1, "gate": 0.5}, "lr": [1e-5, 1e-4, 1e-5], "temp": [5.0, 5.0]},
-            {"steps": -1,    "weights": {"ratio": 0.05, "gate": 0.5}, "lr": [1e-5, 1e-4, 1e-5], "temp": [5.0, 5.0]},
+            {
+                "steps": 1750, # 1 epoch
+                "weights": {"ratio": [0.0, 0.0, 0.0], "gate": 0.0, "distill": [0.0, 0.0]},
+                "lr": [1e-5, 1e-4, 0.0, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
+                "temp": [5.0, 5.0, 2.0, 2.0], # [Ts-start, Ts-end, Tk-start, Tk-end]
+            },
+            # ------------------------------------------------------------------
+            {
+                "steps": 5250, # 3 epoch
+                "weights": {"ratio": [0.0, 0.0, 0.0], "gate": 0.0, "distill": [0.0, 0.0]},
+                "lr": [1e-5, 1e-5, 0.0, 0.0, 0.0],
+                "temp": [5.0, 5.0, 2.0, 2.0],
+            },
+
+            # ------------------------------------------------------------------
+            {
+                "steps": 7000, # 4 epoch
+                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0, "distill": [1.0, 0.0]}, # [Budget(Hinge), Floor(Wall), MSE(Smooth)]
+                "lr": [0.0, 1e-5, 5e-4, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
+                "temp": [5.0, 10.0, 2.0, 10.0],
+            },
+            # ------------------------------------------------------------------
+            {
+                "steps": 14000, # 8 epoch
+                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0, "distill": [1.0, 0.0]},
+                "lr": [0.0, 1e-5, 1e-5, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
+                "temp": [10.0, 10.0, 10.0, 50.0],
+            },
+
+            {
+                "steps": 10500, # 6 epoch
+                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0, "distill": [1.0, 0.0]},
+                "lr": [0.0, 1e-5, 1e-5, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
+                "temp": [10.0, 10.0, 50.0, 50.0],
+            },
+            # # ------------------------------------------------------------------
+            {
+                "steps": 7000, # 4 epoch
+                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.1, "distill": [1.0, 0.0]},
+                "lr": [0.0, 0.0, 0.0, 1e-4, 2e-4],  # [Base, LoRA, Ratio, Gate, Fuser]
+                "temp": [10.0, 10.0, 50.0, 50.0],
+            },
+
+            {
+                "steps": -1,
+                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.1, "distill": [1.0, 0.0]},
+                "lr": [0.0, 1e-5, 1e-5, 1e-5, 1e-5],  # [Base, LoRA, Ratio, Gate, Fuser]
+                "temp": [10.0, 10.0, 50.0, 50.0],
+            },
         ],
     },
     "log_with_tensorboard": True,

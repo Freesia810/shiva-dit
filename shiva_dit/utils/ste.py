@@ -107,7 +107,7 @@ class ShivaTopkFunc(torch.autograd.Function):
         with torch.enable_grad():
             T_rank = Ts_detached
             T_select = Tk_detached
-            
+
             scores_for_soft_rank = torch.sigmoid(logits_detached)
             noise = torch.randn_like(logits_detached) * 1e-5
             scores_for_soft_rank = scores_for_soft_rank + noise
@@ -157,6 +157,9 @@ class ShivaTopkFunc(torch.autograd.Function):
 
         grad_logits = grads[0]
         grad_k = grads[1]
+
+        if grad_k is not None:
+            grad_k = grad_k * 2
 
         return grad_x, grad_logits, grad_k, grad_Ts, grad_Tk
 

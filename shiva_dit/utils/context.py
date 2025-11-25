@@ -26,6 +26,8 @@ class PipelineContext:
     current_timestep: Optional[int] = None
     current_iteration: Optional[int] = None
 
+    current_stage_idx: Optional[int] = None
+
     # for edit task
     hidden_extra_seq_len: Optional[int] = None
     hidden_extra_seq_height: Optional[int] = None

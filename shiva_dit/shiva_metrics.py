@@ -42,8 +42,9 @@ def calculate_gate_loss(config: dict, device: torch.device) -> torch.Tensor:
     else:
         return torch.tensor(0.0, device=device), metrics
 
+
 def calculate_ratio_loss(
-    config: dict, device: torch.device
+    config: dict, device: torch.device, timestep: torch.Tensor = None
 ) -> tuple[torch.Tensor, dict, dict]:
 
     ratios_per_layer = {}
@@ -51,8 +52,10 @@ def calculate_ratio_loss(
     ratios_for_logging = []
 
     for hook in _get_shiva_hooks():
+        if hook.layer_idx == 0:
+            # Skip the first layer
+            continue
         layer_name = f"layer_{hook.layer_idx:02d}"
-
         accumulator = hook.ratio_accumulator
 
         if accumulator:
@@ -68,40 +71,63 @@ def calculate_ratio_loss(
     metrics = {
         "adaptive_ratio/avg_ratio": 0.0,
         "adaptive_ratio/target_ratio": 0.0,
-        "loss/ratio/ratio_loss_raw": 0.0,
+        "loss/ratio/budget_loss": 0.0,
+        "loss/ratio/floor_loss": 0.0,
+        "loss/ratio/mse_loss": 0.0,
         "loss/ratio/ratio_loss": 0.0,
     }
 
-    loss_weight = config["ratio_loss_weight"]
-    current_target_ratio = config["target_ratio"]
-
-    if ratios_for_loss:
-        ratios_tensor_loss = torch.stack(ratios_for_loss)
-        avg_ratio_loss = torch.mean(ratios_tensor_loss)
-
-        target_ratio_tensor = torch.tensor(
-            current_target_ratio, device=device, dtype=avg_ratio_loss.dtype
-        )
-        mse_loss = F.mse_loss(avg_ratio_loss, target_ratio_tensor)
-        final_loss = mse_loss * loss_weight
-
-        with torch.no_grad():
-            if ratios_for_logging:
-                ratios_tensor_logging = torch.tensor(ratios_for_logging, device=device)
-                avg_ratio_metric = torch.mean(ratios_tensor_logging)
-            else:
-                avg_ratio_metric = avg_ratio_loss.detach()
-
-        metrics = {
-            "adaptive_ratio/avg_ratio": avg_ratio_metric,
-            "adaptive_ratio/target_ratio": target_ratio_tensor,
-            "loss/ratio/ratio_loss_raw": mse_loss,
-            "loss/ratio/ratio_loss": final_loss,
-        }
-
-        return final_loss, metrics, ratios_per_layer
-    else:
+    if not ratios_for_loss:
         return torch.tensor(0.0, device=device), metrics, ratios_per_layer
+
+    # [1.0, 20.0, 1.0]
+    w_config = config.get("ratio_loss_weight", 1.0)
+    if isinstance(w_config, list):
+        w_budget = w_config[0]
+        w_floor = w_config[1] if len(w_config) > 1 else 0.0
+        w_mse = w_config[2] if len(w_config) > 2 else 0.0
+    else:
+        w_budget = w_config
+        w_floor = 0.0
+        w_mse = 0.0
+
+    current_target_ratio = config.get("target_ratio", 0.8)
+
+    all_ratios = torch.stack(ratios_for_loss) # (Num_Layers,)
+    
+    global_avg_ratio = torch.mean(all_ratios)
+    target = torch.tensor(current_target_ratio, device=device, dtype=all_ratios.dtype)
+
+    diff = global_avg_ratio - target
+    budget_loss = w_budget * torch.relu(diff)
+
+    if w_floor > 0.0:
+        min_allowed = 0.1
+        floor_penalties = torch.relu(min_allowed - all_ratios)
+        floor_loss = torch.sum(floor_penalties) * w_floor
+    else:
+        floor_loss = torch.tensor(0.0, device=device)
+
+    if w_mse > 0.0:
+        target_full = torch.full_like(all_ratios, current_target_ratio)
+        mse_loss_val = F.mse_loss(all_ratios, target_full)
+        mse_loss = w_mse * mse_loss_val
+    else:
+        mse_loss = torch.tensor(0.0, device=device)
+
+    final_loss = budget_loss + floor_loss + mse_loss
+
+    with torch.no_grad():
+        metrics.update({
+            "adaptive_ratio/avg_ratio": global_avg_ratio.detach(),
+            "adaptive_ratio/target_ratio": target,
+            "loss/ratio/budget_loss": budget_loss.detach(),
+            "loss/ratio/floor_loss": floor_loss.detach(),
+            "loss/ratio/mse_loss": mse_loss.detach(),
+            "loss/ratio/ratio_loss": final_loss.detach(),
+        })
+
+    return final_loss, metrics, ratios_per_layer
 
 @torch.no_grad()
 def calculate_shiva_gate_prob(device: torch.device) -> tuple[torch.Tensor, dict]:
@@ -197,8 +223,8 @@ def collect_router_stats(device: torch.device) -> dict:
             total_std.append(torch.stack([x["std"] for x in acc]).mean())
             total_min.append(torch.stack([x["min"] for x in acc]).min())
             total_max.append(torch.stack([x["max"] for x in acc]).max())
-            total_s_scale_mean.append(torch.stack([x["s_scale_mean"] for x in acc]).mean())
-            total_s_scale_std.append(torch.stack([x["s_scale_std"] for x in acc]).mean())
+            # total_s_scale_mean.append(torch.stack([x["s_scale_mean"] for x in acc]).mean())
+            # total_s_scale_std.append(torch.stack([x["s_scale_std"] for x in acc]).mean())
 
             all_scores = torch.stack([x["scores_tensor"] for x in acc]) 
             quantiles = torch.quantile(all_scores.to(torch.float32), q_tensor.to(torch.float32), dim=None) 
@@ -213,11 +239,48 @@ def collect_router_stats(device: torch.device) -> dict:
             "router/std_score": torch.stack(total_std).mean(),
             "router/min_score": torch.stack(total_min).min(),
             "router/max_score": torch.stack(total_max).max(),
-            "router/s_scale_mean": torch.stack(total_s_scale_mean).mean(),
-            "router/s_scale_std": torch.stack(total_s_scale_std).mean(),
+            # "router/s_scale_mean": torch.stack(total_s_scale_mean).mean(),
+            # "router/s_scale_std": torch.stack(total_s_scale_std).mean(),
             "router/p25_score": torch.stack(total_p25).mean(),
             "router/p50_score": torch.stack(total_p50).mean(),
             "router/p75_score": torch.stack(total_p75).mean(),
         }
     else:
         return {}
+
+def generate_router_heatmap(token_scores, sel_idx, height, width):
+    try:
+        import matplotlib.cm
+    except ImportError:
+        print("matplotlib not found.")
+        return None
+
+    if token_scores.dim() == 3:
+        token_scores = token_scores.squeeze(-1)
+    
+    B, total_tokens = token_scores.shape
+    
+    try:
+        score_map = token_scores.reshape(B, height, width)
+    except Exception as e:
+        print(f"Reshape failed: {e}")
+        return None
+
+    score_np = score_map.float().cpu().numpy() 
+    
+    cm = matplotlib.cm.get_cmap('jet') 
+    colored_np = cm(score_np) # (B, H, W, 4)
+    rgb_np = colored_np[..., :3] # (B, H, W, 3)
+
+    mask = torch.zeros((B, total_tokens), dtype=torch.float32)
+    mask.scatter_(1, sel_idx.long(), 1.0)
+    mask_map = mask.reshape(B, height, width).numpy() # (B, H, W)
+    mask_expanded = mask_map[..., None]
+
+
+    masked_rgb_np = rgb_np * mask_expanded
+
+    # (B, H, W, 3) -> (B, 3, H, W)
+    final_tensor = torch.from_numpy(masked_rgb_np).permute(0, 3, 1, 2).float()
+    
+    return final_tensor

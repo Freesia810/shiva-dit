@@ -51,7 +51,7 @@ class TrainerConfig:
     )
     policy_learning_rate: float = field(
         default=1e-4,
-        metadata={"help": "Learning rate for policy parameters (ratio/gate)."},
+        metadata={"help": "Learning rate for policy parameters (ratio)."},
     )
     optimizer: str = "AdamW" # "Adam", "AdamW", "SGD"
     weight_decay: float = 1e-2
@@ -62,7 +62,6 @@ class TrainerConfig:
     logging_steps: int = 50
     save_steps: int = 500
     save_best: bool = False
-    best_metric_higher_is_better: bool = False
 
     distillation_final_weight: float = 0.0 
     distillation_middle_weight: float = 0.0
