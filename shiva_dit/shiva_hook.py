@@ -102,8 +102,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             "layer_id_tensor", torch.tensor([self.layer_idx], dtype=torch.long)
         )
 
-        self.router_layer_emb_vector = self.router_layer_embedder(self.layer_id_tensor)
-
         # Placeholders for loss calculation
         self.current_gate_logits_for_loss = None
         self.current_ratio_for_loss = None
@@ -186,8 +184,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         # --- Metadata Preparation ---
         layer_id_tensor = self.layer_id_tensor.expand(B)
-
-        router_layer_emb_vector = self.router_layer_emb_vector
+        router_layer_emb_vector = self.router_layer_embedder(layer_id_tensor).to(dtype)
 
         def get_t_scalar():
             current_t = global_context.current_timestep
@@ -201,6 +198,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 t_scalar = t_val.view(B, 1)
             else:
                 raise ValueError(f"t_val.shape: {t_val.shape}")
+            
+            return t_scalar
 
         # --- Context Pruning Logic ---
         ctx_sel = encoder_hidden_states
@@ -398,7 +397,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
     def _forward_train_image(self, x_sel, x_rej, N):
         dtype = x_sel.dtype
 
-        gating_weights = F.softmax(self.current_gate_logits_for_loss, dim=-1)
+        gating_weights = F.softmax(self.current_gate_logits_for_loss, dim=-1).to(dtype)
 
         avg_gating_probs = gating_weights.mean(dim=0)
         num_experts = 2
@@ -601,18 +600,21 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         token_scores_logits,
         N,
     ):
-        self.gate_loss_accumulator.append(load_balancing_loss)
-        self.gater_fuse_prob_accumulator.append(avg_fuse_prob)
-        self.image_ratio_accumulator.append(self.current_ratio_for_loss)
-        self.context_ratio_accumulator.append(self.current_context_ratio_for_loss)
+        if self.shiva_mode in ["image", "both"]:
+            self.gate_loss_accumulator.append(load_balancing_loss)
+            self.gater_fuse_prob_accumulator.append(avg_fuse_prob)
+            self.image_ratio_accumulator.append(self.current_ratio_for_loss)
+            token_scores = torch.sigmoid(token_scores_logits)
+            self.router_stats_accumulator.append(
+                {
+                    "scores_tensor": token_scores,
+                    "mean": token_scores.mean(),
+                    "std": token_scores.std(),
+                    "min": token_scores.min(),
+                    "max": token_scores.max(),
+                }
+            )
+        if self.shiva_mode in ["context", "both"]:
+            self.context_ratio_accumulator.append(self.current_context_ratio_for_loss)
 
-        token_scores = torch.sigmoid(token_scores_logits)
-        self.router_stats_accumulator.append(
-            {
-                "scores_tensor": token_scores,
-                "mean": token_scores.mean(),
-                "std": token_scores.std(),
-                "min": token_scores.min(),
-                "max": token_scores.max(),
-            }
-        )
+        
