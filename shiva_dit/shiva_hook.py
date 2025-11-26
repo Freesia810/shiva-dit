@@ -2,7 +2,6 @@ import inspect
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Literal
 
 from shiva_dit.hook.delegate import BaseDelegator
 from shiva_dit.hook.block_hook import BaseDiTBlockHook
