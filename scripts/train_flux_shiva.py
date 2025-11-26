@@ -107,27 +107,27 @@ trainer_config = {
                 "lr": [0.0, 1e-5, 1e-5, 0.0, 0.0], # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [10.0, 10.0, 10.0, 50.0],
             },
-            # Stage 5: Finetune with High Temp (6 epochs)
+            # Stage 5: Finetune with High Temp (2 epochs)
             {
-                "steps": -1, 
+                "steps": 3500,
                 "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0, "distill": [1.0, 0.0]},
                 "lr": [0.0, 1e-5, 1e-5, 0.0, 0.0], # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [10.0, 10.0, 50.0, 50.0],
             },
-            # # Stage 6: Train Gate (4 epochs)
-            # {
-            #     "steps": 7000, 
-            #     "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.1, "distill": [1.0, 0.0]},
-            #     "lr": [0.0, 0.0, 0.0, 1e-4, 2e-4], # [Base, LoRA, Ratio, Gate, Fuser]
-            #     "temp": [10.0, 10.0, 50.0, 50.0],
-            # },
-            # # Final Stage
-            # {
-            #     "steps": -1,
-            #     "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.1, "distill": [1.0, 0.0]},
-            #     "lr": [0.0, 1e-5, 1e-5, 1e-5, 1e-5], # [Base, LoRA, Ratio, Gate, Fuser]
-            #     "temp": [10.0, 10.0, 50.0, 50.0],
-            # },
+            # Stage 6: Train Gate (4 epochs)
+            {
+                "steps": 7000, 
+                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.1, "distill": [1.0, 0.0]},
+                "lr": [0.0, 0.0, 0.0, 1e-4, 2e-4], # [Base, LoRA, Ratio, Gate, Fuser]
+                "temp": [10.0, 10.0, 50.0, 50.0],
+            },
+            # Final Stage
+            {
+                "steps": -1,
+                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.1, "distill": [1.0, 0.0]},
+                "lr": [0.0, 1e-5, 1e-5, 1e-5, 1e-5], # [Base, LoRA, Ratio, Gate, Fuser]
+                "temp": [10.0, 10.0, 50.0, 50.0],
+            },
         ],
     },
     "log_with_tensorboard": True,
