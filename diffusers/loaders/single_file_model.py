@@ -23,6 +23,7 @@ from typing_extensions import Self
 
 from .. import __version__
 from ..models.model_loading_utils import _caching_allocator_warmup, _determine_device_map, _expand_device_map
+from ..quantizers import DiffusersAutoQuantizer
 from ..utils import deprecate, is_accelerate_available, is_torch_version, logging
 from ..utils.torch_utils import empty_device_cache
 from .single_file_utils import (
@@ -33,6 +34,7 @@ from .single_file_utils import (
     convert_chroma_transformer_checkpoint_to_diffusers,
     convert_controlnet_checkpoint,
     convert_cosmos_transformer_checkpoint_to_diffusers,
+    convert_flux2_transformer_checkpoint_to_diffusers,
     convert_flux_transformer_checkpoint_to_diffusers,
     convert_hidream_transformer_to_diffusers,
     convert_hunyuan_video_transformer_to_diffusers,
@@ -159,6 +161,10 @@ SINGLE_FILE_LOADABLE_CLASSES = {
     },
     "QwenImageTransformer2DModel": {
         "checkpoint_mapping_fn": lambda x: x,
+        "default_subfolder": "transformer",
+    },
+    "Flux2Transformer2DModel": {
+        "checkpoint_mapping_fn": convert_flux2_transformer_checkpoint_to_diffusers,
         "default_subfolder": "transformer",
     },
 }
@@ -325,7 +331,10 @@ class FromOriginalModelMixin:
                 user_agent=user_agent,
             )
         if quantization_config is not None:
-            raise NotImplementedError("Quantization is not supported yet")
+            hf_quantizer = DiffusersAutoQuantizer.from_config(quantization_config)
+            hf_quantizer.validate_environment()
+            torch_dtype = hf_quantizer.update_torch_dtype(torch_dtype)
+
         else:
             hf_quantizer = None
 
