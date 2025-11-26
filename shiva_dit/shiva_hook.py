@@ -14,6 +14,7 @@ from shiva_dit.modules.gater import ShivaGaterPolicy, ShivaRatioPolicy
 from shiva_dit.modules.pruner import ShivaContextPruner, ShivaPrunerExpert
 from shiva_dit.modules.fuser import ShivaFuserExpert
 
+RANDOM_STAGE = 0
 
 class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
@@ -241,7 +242,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
                     is_random_training = (
                         self.training
-                        and getattr(global_context, "current_stage_idx", -1) == 1
+                        and getattr(global_context, "current_stage_idx", -1)
+                        == RANDOM_STAGE
                     )
                     if is_random_training:
                         noise = torch.rand(1, device=device, dtype=dtype) * 0.8 + 0.1
@@ -311,7 +313,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
                     is_random_training = (
                         self.training
-                        and getattr(global_context, "current_stage_idx", -1) == 1
+                        and getattr(global_context, "current_stage_idx", -1)
+                        == RANDOM_STAGE
                     )
 
                     if is_random_training:
