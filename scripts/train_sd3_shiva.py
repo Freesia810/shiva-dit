@@ -89,36 +89,36 @@ trainer_config = {
             # ------------------------------------------------------------------
             {
                 "steps": 7000, # 4 epoch
-                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0, "distill": [1.0, 0.0]}, # [Budget(Hinge), Floor(Wall), MSE(Smooth)]
-                "lr": [0.0, 1e-5, 5e-4, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
+                "weights": {"ratio": [1.0, 50.0, 0.1], "gate": 0.0, "distill": [1.0, 0.0]}, # [Budget(Hinge), Floor(Wall), MSE(Smooth)]
+                "lr": [1e-5, 1e-5, 1e-3, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [5.0, 10.0, 2.0, 10.0],
             },
             # ------------------------------------------------------------------
             {
                 "steps": 14000, # 8 epoch
                 "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0, "distill": [1.0, 0.0]},
-                "lr": [0.0, 1e-5, 1e-5, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
+                "lr": [1e-5, 1e-5, 1e-5, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [10.0, 10.0, 10.0, 50.0],
             },
 
             {
                 "steps": 10500, # 6 epoch
                 "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0, "distill": [1.0, 0.0]},
-                "lr": [0.0, 1e-5, 1e-5, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
+                "lr": [1e-5, 1e-5, 1e-5, 0.0, 0.0],  # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [10.0, 10.0, 50.0, 50.0],
             },
             # # ------------------------------------------------------------------
             {
                 "steps": 7000, # 4 epoch
                 "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.1, "distill": [1.0, 0.0]},
-                "lr": [0.0, 0.0, 0.0, 1e-4, 2e-4],  # [Base, LoRA, Ratio, Gate, Fuser]
+                "lr": [1e-5, 0.0, 0.0, 1e-4, 2e-4],  # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [10.0, 10.0, 50.0, 50.0],
             },
 
             {
                 "steps": -1,
                 "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.1, "distill": [1.0, 0.0]},
-                "lr": [0.0, 1e-5, 1e-5, 1e-5, 1e-5],  # [Base, LoRA, Ratio, Gate, Fuser]
+                "lr": [1e-5, 1e-5, 1e-5, 1e-5, 1e-5],  # [Base, LoRA, Ratio, Gate, Fuser]
                 "temp": [10.0, 10.0, 50.0, 50.0],
             },
         ],
