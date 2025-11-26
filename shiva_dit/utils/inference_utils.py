@@ -45,7 +45,7 @@ def load_pipeline_for_inference(
             model_ref.requires_grad_(False)
             
         print(f"Baseline pipeline ready on '{device}'.")
-        return 
+        return pipe
     
     if not os.path.exists(ckpt_path):
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
@@ -86,7 +86,7 @@ def load_pipeline_for_inference(
         if gater_lut_path:
             if os.path.exists(gater_lut_path):
                 print(f"  - Loading LUT from {gater_lut_path}")
-                lut_data = torch.load(gater_lut_path, map_location=device)
+                lut_data = torch.load(gater_lut_path, map_location="cpu")
                 
                 hook_kwargs["use_gater_lut"] = True
                 

@@ -133,8 +133,8 @@ def benchmark(args):
     model = None
     if hasattr(pipe, "transformer"):
         model = pipe.transformer
-    elif hasattr(pipe, "unet"):
-        model = pipe.unet
+    else:
+        raise ValueError("Unsupported pipeline type")
     
     total_p = 0
     if model:
