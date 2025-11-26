@@ -1,6 +1,5 @@
 import torch
 import os
-import json
 from peft import LoraConfig as PeftLoraConfig, get_peft_model
 from dataclasses import asdict
 
@@ -19,7 +18,7 @@ HOOK_CLASS_MAP = {
 }
 
 def load_pipeline_for_inference(
-    ckpt_path: str, 
+    ckpt_path: str = None,
     base_model_path: str = None, 
     model_type: str = None,
     device="cuda", 
@@ -56,9 +55,9 @@ def load_pipeline_for_inference(
 
     ckpt_model_type = checkpoint.get("model_type")
     if model_type is not None and ckpt_model_type != model_type:
-        print(f"Warning: model_type '{model_type}' differs from Checkpoint '{ckpt_model_type}'. Using Checkpoint's type.")
-
-    model_type = checkpoint.get("model_type")
+        print(f"Warning: CLI model_type '{model_type}' differs from Checkpoint '{ckpt_model_type}'. Using Checkpoint's type.")
+    
+    model_type = ckpt_model_type
     training_mode = checkpoint.get("training_mode")
     hook_info = checkpoint.get("hook_info")
     lora_info = checkpoint.get("lora_info")
@@ -82,15 +81,25 @@ def load_pipeline_for_inference(
         if not HookClass:
             raise ValueError(f"Unknown hook class '{hook_class_name}'.")
 
+        hook_kwargs["capture_mask_for_viz"] = False
+
         if gater_lut_path:
             if os.path.exists(gater_lut_path):
-                print(f"  - Loading Gater LUT from {gater_lut_path}")
-                gater_cache = torch.load(gater_lut_path, map_location=device)
+                print(f"  - Loading LUT from {gater_lut_path}")
+                lut_data = torch.load(gater_lut_path, map_location=device)
+                
                 hook_kwargs["use_gater_lut"] = True
-                hook_kwargs["shared_gater_cache"] = gater_cache
+                
+                if isinstance(lut_data, dict):
+                    hook_kwargs["shared_gater_cache"] = lut_data.get("gater")
+                    hook_kwargs["shared_ratio_cache"] = lut_data.get("ratio")
+                    print("    > Loaded both Gater and Ratio tables.")
+                else:
+                    print("    > Warning: Unknown LUT format. Ignoring.")
+                    hook_kwargs["use_gater_lut"] = False
             else:
-                print(f"  - Warning: LUT path {gater_lut_path} provided but file not found. Ignoring.")
-        
+                print(f"  - Warning: LUT path {gater_lut_path} provided but file not found.")
+
         skip_layer_indices = []
         if optimize_hooks:
             print("  - Optimization enabled: Skipping Layer 0 injection.")
@@ -102,40 +111,44 @@ def load_pipeline_for_inference(
         )
         HookManager.enable()
         
-        print("  - Injecting Hooks...")
+        print("  - Injecting Hooks into pipeline...")
         install_shiva_hooks(
             HookManager,
             model_type,
             pipe,
             model_attrs,
             HookClass,
-            skip_layer_indices=skip_layer_indices,
+            skip_layer_indices=skip_layer_indices, 
             **hook_kwargs
         )
 
-    model = tuple(
-        getattr(pipe, model) for model in model_attrs
-    )[0]
+    model = tuple(getattr(pipe, model) for model in model_attrs)[0]
 
     if lora_info and training_mode == "lora":
         print("  - Applying LoRA adapter...")
         
-        peft_config_keys = PeftLoraConfig.__annotations__.keys()
-        filtered_lora_info = {k: v for k, v in lora_info.items() if k in peft_config_keys}
+        if "rank" in lora_info and "r" not in lora_info:
+            lora_info["r"] = lora_info["rank"]
+
+        peft_valid_keys = set(PeftLoraConfig.__annotations__.keys())
+        filtered_lora_info = {k: v for k, v in lora_info.items() if k in peft_valid_keys or k == 'r'}
         
         peft_config = PeftLoraConfig(**filtered_lora_info, bias="none")
         model = get_peft_model(model, peft_config)
         
         print("  - Loading LoRA weights from checkpoint...")
-        missing, unexpected = model.load_state_dict(model_state, strict=False)
-
+        model.load_state_dict(model_state, strict=False)
+        
         if merge_lora:
             print("  - Merging LoRA weights into base model for faster inference...")
             model = model.merge_and_unload()
             setattr(pipe, model_attrs[0], model)
-    
-    elif training_mode == "finetune" or training_mode == "hook_only":
-        print("  - Loading model weights...")
+            print("  - Merge complete.")
+        else:
+            print("  - Keeping LoRA weights separate.")
+            
+    elif training_mode in ["finetune", "hook_only"]:
+        print("  - Loading full model weights...")
         model.load_state_dict(model_state, strict=False)
 
     pipe.to(device)

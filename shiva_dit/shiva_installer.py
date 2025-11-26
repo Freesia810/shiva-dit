@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import Type
+from typing import Type, Optional, List
 
 from shiva_dit.hook.hook_manager import HookManager
 from shiva_dit.utils import global_context
@@ -30,6 +30,9 @@ def install_shiva_hooks(
     context_pruning_ratio = kwargs.pop("context_pruning_ratio", None)
     init_Ts = kwargs.pop("init_Ts", 30.0)
     init_Tk = kwargs.pop("init_Tk", 30.0)
+
+    shared_gater_cache = kwargs.pop("shared_gater_cache", None)
+    shared_ratio_cache = kwargs.pop("shared_ratio_cache", None)
 
     model_dim = global_context.hidden_dim
     prompt_embed_dim = global_context.encoder_hidden_dim
@@ -120,6 +123,8 @@ def install_shiva_hooks(
             "shared_pruner": shared_pruner_expert,
             "shared_context_pruner": shared_context_pruner,
             "shared_fuse_expert": shared_fuse_expert,
+            "shared_gater_cache": shared_gater_cache,
+            "shared_ratio_cache": shared_ratio_cache,
             "total_layers": num_layers,
             **kwargs,
         }

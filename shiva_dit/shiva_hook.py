@@ -29,7 +29,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         shared_fuse_expert: ShivaFuserExpert,
         use_gater_lut: bool = False,
         shared_gater_cache: torch.Tensor = None,
+        shared_ratio_cache: torch.Tensor = None,
         total_layers: int = 1,
+        capture_mask_for_viz: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -44,12 +46,13 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         self.use_gater_lut = use_gater_lut
         self.gater_cache = shared_gater_cache
+        self.ratio_cache = shared_ratio_cache
 
-        if self.use_gater_lut and self.gater_cache is None:
-            raise ValueError(
-                f"ShivaDitBlockHook(layer_idx={self.layer_idx}): 'use_gater_lut' is True, "
-                "but 'shared_gater_cache' was not provided."
-            )
+        if self.use_gater_lut:
+            if self.gater_cache is None:
+                raise ValueError(f"Layer {self.layer_idx}: use_gater_lut=True but shared_gater_cache is None.")
+            if self.ratio_cache is None:
+                raise ValueError(f"Layer {self.layer_idx}: use_gater_lut=True but shared_ratio_cache is None.")
 
         self.total_layers = total_layers
 
@@ -60,7 +63,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.n_minus_k_accumulator = []
         self.ratio_accumulator = []
 
-        self.capture_mask_for_viz = True
+        self.capture_mask_for_viz = capture_mask_for_viz
 
     def delegated_call(self, func, module_self, *args, **kwargs):
         (
@@ -74,12 +77,13 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             layer_emb,
             pruned_encoder_states,
             N,
+            gate_logits_or_none,
         ) = self._prepare_inputs(func, module_self, *args, **kwargs)
 
         if self.training:
             final_topk_states = self._forward_train(x_sel, x_rej, N)
         else:
-            final_topk_states = self._forward_eval(x_sel, x_rej, pure_temb, layer_emb)
+            final_topk_states = self._forward_eval(x_sel, x_rej, pure_temb, layer_emb, gate_logits_or_none)
 
         processed_output = self._process_outputs(
             func,
@@ -117,7 +121,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         layer_emb_vector = self.layer_embedder(layer_id_tensor).to(dtype)
 
         l_val = self.layer_idx / max(1, self.total_layers - 1)
-        l_scalar = torch.tensor([l_val], device=pure_temb.device, dtype=dtype).expand(B, 1)
         current_t = global_context.current_timestep
         if current_t is None:
             raise ValueError("global_context.current_timestep is None")
@@ -131,12 +134,20 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             t_scalar = t_val.view(B, 1)
         else:
             raise ValueError(f"t_val.shape: {t_val.shape}")
-        l_scalar = l_scalar.view(B, 1)
-
-        gate_logits = self.gater_policy(pure_temb, layer_emb_vector)
-
-        predicted_ratio_logits = self.ratio_policy(t_scalar, layer_id_tensor)
-        policy_ratio = torch.sigmoid(predicted_ratio_logits).squeeze(-1).mean()
+        
+        gate_logits = None
+        if self.training or not self.use_gater_lut:
+            gate_logits = self.gater_policy(pure_temb, layer_emb_vector)
+        
+        policy_ratio = None
+        if self.use_gater_lut and self.ratio_cache is not None and not self.training:
+            current_t_index = global_context.current_iteration
+            policy_ratio = self.ratio_cache[self.layer_idx, current_t_index]
+            if not isinstance(policy_ratio, torch.Tensor):
+                policy_ratio = torch.tensor(policy_ratio, device=pure_temb.device, dtype=dtype)
+        else:
+            predicted_ratio_logits = self.ratio_policy(t_scalar, layer_id_tensor)
+            policy_ratio = torch.sigmoid(predicted_ratio_logits).squeeze(-1).mean()
 
         is_random_training = (
             self.training 
@@ -168,8 +179,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         )
 
         if token_scores_logits.shape[0] % 2 == 0 and token_scores_logits.shape[0] > 1:
-            B_half = token_scores_logits.shape[0] // 2
-
             scores_uncond, scores_cond = token_scores_logits.chunk(2, dim=0)
             unified_scores = torch.maximum(scores_uncond, scores_cond)
             token_scores_logits = torch.cat([unified_scores, unified_scores], dim=0)
@@ -197,6 +206,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             layer_emb_vector,
             pruned_encoder_states,
             N,
+            gate_logits,
         )
 
     def _forward_train(self, x_sel, x_rej, N):
@@ -226,7 +236,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         )
         return final_topk_states
 
-    def _forward_eval(self, x_sel, x_rej, pure_temb, layer_emb):
+    def _forward_eval(self, x_sel, x_rej, pure_temb, layer_emb, gate_logits_precomputed=None):
         dtype = x_sel.dtype
 
         if getattr(self, "is_validating", False):
@@ -241,11 +251,16 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             except Exception as e:
                 pass
 
+        decision = 0
         if self.use_gater_lut:
             current_t_index = global_context.current_iteration
             decision = self.gater_cache[self.layer_idx, current_t_index].item()
         else:
-            gater_logits = self.gater_policy(pure_temb, layer_emb)
+            if gate_logits_precomputed is not None:
+                gater_logits = gate_logits_precomputed
+            else:
+                gater_logits = self.gater_policy(pure_temb, layer_emb)
+            
             decision = torch.argmax(gater_logits[0], dim=-1).item()
 
         if decision == 0:
@@ -306,9 +321,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
     def _gather_rope(self, image_rotary_emb, survivors_indices):
         if image_rotary_emb is not None:
-            assert (
-                survivors_indices.shape[0] == 1
-            ), "image_rotary_emb only supports batch size 1"
             hidden_emb, encoder_emb, _ = parse_image_rotary_emb(
                 self.model_type,
                 image_rotary_emb,
@@ -362,9 +374,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.ratio_accumulator.append(self.current_ratio_for_loss)
 
         token_scores = torch.sigmoid(token_scores_logits)
-        # s_scale = (1.0 + torch.tanh(token_scores_logits))
-        # s_scale_mean = s_scale.mean()
-        # s_scale_std = s_scale.std()
         self.router_stats_accumulator.append(
             {
                 "scores_tensor": token_scores,
@@ -372,8 +381,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 "std": token_scores.std(),
                 "min": token_scores.min(),
                 "max": token_scores.max(),
-                # "s_scale_mean": s_scale_mean,
-                # "s_scale_std": s_scale_std,
             }
         )
 

@@ -46,6 +46,23 @@ def count_parameters(model):
     total_params = sum(p.numel() for p in model.parameters())
     return total_params
 
+def format_metric(value, base_unit=""):
+    if value is None:
+        return "N/A"
+    if isinstance(value, str):
+        return value
+        
+    if value >= 1e12:
+        return f"{value / 1e12:.2f} T{base_unit}"
+    elif value >= 1e9:
+        return f"{value / 1e9:.2f} G{base_unit}"
+    elif value >= 1e6:
+        return f"{value / 1e6:.2f} M{base_unit}"
+    elif value >= 1e3:
+        return f"{value / 1e3:.2f} K{base_unit}"
+    else:
+        return f"{value:.2f} {base_unit}"
+
 class FlopsMeasurer:
     def __init__(self, model):
         self.model = model
@@ -55,18 +72,32 @@ class FlopsMeasurer:
         self.hook_handle = None
 
     def enable(self):
-        self.hook_handle = self.model.register_forward_pre_hook(self._hook_fn)
+        self.hook_handle = self.model.register_forward_pre_hook(self._hook_fn, with_kwargs=True)
 
     def _hook_fn(self, module, args, kwargs):
+        if self.hook_handle:
+            self.hook_handle.remove()
+            self.hook_handle = None
+
         if self.flops is not None:
             return
 
         print("\n[FLOPs] Capturing input for FLOPs calculation (DiT Single Step)...")
         try:
+            clean_kwargs = {}
+            for k, v in kwargs.items():
+                if isinstance(v, torch.Tensor):
+                    clean_kwargs[k] = v
+                elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                    try:
+                        clean_kwargs[k] = torch.tensor(v)
+                    except:
+                        pass
+            
             flops, macs, params = calculate_flops(
                 model=module,
                 args=args,
-                kwargs=kwargs,
+                kwargs=clean_kwargs,
                 print_results=False, 
                 output_as_string=False,
                 output_precision=4
@@ -74,15 +105,13 @@ class FlopsMeasurer:
             self.flops = flops
             self.macs = macs
             self.params = params
-            print(f"[FLOPs] Success: {flops} FLOPs, {params} Params")
+            
+            print(f"[FLOPs] Success: {format_metric(flops, 'FLOPs')}")
+            
         except Exception as e:
             print(f"[FLOPs] Failed to calculate FLOPs: {e}")
             self.flops = "Error"
             self.macs = "Error"
-        
-        if self.hook_handle:
-            self.hook_handle.remove()
-            self.hook_handle = None
 
 def benchmark(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -104,8 +133,8 @@ def benchmark(args):
     model = None
     if hasattr(pipe, "transformer"):
         model = pipe.transformer
-    else:
-        raise ValueError("Pipeline does not have a 'transformer' attribute.")
+    elif hasattr(pipe, "unet"):
+        model = pipe.unet
     
     total_p = 0
     if model:
@@ -159,7 +188,6 @@ def benchmark(args):
              kwargs["width"] = args.width
             
         image = process_quick_start(pipe, **kwargs)
-        # ====================
         
         end_event.record()
         torch.cuda.synchronize()
@@ -179,23 +207,25 @@ def benchmark(args):
     avg_latency = statistics.mean(latencies)
     avg_memory = statistics.mean(peak_memories)
 
+    display_name = os.path.basename(args.ckpt_path) if args.ckpt_path else "Baseline (No Checkpoint)"
+
     print("\n" + "=" * 20 + " Benchmark Report " + "=" * 20)
-    print(f"Model Checkpoint: {os.path.basename(args.ckpt_path)}")
+    print(f"Model Source: {display_name}")
+    if args.model_type:
+        print(f"Model Type:   {args.model_type}")
     print(f"Optimization: Merge LoRA={args.merge_lora}, Skip Layer0={args.optimize_hooks}")
-    print(f"Inference Resolution: {args.height}x{args.width}")
-    print(f"Inference Steps: {args.steps if args.steps > 0 else 'Default'}")
+    print(f"Resolution:   {args.height}x{args.width}")
+    print(f"Steps:        {args.steps if args.steps > 0 else 'Default'}")
     print("-" * 50)
     
     if model:
         print(f"Model Parameters (DiT):")
         print(f"  Total:     {total_p / 1e9:.3f} B")
     
-    if flops_measurer and flops_measurer.flops:
+    if flops_measurer and flops_measurer.flops not in [None, "Error"]:
         print(f"Computational Cost (DiT Single Forward):")
-        flops_val = flops_measurer.flops
-        macs_val = flops_measurer.macs
-        print(f"  FLOPs:     {flops_val}")
-        print(f"  MACs:      {macs_val}")
+        print(f"  FLOPs:     {format_metric(flops_measurer.flops, 'FLOPs')}")
+        print(f"  MACs:      {format_metric(flops_measurer.macs, 'MACs')}")
     elif args.measure_flops:
         print("Computational Cost: Measurement failed or skipped.")
 
@@ -206,7 +236,7 @@ def benchmark(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt_path", type=str, required=True, help="Path to checkpoint.pt")
+    parser.add_argument("--ckpt_path", type=str, default=None, help="Path to checkpoint.pt. If None, runs baseline.")
     parser.add_argument("--model_type", type=str, default=None, help="Required if ckpt_path is None (e.g. 'flux-dev').")
     parser.add_argument("--base_model_path", type=str, default=None)
     parser.add_argument("--jsonl_path", type=str, default="test/training/dataset/meta.jsonl", help="Dataset jsonl file")
@@ -230,4 +260,8 @@ if __name__ == "__main__":
     parser.add_argument("--save_images", action="store_true", help="Save generated images to disk")
     
     args = parser.parse_args()
+    
+    if args.ckpt_path is None and args.model_type is None:
+        parser.error("--model_type is required when --ckpt_path is not provided.")
+        
     benchmark(args)
