@@ -46,7 +46,7 @@ def calculate_gate_loss(config: dict, device: torch.device) -> torch.Tensor:
         metrics["loss/gater/gate_loss"] = final_loss.detach()
         return final_loss, metrics
     else:
-        return torch.tensor(0.0, device=device), metrics
+        return torch.tensor(0.0, device=device), {}
 
 
 def _calc_ratio_loss_common(ratios_list, config, device, prefix="adaptive_ratio"):
@@ -116,14 +116,7 @@ def calculate_image_ratio_loss(
     ratios_for_loss = []
     per_layer_ratios = {}
 
-    for hook in _get_shiva_hooks():
-        # Usually skip the first layer for loss calculation as it is often fixed to 1.0
-        if hook.layer_idx == 0:
-            # Clear accumulator to prevent memory leak even if ignored
-            if hasattr(hook, "image_ratio_accumulator"):
-                hook.image_ratio_accumulator.clear()
-            continue
-            
+    for hook in _get_shiva_hooks():            
         accumulator = getattr(hook, "image_ratio_accumulator", [])
         if accumulator:
             avg_ratio = torch.stack(accumulator).mean()
@@ -147,19 +140,21 @@ def calculate_context_ratio_loss(
     Calculates loss for Context Pruning ratios.
     """
     ratios_for_loss = []
+    per_layer_ratios = {}
     
     for hook in _get_shiva_hooks():
         accumulator = getattr(hook, "context_ratio_accumulator", [])
         if accumulator:
             avg_ratio = torch.stack(accumulator).mean()
             ratios_for_loss.append(avg_ratio)
+            per_layer_ratios[f"layer_{hook.layer_idx:02d}"] = avg_ratio.item()
         
         if hasattr(hook, "context_ratio_accumulator"):
             hook.context_ratio_accumulator.clear()
             
     loss, metrics = _calc_ratio_loss_common(ratios_for_loss, config, device, prefix="context_ratio")
     
-    return loss, metrics
+    return loss, metrics, per_layer_ratios
 
 
 def collect_context_stats(device: torch.device) -> dict:
@@ -195,6 +190,7 @@ def collect_context_stats(device: torch.device) -> dict:
 def collect_shiva_gate_prob(device: torch.device) -> tuple[torch.Tensor, dict]:
     gate_probs_per_hook = []
     gate_probs_per_layer = {}
+    metrics = {}
 
     for hook in _get_shiva_hooks():
         accumulator = hook.gater_fuse_prob_accumulator
@@ -208,9 +204,10 @@ def collect_shiva_gate_prob(device: torch.device) -> tuple[torch.Tensor, dict]:
 
     if gate_probs_per_hook:
         global_avg_prob = torch.stack(gate_probs_per_hook).mean()
-        return global_avg_prob, gate_probs_per_layer
+        metrics['adaptive_fuse_prob/avg_fuse_prob'] = global_avg_prob
+        return global_avg_prob, metrics, gate_probs_per_layer
     else:
-        return torch.tensor(0.0, device=device), {}
+        return torch.tensor(0.0, device=device), {}, {}
 
 
 def collect_autograd_stats(device):

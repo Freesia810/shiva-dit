@@ -2,7 +2,7 @@ import os
 from shiva_dit.training import DiffusionModelTrainer, LoraConfig, TrainerConfig
 from shiva_dit.shiva_hook import ShivaDitBlockHook
 
-DATA_DIR = "./single_sample_data"
+DATA_DIR = "test/training/dataset"
 META_FILE = os.path.join(DATA_DIR, "meta.jsonl")
 
 HookType = ShivaDitBlockHook
@@ -51,7 +51,6 @@ trainer_config = {
     "log_with_tensorboard": True,
     "wandb_run_name": "context-pruning-fixed",
     "extra_config": {
-        # Target ratio is for logging/adaptive loss only, less relevant for fixed mode
         "target_ratio": 1.0,
         # LR Order: [Base, LoRA, Gate, Fuser, ImageRatio, ContextRatio, ContextPruner]
         "stage_schedule": [

@@ -319,6 +319,8 @@ class DiffusionModelTrainer:
                 self.hook_type = "diffcr"
             elif hook_class.__name__ == "ShivaDitBlockHook":
                 self.hook_type = "shiva"
+                hook_kwargs["capture_mask_for_viz"] = True
+                hook_kwargs["skip_layer_indices"] = [0]
                 if self.accelerator.is_main_process:
                     print("Hook type: Shiva. Will use shared injection via setup_shared_hooks.")
             else:
@@ -964,7 +966,7 @@ class DiffusionModelTrainer:
         )
         
         # 3. Context Ratio Loss
-        ctx_ratio_loss, ctx_r_metrics = shiva_metrics.calculate_context_ratio_loss(loss_config, self.device)
+        ctx_ratio_loss, ctx_r_metrics, per_layer_context_ratios = shiva_metrics.calculate_context_ratio_loss(loss_config, self.device)
 
         # 4. Context Auxiliary Loss
         ctx_aux_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
@@ -988,14 +990,16 @@ class DiffusionModelTrainer:
         aggregated_metrics.update(img_r_metrics)
         aggregated_metrics.update(ctx_r_metrics)
 
-        avg_fuse_prob, per_layer_probs = (
+        _, gp_metrics, per_layer_probs = (
             shiva_metrics.collect_shiva_gate_prob(self.device)
         )
-        aggregated_metrics["adaptive_fuse_prob/avg_fuse_prob"] = avg_fuse_prob
+        aggregated_metrics.update(gp_metrics)
+
         self.step_per_layer_metrics.update(
             {
                 "adaptive_fuse_prob/per_layer_fuse_prob": per_layer_probs,
                 "adaptive_ratio/per_layer_ratios": per_layer_ratios,
+                "context_ratio/per_layer_context_ratios": per_layer_context_ratios,
             }
         )
 

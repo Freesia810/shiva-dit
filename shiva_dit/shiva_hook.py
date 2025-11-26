@@ -184,7 +184,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         # --- Metadata Preparation ---
         layer_id_tensor = self.layer_id_tensor.expand(B)
-        router_layer_emb_vector = self.router_layer_embedder(layer_id_tensor).to(dtype)
 
         def get_t_scalar():
             current_t = global_context.current_timestep
@@ -348,6 +347,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             self.current_gate_logits_for_loss = gate_logits
 
             # Router Call
+            router_layer_emb_vector = self.router_layer_embedder(layer_id_tensor).to(dtype)
             token_scores_logits = self.router(
                 hidden_states=hidden_states,
                 pooled_encoder_states=pooled_encoder_vector,
