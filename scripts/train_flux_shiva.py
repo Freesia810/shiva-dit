@@ -45,17 +45,14 @@ trainer_config = {
     "hook_only_steps": 0,
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
-    
     "caption_dropout_rate": 0.1,
     "num_epochs": 50,
     "train_batch_size": 1,
-    "gradient_accumulation_steps": 16, # 1750 steps * 16 = 28000 images (approx 1 epoch)
+    "gradient_accumulation_steps": 16,  # 1750 steps * 16 = 28000 images (approx 1 epoch)
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
-
-    "distillation_final_weight": 1.0, 
+    "distillation_final_weight": 1.0,
     "distillation_middle_weight": 0.0,
-
     "seed": 42,
     "logging_steps": 20,
     # 1 epoch = 1750 steps
@@ -66,7 +63,6 @@ trainer_config = {
     "val_batch_size": None,
     "val_metadata_file": "../dataset/MJHQ-30K/val.jsonl",
     "val_image_dir": "../dataset/MJHQ-30K/",
-    
     "run_inference_validation": True,
     "inference_steps": 1750,
     "inference_metadata_file": "../dataset/MJHQ-30K/test.jsonl",
@@ -74,45 +70,86 @@ trainer_config = {
     "inference_num_inference_steps": 28,
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",
-
     "extra_config": {
         "target_ratio": 0.8,
-        # LR Order: [Base, LoRA, Gate, ImageRatio, ContextRatio, ContextPruner]
+        # LR Order: [Base, LoRA, Gate, Fuser, ImageRatio, ContextRatio, ContextPruner]
         "stage_schedule": [
             # Stage 1: Warmup (1 epoch)
             {
-                "steps": 1750, 
-                "weights": {"ratio": [0.0, 0.0, 0.0], "gate": 0.0, "distill": [0.0, 0.0]},
-                "lr": [1e-5, 1e-4, 0.0, 0.0, 0.0, 0.0],
+                "steps": 1750,
+                "weights": {
+                    "ratio": [0.0, 0.0, 0.0],
+                    "gate": 0.0,
+                    "distill": [0.0, 0.0],
+                },
+                "lr": [1e-5, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
                 "temp": [5.0, 5.0, 2.0, 2.0],
             },
             # Stage 2: Warmup Cont. (2 epochs)
             {
-                "steps": 3500, 
-                "weights": {"ratio": [0.0, 0.0, 0.0], "gate": 0.0, "distill": [0.0, 0.0]},
-                "lr": [1e-5, 1e-5, 0.0, 0.0, 0.0, 0.0],
+                "steps": 3500,
+                "weights": {
+                    "ratio": [0.0, 0.0, 0.0],
+                    "gate": 0.0,
+                    "distill": [0.0, 0.0],
+                },
+                "lr": [1e-5, 1e-5, 0.0, 0.0, 0.0, 0.0, 0.0],
                 "temp": [5.0, 5.0, 2.0, 2.0],
             },
             # --------------------------------------------------
             # Stage 3: Train Ratio (4 epochs)
             {
-                "steps": 7000, 
-                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0, "distill": [1.0, 0.0]},
-                "lr": [0.0, 1e-4, 0.0, 5e-4, 0.0, 0.0],
+                "steps": 7000,
+                "weights": {
+                    "ratio": [1.0, 50.0, 1.0],
+                    "gate": 0.0,
+                    "distill": [1.0, 0.0],
+                },
+                "lr": [0.0, 1e-4, 0.0, 0.0, 5e-4, 0.0, 0.0],
                 "temp": [5.0, 10.0, 2.0, 10.0],
             },
             # Stage 4: Finetune Model (8 epochs)
             {
-                "steps": 14000, 
-                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0, "distill": [1.0, 0.0]},
-                "lr": [0.0, 1e-5, 0.0, 1e-5, 0.0, 0.0],
+                "steps": 14000,
+                "weights": {
+                    "ratio": [1.0, 50.0, 1.0],
+                    "gate": 0.0,
+                    "distill": [1.0, 0.0],
+                },
+                "lr": [0.0, 1e-5, 0.0, 0.0, 1e-5, 0.0, 0.0],
                 "temp": [10.0, 10.0, 10.0, 50.0],
             },
-            # Stage 5: Finetune with High Temp (6 epochs)
+            # Stage 5: Finetune with High Temp (2 epochs)
             {
-                "steps": -1, 
-                "weights": {"ratio": [1.0, 50.0, 1.0], "gate": 0.0, "distill": [1.0, 0.0]},
-                "lr": [0.0, 1e-5, 0.0, 1e-5, 0.0, 0.0],
+                "steps": 3500,
+                "weights": {
+                    "ratio": [1.0, 50.0, 1.0],
+                    "gate": 0.0,
+                    "distill": [1.0, 0.0],
+                },
+                "lr": [0.0, 1e-5, 0.0, 0.0, 1e-5, 0.0, 0.0],
+                "temp": [10.0, 10.0, 50.0, 50.0],
+            },
+            # Stage 6: Gater (4 epochs)
+            {
+                "steps": 7000,
+                "weights": {
+                    "ratio": [1.0, 50.0, 1.0],
+                    "gate": 0.0,
+                    "distill": [1.0, 0.0],
+                },
+                "lr": [0.0, 0.0, 1e-4, 2e-4, 0.0, 0.0, 0.0],
+                "temp": [10.0, 10.0, 50.0, 50.0],
+            },
+            # Stage 7: Final
+            {
+                "steps": -1,
+                "weights": {
+                    "ratio": [1.0, 50.0, 1.0],
+                    "gate": 0.0,
+                    "distill": [1.0, 0.0],
+                },
+                "lr": [0.0, 1e-5, 1e-5, 1e-5, 0.0, 0.0, 0.0],
                 "temp": [10.0, 10.0, 50.0, 50.0],
             },
         ],

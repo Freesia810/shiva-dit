@@ -620,12 +620,14 @@ class DiffusionModelTrainer:
         lora_params = []
         gate_policy_params = []
         image_ratio_policy_params = []
+        fuser_params = []
         context_ratio_policy_params = []
         context_pruner_params = []
         other_model_params = []
 
         gate_policy_param_ids = set()
         image_ratio_policy_param_ids = set()
+        fuser_param_ids = set()
         context_ratio_policy_param_ids = set()
         context_pruner_param_ids = set()
 
@@ -637,6 +639,9 @@ class DiffusionModelTrainer:
             if hasattr(hook, "image_ratio_policy") and hook.image_ratio_policy is not None:
                 for param in hook.image_ratio_policy.parameters():
                     image_ratio_policy_param_ids.add(id(param))
+            if hasattr(hook, "fuse_expert") and hook.fuse_expert is not None:
+                for param in hook.fuse_expert.parameters():
+                    fuser_param_ids.add(id(param))
             if hasattr(hook, "context_ratio_policy") and hook.context_ratio_policy is not None:
                 for param in hook.context_ratio_policy.parameters():
                     context_ratio_policy_param_ids.add(id(param))
@@ -653,6 +658,8 @@ class DiffusionModelTrainer:
                 gate_policy_params.append(param)
             elif pid in image_ratio_policy_param_ids:
                 image_ratio_policy_params.append(param)
+            elif pid in fuser_param_ids:
+                fuser_params.append(param)
             elif pid in context_ratio_policy_param_ids:
                 context_ratio_policy_params.append(param)
             elif pid in context_pruner_param_ids:
@@ -668,6 +675,7 @@ class DiffusionModelTrainer:
             print(f"Optimizing {len(lora_params)} LoRA params")
             print(f"Optimizing {len(gate_policy_params)} Gate params")
             print(f"Optimizing {len(image_ratio_policy_params)} Image Ratio params")
+            print(f"Optimizing {len(fuser_params)} Fuser params")
             print(f"Optimizing {len(context_ratio_policy_params)} Context Ratio params")
             print(f"Optimizing {len(context_pruner_params)} Context Pruner params")
             print(f"Optimizing {len(base_lr_params)} other params")
@@ -691,6 +699,12 @@ class DiffusionModelTrainer:
                 "lr": self.config.policy_learning_rate,
                 "weight_decay": 0.0,
                 "name": "image_ratio_policy"
+            },
+            {
+                "params": fuser_params,
+                "lr": self.config.learning_rate,
+                "weight_decay": 0.0,
+                "name": "fuser"
             },
             {
                 "params": context_ratio_policy_params,
@@ -1079,15 +1093,15 @@ class DiffusionModelTrainer:
             return
 
         # Strict 6-item mapping as requested
-        # [Base, LoRA, Gate, ImageRatio, ContextRatio, ContextPruner]
-        # Fuser is optional/appended if exists, or uses Gate's LR if not specified explicitly in a 7th slot.
+        # [Base, LoRA, Gate, Fuser, ImageRatio, ContextRatio, ContextPruner]
         
         lr_base = current_lrs[0]
         lr_lora = current_lrs[1]
         lr_gate = current_lrs[2]
-        lr_img_ratio = current_lrs[3]
-        lr_ctx_ratio = current_lrs[4]
-        lr_ctx_pruner = current_lrs[5]
+        lr_fuser = current_lrs[3]
+        lr_img_ratio = current_lrs[4]
+        lr_ctx_ratio = current_lrs[5]
+        lr_ctx_pruner = current_lrs[6]
 
         for param_group in self.optimizer.param_groups:
             group_name = param_group.get("name", "")
@@ -1100,6 +1114,8 @@ class DiffusionModelTrainer:
                 param_group["lr"] = lr_gate
             elif group_name == "image_ratio_policy":
                 param_group["lr"] = lr_img_ratio
+            elif group_name == "fuser":
+                param_group["lr"] = lr_fuser
             elif group_name == "context_ratio_policy":
                 param_group["lr"] = lr_ctx_ratio
             elif group_name == "context_pruner":

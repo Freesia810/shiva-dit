@@ -53,7 +53,7 @@ trainer_config = {
     "extra_config": {
         # Target ratio is for logging/adaptive loss only, less relevant for fixed mode
         "target_ratio": 1.0,
-        # LR Order: [Base, LoRA, Gate, ImageRatio, ContextRatio, ContextPruner]
+        # LR Order: [Base, LoRA, Gate, Fuser, ImageRatio, ContextRatio, ContextPruner]
         "stage_schedule": [
             {
                 "steps": -1,
@@ -64,7 +64,7 @@ trainer_config = {
                     "aux": 0.1,
                 },
                 # Only optimize ContextPruner (last item)
-                "lr": [0.0, 0.0, 0.0, 0.0, 0.0, 1e-4],
+                "lr": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1e-4],
                 "temp": [2.0, 2.0, 2.0, 2.0],
             },
         ],
