@@ -46,11 +46,9 @@ class ShivaTopkFunc(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, logits, k_float, Ts, Tk):
         B, N, D = x.shape
-        scores = torch.sigmoid(logits) 
-        k_int = int(torch.ceil(k_float).long().item())
+        idx_sorted = torch.argsort(logits, dim=-1, descending=True)
+        k_int = int(torch.ceil(k_float).item())
         k_int = max(1, min(k_int, N))
-
-        _, idx_sorted = torch.sort(scores, dim=-1, descending=True)
 
         topk_idx = idx_sorted[:, :k_int]
         rest_idx = idx_sorted[:, k_int:]

@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import Type
+from typing import Type, Optional, List
 
 from shiva_dit.hook.hook_manager import HookManager
 from shiva_dit.utils import global_context
@@ -18,6 +18,7 @@ def install_shiva_hooks(
     pipe,
     model_attrs: list[str],
     hook_cls_to_install: Type[ShivaDitBlockHook],
+    skip_layer_indices: Optional[List[int]] = None,
     **kwargs,
 ):
     shiva_mode = kwargs.pop("shiva_mode", "image")  # "image", "context", "both"
@@ -39,6 +40,10 @@ def install_shiva_hooks(
     # Common Configs
     init_Ts = kwargs.pop("init_Ts", 30.0)
     init_Tk = kwargs.pop("init_Tk", 30.0)
+
+    shared_gater_cache = kwargs.pop("shared_gater_cache", None)
+    shared_ratio_cache = kwargs.pop("shared_ratio_cache", None)
+    shared_context_cache = kwargs.pop("shared_context_cache", None)
 
     model_dim = global_context.hidden_dim
     prompt_embed_dim = global_context.encoder_hidden_dim
@@ -133,8 +138,17 @@ def install_shiva_hooks(
 
     layers_per_group = num_layers // num_router_groups if num_router_groups > 0 else num_layers
 
+    if skip_layer_indices is None:
+        skip_layer_indices = []
+
     injected = 0
+    skipped = 0
+
     for i, (hook_name, module) in enumerate(all_blocks):
+        if i in skip_layer_indices:
+            skipped += 1
+            continue
+
         injected_router = None
         if grouped_routers is not None:
             router_group_id = min(i // layers_per_group, num_router_groups - 1)
@@ -158,6 +172,11 @@ def install_shiva_hooks(
             "shared_context_ratio_policy": shared_context_ratio_policy,
             "fixed_context_ratio": fixed_context_ratio,
             
+            # LuT
+            "shared_gater_cache": shared_gater_cache,
+            "shared_ratio_cache": shared_ratio_cache,
+            "shared_context_cache": shared_context_cache,
+            "total_layers": num_layers,
             **kwargs,
         }
 
