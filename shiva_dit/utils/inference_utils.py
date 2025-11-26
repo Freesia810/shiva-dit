@@ -86,7 +86,7 @@ def load_pipeline_for_inference(
         if gater_lut_path:
             if os.path.exists(gater_lut_path):
                 print(f"  - Loading LUT from {gater_lut_path}")
-                lut_data = torch.load(gater_lut_path, map_location="cpu")
+                lut_data = torch.load(gater_lut_path, map_location=device)
                 
                 hook_kwargs["use_gater_lut"] = True
                 

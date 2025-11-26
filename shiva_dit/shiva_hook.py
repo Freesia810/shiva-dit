@@ -50,12 +50,11 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         if self.use_gater_lut:
             if self.gater_cache is None:
-                raise ValueError(f"Layer {self.layer_idx}: use_gater_lut=True but shared_gater_cache is None.")
+                raise ValueError(f"use_gater_lut=True but shared_gater_cache is None.")
             if self.ratio_cache is None:
-                raise ValueError(f"Layer {self.layer_idx}: use_gater_lut=True but shared_ratio_cache is None.")
+                raise ValueError(f"use_gater_lut=True but shared_ratio_cache is None.")
 
         self.total_layers = total_layers
-        self.layer_id_tensor_cache = None
 
         self.gate_loss_accumulator = []
         self.gater_fuse_prob_accumulator = []
@@ -65,6 +64,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.ratio_accumulator = []
 
         self.capture_mask_for_viz = capture_mask_for_viz
+
+    def on_register_hook(self, block: nn.Module):
+        self.register_buffer('layer_id_tensor', torch.tensor([self.layer_idx], dtype=torch.long))
 
     def delegated_call(self, func, module_self, *args, **kwargs):
         (
@@ -119,21 +121,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         )
 
         # Cache layer ID
-        if self.layer_id_tensor_cache is None or self.layer_id_tensor_cache.shape[0] != B:
-            self.layer_id_tensor_cache = torch.tensor(
-                [self.layer_idx], device=pure_temb.device, dtype=torch.long
-            ).expand(B)
-        layer_id_tensor = self.layer_id_tensor_cache
+        layer_id_tensor = self.layer_id_tensor.expand(B)
         layer_emb_vector = self.layer_embedder(layer_id_tensor).to(dtype)
-
-        current_t = global_context.current_timestep
-        t_val = current_t.to(dtype) / 1000.0
-        if t_val.numel() == 1:
-            t_scalar = t_val.view(1, 1).expand(B, 1)
-        elif t_val.shape[0] == B:
-            t_scalar = t_val.view(B, 1)
-        else:
-            raise ValueError(f"t_val.shape: {t_val.shape}")
         
         gate_logits = None
         if self.training or not self.use_gater_lut:
@@ -142,12 +131,17 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         policy_ratio = None
         if self.use_gater_lut and self.ratio_cache is not None and not self.training:
             current_t_index = global_context.current_iteration
-            if self.ratio_cache.device.type == 'cpu':
-                policy_ratio_val = self.ratio_cache[self.layer_idx, current_t_index].item()
-                policy_ratio = torch.tensor(policy_ratio_val, device=pure_temb.device, dtype=dtype)
-            else:
-                policy_ratio = self.ratio_cache[self.layer_idx, current_t_index].to(pure_temb.device)
+            policy_ratio = self.ratio_cache[self.layer_idx, current_t_index]
         else:
+            current_t = global_context.current_timestep
+            t_val = current_t.to(dtype) / 1000.0
+            if t_val.numel() == 1:
+                t_scalar = t_val.view(1, 1).expand(B, 1)
+            elif t_val.shape[0] == B:
+                t_scalar = t_val.view(B, 1)
+            else:
+                raise ValueError(f"t_val.shape: {t_val.shape}")
+
             predicted_ratio_logits = self.ratio_policy(t_scalar, layer_id_tensor)
             policy_ratio = torch.sigmoid(predicted_ratio_logits).squeeze(-1).mean()
 
@@ -254,10 +248,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         decision = 0
         if self.use_gater_lut:
             current_t_index = global_context.current_iteration
-            if self.gater_cache.device.type == 'cpu':
-                decision = self.gater_cache[self.layer_idx, current_t_index].item()
-            else:
-                decision = self.gater_cache[self.layer_idx, current_t_index].item()
+            decision = self.gater_cache[self.layer_idx, current_t_index].item()
         else:
             if gate_logits_precomputed is not None:
                 gater_logits = gate_logits_precomputed
@@ -269,7 +260,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         if decision == 0:
             final_topk_states = x_sel
         else:
-            final_topk_states = self.fuse_expert(x_sel.to(dtype), x_rej.to(dtype))
+            final_topk_states = self.fuse_expert(x_sel, x_rej)
         return final_topk_states
     
     def _process_outputs(
@@ -330,29 +321,23 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         return x_sel, x_rej, sel_idx, rej_idx
 
     def _gather_rope(self, image_rotary_emb, survivors_indices):
-        if image_rotary_emb is not None:
-            hidden_emb, encoder_emb, _ = parse_image_rotary_emb(
-                self.model_type,
-                image_rotary_emb,
-                global_context.hidden_seq_len,
-                global_context.encoder_hidden_seq_len_gen(),
-                split_extra=False,
-            )
+        if image_rotary_emb is None:
+            return None
 
-            hidden_emb = tuple(
-                torch.gather(
-                    x,
-                    dim=0,
-                    index=survivors_indices[0].unsqueeze(-1).expand(-1, x.shape[-1]),
-                )
-                for x in hidden_emb
-            )
+        hidden_emb, encoder_emb, _ = parse_image_rotary_emb(
+            self.model_type,
+            image_rotary_emb,
+            global_context.hidden_seq_len,
+            global_context.encoder_hidden_seq_len_gen(),
+            split_extra=False,
+        )
 
-            image_rotary_emb = join_image_rotary_emb(
-                self.model_type, hidden_emb, encoder_emb
-            )
+        idx = survivors_indices[0]
+        hidden_emb = tuple(x[idx] for x in hidden_emb)
 
-        return image_rotary_emb
+        return join_image_rotary_emb(
+            self.model_type, hidden_emb, encoder_emb
+        )
 
     def clear_accumulators(self):
         self.gate_loss_accumulator.clear()
