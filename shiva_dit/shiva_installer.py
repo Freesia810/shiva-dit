@@ -22,7 +22,7 @@ def install_shiva_hooks(
     **kwargs,
 ):
     shiva_mode = kwargs.pop("shiva_mode", "image")  # "image", "context", "both"
-    
+
     # Image Configs
     image_ratio_mode = kwargs.pop("image_ratio_mode", "adaptive")
     fixed_image_ratio = kwargs.pop("fixed_image_ratio", 0.5)
@@ -31,19 +31,19 @@ def install_shiva_hooks(
     num_router_groups = kwargs.pop("num_router_groups", 4)
     layer_embed_dim = kwargs.pop("layer_embed_dim", 256)
     fuse_expert_ffn_mult = kwargs.pop("fuse_expert_ffn_mult", 2)
-    
+
     # Context Configs
     context_ratio_mode = kwargs.pop("context_ratio_mode", "fixed")
     fixed_context_ratio = kwargs.pop("fixed_context_ratio", 1.0)
     proj_dim = kwargs.pop("proj_dim", 128)
-    
+
     # Common Configs
     init_Ts = kwargs.pop("init_Ts", 30.0)
     init_Tk = kwargs.pop("init_Tk", 30.0)
 
     shared_gater_cache = kwargs.pop("shared_gater_cache", None)
     shared_ratio_cache = kwargs.pop("shared_ratio_cache", None)
-    shared_context_cache = kwargs.pop("shared_context_cache", None)
+    shared_context_ratio_cache = kwargs.pop("shared_context_ratio_cache", None)
 
     model_dim = global_context.hidden_dim
     prompt_embed_dim = global_context.encoder_hidden_dim
@@ -86,26 +86,26 @@ def install_shiva_hooks(
 
     if shiva_mode in ["image", "both"]:
         print("  > Instantiating Image Pruning Modules...")
-        
+
         router_layer_embedder = nn.Embedding(num_layers, layer_embed_dim).to(device, dtype)
-        
+
         shared_gater_policy = ShivaGaterPolicy(
             time_embed_dim=time_embed_dim, 
             layer_embed_dim=layer_embed_dim, 
             bottleneck_dim=bottleneck_dim,
             num_layers=num_layers
         ).to(device, dtype)
-        
+
         if image_ratio_mode == "adaptive":
             shared_image_ratio_policy = ShivaRatioPolicy(
                 total_layers=num_layers, ratio_bottleneck_dim=ratio_bottleneck_dim
             ).to(device, dtype)
-        
+
         shared_pruner_expert = ShivaPrunerExpert(init_Ts=init_Ts, init_Tk=init_Tk).to(device, dtype)
         shared_fuse_expert = ShivaFuserExpert(
             hidden_dim=model_dim, ffn_mult=fuse_expert_ffn_mult
         ).to(device, dtype)
-        
+
         grouped_routers = nn.ModuleList([
             ShivaRouter(
                 hidden_dim=model_dim,
@@ -157,7 +157,6 @@ def install_shiva_hooks(
         hook_kwargs = {
             "shiva_mode": shiva_mode,
             "total_layers": num_layers,
-            
             # Image Modules & Embeddings
             "router_layer_embedder": router_layer_embedder,
             "shared_router": injected_router,
@@ -166,16 +165,14 @@ def install_shiva_hooks(
             "shared_pruner": shared_pruner_expert,
             "shared_fuse_expert": shared_fuse_expert,
             "fixed_image_ratio": fixed_image_ratio,
-            
             # Context Modules
             "shared_context_pruner": shared_context_pruner,
             "shared_context_ratio_policy": shared_context_ratio_policy,
             "fixed_context_ratio": fixed_context_ratio,
-            
             # LuT
             "shared_gater_cache": shared_gater_cache,
             "shared_ratio_cache": shared_ratio_cache,
-            "shared_context_cache": shared_context_cache,
+            "shared_context_ratio_cache": shared_context_ratio_cache,
             "total_layers": num_layers,
             **kwargs,
         }

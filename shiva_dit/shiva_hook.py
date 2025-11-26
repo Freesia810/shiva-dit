@@ -88,8 +88,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.gater_fuse_prob_accumulator = []
         self.router_stats_accumulator = []
         self.image_ratio_accumulator = []
-        self.k_accumulator = []
-        self.n_minus_k_accumulator = []
 
         # Context
         self.context_score_accumulator = []
