@@ -18,6 +18,7 @@ def install_shiva_hooks(
     pipe,
     model_attrs: list[str],
     hook_cls_to_install: Type[ShivaDitBlockHook],
+    skip_layer_indices: Optional[List[int]] = None,
     **kwargs,
 ):
     bottleneck_dim = kwargs.pop("bottleneck_dim", 64)
@@ -97,8 +98,17 @@ def install_shiva_hooks(
 
     layers_per_group = num_layers // num_router_groups
 
+    if skip_layer_indices is None:
+        skip_layer_indices = []
+
     injected = 0
+    skipped = 0
+
     for i, (hook_name, module) in enumerate(all_blocks):
+        if i in skip_layer_indices:
+            skipped += 1
+            continue
+        
         router_group_id = min(i // layers_per_group, num_router_groups - 1)
         injected_router = grouped_routers[router_group_id]
 
