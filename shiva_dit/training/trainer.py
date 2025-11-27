@@ -627,14 +627,6 @@ class DiffusionModelTrainer:
             self.model.enable_gradient_checkpointing()
             if self.accelerator.is_main_process:
                 print("Enabled gradient checkpointing for the model.")
-        
-        def make_inputs_require_grad(module, input, output):
-            output.requires_grad_(True)
-        
-        if hasattr(self.model, "base_model"):
-            self.model.base_model.register_forward_hook(make_inputs_require_grad)
-        else:
-            self.model.register_forward_hook(make_inputs_require_grad)
 
         lora_params = []
         gate_policy_params = []
@@ -837,8 +829,8 @@ class DiffusionModelTrainer:
 
         # update global context
         patch_size = 2
-        hidden_seq_height = noise.shape[2] // patch_size
-        hidden_seq_width = noise.shape[3] // patch_size
+        hidden_seq_height = noise.shape[-2] // patch_size
+        hidden_seq_width = noise.shape[-1] // patch_size
         hidden_seq_len = hidden_seq_height * hidden_seq_width
         global_context.update(hidden_seq_len=hidden_seq_len, hidden_seq_width=hidden_seq_width, hidden_seq_height=hidden_seq_height)
         if "encoder_hidden_states" in model_kwargs:
@@ -864,8 +856,8 @@ class DiffusionModelTrainer:
         elif self.model_type == 'qwen-image-edit':
             img_latents, cond_latents = img_latents
 
-            hidden_extra_seq_height = cond_latents.shape[2] // patch_size
-            hidden_extra_seq_width = cond_latents.shape[3] // patch_size
+            hidden_extra_seq_height = cond_latents.shape[-2] // patch_size
+            hidden_extra_seq_width = cond_latents.shape[-1] // patch_size
             hidden_extra_seq_len = hidden_extra_seq_height * hidden_extra_seq_width
             global_context.update(hidden_extra_seq_len=hidden_extra_seq_len, hidden_extra_seq_height=hidden_extra_seq_height, hidden_extra_seq_width=hidden_extra_seq_width)
 

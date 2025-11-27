@@ -26,6 +26,7 @@ trainer_config = {
     "image_dir": None,
     "model_type": "qwen-image-edit",
     "model_path": None,
+    "enable_gradient_checkpointing": True,
     "output_dir": "./checkpoints/",
     "training_mode": "hook_only",
     "hook_only_steps": 0,
