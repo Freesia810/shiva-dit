@@ -98,7 +98,7 @@ def install_shiva_hooks(
 
         if image_ratio_mode == "adaptive":
             shared_image_ratio_policy = ShivaRatioPolicy(
-                total_layers=num_layers, ratio_bottleneck_dim=ratio_bottleneck_dim
+                total_layers=num_layers, ratio_bottleneck_dim=ratio_bottleneck_dim, init_ratio=fixed_image_ratio
             ).to(device, dtype)
 
         shared_pruner_expert = ShivaPrunerExpert(init_Ts=init_Ts, init_Tk=init_Tk).to(device, dtype)
@@ -133,7 +133,7 @@ def install_shiva_hooks(
 
         if context_ratio_mode == "adaptive":
             shared_context_ratio_policy = ShivaRatioPolicy(
-                total_layers=num_layers, ratio_bottleneck_dim=ratio_bottleneck_dim
+                total_layers=num_layers, ratio_bottleneck_dim=ratio_bottleneck_dim, init_ratio=fixed_context_ratio
             ).to(device, dtype)
 
     layers_per_group = num_layers // num_router_groups if num_router_groups > 0 else num_layers

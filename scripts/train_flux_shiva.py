@@ -8,6 +8,7 @@ hook_config = {
 
     # --- Image Configs ---
     "image_ratio_mode": "adaptive",
+    "fixed_image_ratio": 0.6,
     "num_router_groups": 19,
     "bottleneck_dim": 512,
     "ratio_bottleneck_dim": 32,
@@ -71,14 +72,14 @@ trainer_config = {
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",
     "extra_config": {
-        "target_ratio": 0.8,
+        "target_ratio": 0.6,
         # LR Order: [Base, LoRA, Gate, Fuser, ImageRatio, ContextRatio, ContextPruner]
         "stage_schedule": [
             # ------------------------------------------------------------------
             # Stage 0: Router Warmup (Random Ratio)
             # ------------------------------------------------------------------
             {
-                "steps": 3500,
+                "steps": 1750,
                 "weights": {
                     "ratio": [1.0, 50.0, 1.0],
                     "gate": 0.0,
@@ -98,11 +99,11 @@ trainer_config = {
                 "steps": 3500,
                 "weights": {
                     "ratio": [1.0, 50.0, 1.0],
-                    "gate": 1.0,
+                    "gate": 10.0,
                     "distill": [1.0, 0.0],
                 },
-                "lr": [5e-5, 0.0, 2e-4, 2e-4, 5e-4, 0.0, 0.0],
-                "temp": [5.0, 5.0, 5.0, 5.0],
+                "lr": [1e-5, 0.0, 1e-4, 2e-4, 5e-4, 0.0, 0.0],
+                "temp": [2.0, 5.0, 2.0, 5.0],
             },
             # ------------------------------------------------------------------
             # Stage 2: Final Finetune (Hardening)

@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import math
 
 class ShivaGaterPolicy(nn.Module):
     def __init__(self, time_embed_dim, layer_embed_dim, bottleneck_dim, num_layers):
@@ -33,6 +34,7 @@ class ShivaRatioPolicy(nn.Module):
         self, 
         total_layers: int,
         ratio_bottleneck_dim: int = 32,
+        init_ratio: float = 0.8,
         **kwargs
     ):
         super().__init__()
@@ -49,7 +51,11 @@ class ShivaRatioPolicy(nn.Module):
         self.head = nn.Linear(ratio_bottleneck_dim, 1)
 
         nn.init.normal_(self.layer_emb.weight, std=0.01)
-        nn.init.constant_(self.head.bias, 1.386) 
+        eps = 1e-6
+        safe_ratio = max(eps, min(init_ratio, 1.0 - eps))
+        bias_val = math.log(safe_ratio / (1.0 - safe_ratio))
+        nn.init.constant_(self.head.bias, bias_val)
+        print(f"[ShivaRatioPolicy] Initialized bias to {bias_val:.4f} (Sigmoid -> {safe_ratio:.4f})")
         nn.init.zeros_(self.head.weight)
 
     def forward(self, t_scalar, layer_idx_tensor):
