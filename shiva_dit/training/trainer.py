@@ -1078,6 +1078,10 @@ class DiffusionModelTrainer:
             self._compute_loss(batch, self.global_step)
         )
         self.accelerator.backward(total_loss)
+        if self.config.enable_gradient_checkpointing:
+            for hook in HookManager.get_all_hooks().values():
+                if hasattr(hook, "clear_accumulators"):
+                    hook.clear_accumulators()
 
         self.step_metrics = hook_metrics
 
