@@ -623,6 +623,11 @@ class DiffusionModelTrainer:
         else:
             raise ValueError(f"Unknown training mode: {self.config.training_mode}")
 
+        if self.config.enable_gradient_checkpointing:
+            self.model.enable_gradient_checkpointing()
+            if self.accelerator.is_main_process:
+                print("Enabled gradient checkpointing for the model.")
+
         lora_params = []
         gate_policy_params = []
         image_ratio_policy_params = []
@@ -824,18 +829,16 @@ class DiffusionModelTrainer:
 
         # update global context
         patch_size = 2
-        hidden_seq_height = noise.shape[2] // patch_size
-        hidden_seq_width = noise.shape[3] // patch_size
-        hidden_seq_len = noise.shape[2] // patch_size * noise.shape[3] // patch_size
-        global_context.update(hidden_seq_len=hidden_seq_len)
-        global_context.update(hidden_seq_width=hidden_seq_width)
-        global_context.update(hidden_seq_height=hidden_seq_height)
+        hidden_seq_height = noise.shape[-2] // patch_size
+        hidden_seq_width = noise.shape[-1] // patch_size
+        hidden_seq_len = hidden_seq_height * hidden_seq_width
+        global_context.update(hidden_seq_len=hidden_seq_len, hidden_seq_width=hidden_seq_width, hidden_seq_height=hidden_seq_height)
         if "encoder_hidden_states" in model_kwargs:
             global_context.update(
                 encoder_hidden_seq_len=model_kwargs["encoder_hidden_states"].size(1)
             )
 
-        if self.model_type == "flux-dev" or self.model_type == "flux-kontext":
+        if self.model_type == "flux-dev":
             # pack for hidden state
             batch_size = batch["pixel_values"].shape[0]
             height, width = noisy_latents.shape[-2:]
@@ -850,6 +853,33 @@ class DiffusionModelTrainer:
                 noise, batch_size, num_channels_latents, height, width
             )
             timesteps = timesteps / 1000
+        elif self.model_type == 'qwen-image-edit':
+            img_latents, cond_latents = img_latents
+
+            hidden_extra_seq_height = cond_latents.shape[-2] // patch_size
+            hidden_extra_seq_width = cond_latents.shape[-1] // patch_size
+            hidden_extra_seq_len = hidden_extra_seq_height * hidden_extra_seq_width
+            global_context.update(hidden_extra_seq_len=hidden_extra_seq_len, hidden_extra_seq_height=hidden_extra_seq_height, hidden_extra_seq_width=hidden_extra_seq_width)
+
+            # pack for hidden state
+            batch_size = batch["pixel_values"].shape[0]
+            height, width = noisy_latents.shape[-2:]
+            num_channels_latents = self.pipe.transformer.config.in_channels // 4
+            img_latents = self.pipe._pack_latents(
+                img_latents, batch_size, num_channels_latents, height, width
+            )
+            noisy_latents = self.pipe._pack_latents(
+                noisy_latents, batch_size, num_channels_latents, height, width
+            )
+            noise = self.pipe._pack_latents(
+                noise, batch_size, num_channels_latents, height, width
+            )
+            cond_latents = self.pipe._pack_latents(
+                cond_latents, batch_size, num_channels_latents, height, width
+            )
+            timesteps = timesteps / 1000
+
+            noisy_latents = torch.cat([noisy_latents, cond_latents], dim=1)
 
         return img_latents, noise, noisy_latents, timesteps, model_kwargs
 
@@ -896,6 +926,8 @@ class DiffusionModelTrainer:
     def _calculate_main_loss(self, noise_pred, noise, img_latents):
         if self.model_type == "pixart-sigma":
             noise_pred = noise_pred.chunk(2, dim=1)[0]
+        elif self.model_type == 'qwen-image-edit':
+            noise_pred = noise_pred[:, : global_context.hidden_seq_len]
 
         if isinstance(self.scheduler, FlowMatchEulerDiscreteScheduler):
             # in flow-matching, we need to compute the noise target as vector field
@@ -1021,7 +1053,7 @@ class DiffusionModelTrainer:
             self._prepare_model_inputs(batch)
         )
 
-        if self.model_type == "flux-dev" or self.model_type == "flux-kontext":
+        if self.model_type in ["flux-dev", "qwen-image-edit"]:
             global_context.update(current_timestep=(timesteps * 1000).to(self.device))
         else:
             global_context.update(current_timestep=timesteps.to(self.device))
