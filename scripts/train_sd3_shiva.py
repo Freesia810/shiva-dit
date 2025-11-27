@@ -26,7 +26,8 @@ lora_config = {
     "lora_alpha": 32,
     "target_modules": [
         "to_q", "to_k", "to_v", "to_out.0",
-        "linear", "proj_mlp", "proj_out", "net.2",
+        "linear", "proj_mlp", "proj_out", 
+        "net.2", 
     ],
 }
 
@@ -35,12 +36,12 @@ trainer_config = {
     "image_dir": "../dataset/MJHQ-30K/",
     "model_type": "sd3",
     "model_path": None,
-    "output_dir": "./checkpoints/sd3_shiva_img",
+    "output_dir": "./checkpoints",
     "training_mode": "lora",
     "hook_only_steps": 0,
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
-    "caption_dropout_rate": 0.25,
+    "caption_dropout_rate": 0.1,
     "num_epochs": 50,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16,
@@ -60,99 +61,67 @@ trainer_config = {
     "inference_steps": 1750,
     "inference_metadata_file": "../dataset/MJHQ-30K/test.jsonl",
     "inference_seed": 42,
-    "inference_num_inference_steps": 30,
+    "inference_num_inference_steps": 28,
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",
     "extra_config": {
         "target_ratio": 0.8,
-        # LR Order: [Base, LoRA, Gate, Fuser, ImageRatio, ContextRatio, ContextPruner]
+        # LR Order Mapping in Trainer: 
+        # [0:Base/Router, 1:LoRA, 2:Gate, 3:Fuser, 4:ImageRatio(Policy), 5:CtxRatio, 6:CtxPruner]
         "stage_schedule": [
-            # Stage 1: Fix Ratio Warmup
+            # ------------------------------------------------------------------
+            # Stage 0: Router Warmup (Random Ratio Phase)
+            # ------------------------------------------------------------------
             {
-                "steps": 1750,
+                "steps": 3500, # 约 2 epochs
                 "weights": {
-                    "ratio": [0.0, 0.0, 0.0],
+                    "ratio": [1.0, 50.0, 1.0], 
                     "gate": 0.0,
-                    "distill": [0.0, 0.0],
+                    "distill": [1.0, 0.0]
                 },
-                "lr": [1e-5, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
-                "temp": [5.0, 5.0, 2.0, 2.0],
+                "lr": [5e-4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                "temp": [2.0, 2.0, 2.0, 2.0],
             },
-            # Stage 2: Random Ratio Warmup
-            {
-                "steps": 5250,
-                "weights": {
-                    "ratio": [0.0, 0.0, 0.0],
-                    "gate": 0.0,
-                    "distill": [0.0, 0.0],
-                },
-                "lr": [1e-5, 1e-5, 0.0, 0.0, 0.0, 0.0, 0.0],
-                "temp": [5.0, 5.0, 2.0, 2.0],
-            },
-            # Stage 3: Enable Ratio Loss
-            {
-                "steps": 7000,
-                "weights": {
-                    "ratio": [1.0, 50.0, 1.0],
-                    "gate": 0.0,
-                    "distill": [1.0, 0.0],
-                },
-                "lr": [0.0, 1e-5, 0.0, 0.0, 5e-4, 0.0, 0.0],
-                "temp": [5.0, 10.0, 2.0, 10.0],
-            },
-            # Stage 4: Finetune Model (8 epochs)
-            {
-                "steps": 14000,
-                "weights": {
-                    "ratio": [1.0, 50.0, 1.0],
-                    "gate": 0.0,
-                    "distill": [1.0, 0.0],
-                },
-                "lr": [0.0, 1e-5, 0.0, 0.0, 1e-5, 0.0, 0.0],
-                "temp": [10.0, 10.0, 10.0, 50.0],
-            },
-            # Stage 5: Finetune with High Temp (2 epochs)
+
+            # ------------------------------------------------------------------
+            # Stage 1: Policy Wakeup & Adaptive Fusion
+            # ------------------------------------------------------------------
             {
                 "steps": 3500,
                 "weights": {
-                    "ratio": [1.0, 50.0, 1.0],
-                    "gate": 0.0,
-                    "distill": [1.0, 0.0],
+                    "ratio": [1.0, 50.0, 1.0], 
+                    "gate": 1.0,
+                    "distill": [1.0, 0.0]
                 },
-                "lr": [0.0, 1e-5, 0.0, 0.0, 1e-5, 0.0, 0.0],
-                "temp": [10.0, 10.0, 50.0, 50.0],
+                "lr": [1e-4, 0.0, 2e-4, 2e-4, 5e-4, 0.0, 0.0],
+                "temp": [5.0, 5.0, 5.0, 5.0],
             },
-            # Stage 4: Gate (4 epochs)
-            {
-                "steps": 7000,
-                "weights": {
-                    "ratio": [1.0, 50.0, 1.0],
-                    "gate": 0.1,
-                    "distill": [1.0, 0.0],
-                },
-                "lr": [0.0, 1e-5, 1e-4, 1e-5, 0.0, 0.0, 0.0],
-                "temp": [10.0, 10.0, 10.0, 50.0],
-            },
-            # Final Stage
+
+            # ------------------------------------------------------------------
+            # Stage 2: Final Finetune (Hardening)
+            # ------------------------------------------------------------------
             {
                 "steps": -1,
                 "weights": {
-                    "ratio": [1.0, 50.0, 1.0],
-                    "gate": 0.1,
-                    "distill": [1.0, 0.0],
+                    "ratio": [1.0, 50.0, 1.0], 
+                    "gate": 1.0,
+                    "distill": [1.0, 0.0]
                 },
-                "lr": [0.0, 1e-5, 1e-5, 1e-5, 0.0, 0.0, 0.0],
-                "temp": [10.0, 10.0, 50.0, 50.0],
+                "lr": [1e-5, 1e-4, 1e-5, 1e-5, 1e-5, 0.0, 0.0],
+                "temp": [5.0, 10.0, 5.0, 50.0],
             },
         ],
     },
     "log_with_tensorboard": True,
     "log_with_wandb": False,
     "wandb_project": "shiva-dit",
-    "wandb_run_name": "sd3-shiva-image",
+    "wandb_run_name": "sd3-shiva-optimized",
 }
 
 print(hook_config)
+print(lora_config)
+print(trainer_config)
+
 config = TrainerConfig(**trainer_config)
 trainer = DiffusionModelTrainer(config=config)
 trainer.train()
