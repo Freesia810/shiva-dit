@@ -18,35 +18,40 @@ def _get_shiva_hooks():
 
 def calculate_gate_loss(config: dict, device: torch.device) -> torch.Tensor:
     gate_losses = []
+    metrics = {}
+    gate_probs_per_hook = []
+    gate_probs_per_layer = {}
 
     for hook in _get_shiva_hooks():
         accumulator = hook.gate_loss_accumulator
-
         if accumulator:
             avg_loss_for_hook = torch.stack(accumulator).mean()
             gate_losses.append(avg_loss_for_hook)
             device = avg_loss_for_hook.device
-
         hook.gate_loss_accumulator.clear()
 
-    metrics = {
-        "loss/gater/gate_loss_raw": 0.0,
-        "loss/gater/gate_loss": 0.0,
-    }
+        accumulator = hook.gater_fuse_prob_accumulator
+        if accumulator:
+            avg_prob_for_hook = torch.stack(accumulator).mean()
+            gate_probs_per_hook.append(avg_prob_for_hook)
+            gate_probs_per_layer[f"layer_{hook.layer_idx:02d}"] = avg_prob_for_hook
+        hook.gater_fuse_prob_accumulator.clear()
     
+    final_loss = torch.tensor(0.0, device=device)
+
     if gate_losses:
         loss_weight = config.get("gate_loss_weight", 0.0)
         raw_loss = torch.stack(gate_losses).mean()
         final_loss = raw_loss * loss_weight
         
-        # Move to requested device if needed, though usually they are on same GPU
-        final_loss = final_loss.to(device)
-        
         metrics["loss/gater/gate_loss_raw"] = raw_loss.detach()
         metrics["loss/gater/gate_loss"] = final_loss.detach()
-        return final_loss, metrics
-    else:
-        return torch.tensor(0.0, device=device), {}
+    
+    if gate_probs_per_hook:
+        global_avg_prob = torch.stack(gate_probs_per_hook).mean()
+        metrics['gater/avg_fuse_prob'] = global_avg_prob
+        
+    return final_loss, metrics, gate_probs_per_layer
 
 
 def _calc_ratio_loss_common(ratios_list, config, device, prefix="adaptive_ratio"):
@@ -184,30 +189,6 @@ def collect_context_stats(device: torch.device) -> dict:
         }
     else:
         return {}
-
-
-@torch.no_grad()
-def collect_shiva_gate_prob(device: torch.device) -> tuple[torch.Tensor, dict]:
-    gate_probs_per_hook = []
-    gate_probs_per_layer = {}
-    metrics = {}
-
-    for hook in _get_shiva_hooks():
-        accumulator = hook.gater_fuse_prob_accumulator
-
-        if accumulator:
-            avg_prob_for_hook = torch.stack(accumulator).mean()
-            gate_probs_per_hook.append(avg_prob_for_hook)
-            gate_probs_per_layer[f"layer_{hook.layer_idx:02d}"] = avg_prob_for_hook
-
-        hook.gater_fuse_prob_accumulator.clear()
-
-    if gate_probs_per_hook:
-        global_avg_prob = torch.stack(gate_probs_per_hook).mean()
-        metrics['adaptive_fuse_prob/avg_fuse_prob'] = global_avg_prob
-        return global_avg_prob, metrics, gate_probs_per_layer
-    else:
-        return torch.tensor(0.0, device=device), {}, {}
 
 
 def collect_autograd_stats(device):

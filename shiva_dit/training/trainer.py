@@ -477,17 +477,21 @@ class DiffusionModelTrainer:
     def _setup_metric_manager(self):
         self.metric_grouping_rules = {
             "loss/losses_weighted": [
-                "loss/adaptive_ratio/ratio_loss",
+                "loss/image_ratio/ratio_loss",
                 "loss/context_ratio/ratio_loss", 
+                "loss/context/context_aux_loss",
                 "loss/gater/gate_loss",
                 "loss/diffcr_loss",
-                "loss/context_aux_loss",
             ],
             "loss/losses_raw": [
-                "loss/adaptive_ratio/floor_loss",
-                "loss/adaptive_ratio/mse_loss",
-                "loss/adaptive_ratio/budget_loss",
                 "loss/gater/gate_loss_raw",
+                "loss/image_ratio/floor_loss",
+                "loss/image_ratio/mse_loss",
+                "loss/image_ratio/budget_loss",
+                "loss/context_ratio/floor_loss",
+                "loss/context_ratio/mse_loss",
+                "loss/context_ratio/budget_loss",
+                "loss/context/context_aux_loss_raw",
             ],
             "router/scores": [
                 "router/mean_score",
@@ -500,16 +504,16 @@ class DiffusionModelTrainer:
             "router/distribution": [
                 "router/std_score",
             ],
-            "adaptive_ratio": [
-                "adaptive_ratio/target_ratio",
-                "adaptive_ratio/avg_ratio",
+            "ratio_policy/image_ratio": [
+                "image_ratio/target_ratio",
+                "image_ratio/avg_ratio",
             ],
-            "context_ratio": [ 
-                "context/ratio/avg_ratio",
-                "context/ratio/target_ratio",
+            "ratio_policy/context_ratio": [ 
+                "context_ratio/avg_ratio",
+                "context_ratio/target_ratio",
             ],
-            "adaptive_fuse_prob": [
-                "adaptive_fuse_prob/avg_fuse_prob",
+            "gater": [
+                "gater/avg_fuse_prob",
             ],
             "context/scores": [
                 "context/align_score_mean",
@@ -956,7 +960,7 @@ class DiffusionModelTrainer:
         loss_config = self._get_shiva_loss_config(global_step)
 
         # 1. Gate Loss
-        gate_loss, g_metrics = shiva_metrics.calculate_gate_loss(
+        gate_loss, g_metrics, per_layer_fuse_probs = shiva_metrics.calculate_gate_loss(
             loss_config, self.device
         )
         
@@ -978,8 +982,10 @@ class DiffusionModelTrainer:
                     layer_aux_losses = torch.stack(hook.context_aux_loss_accumulator)
                     all_aux_losses.append(layer_aux_losses.sum())
             if all_aux_losses:
-                ctx_aux_loss = torch.stack(all_aux_losses).sum() * aux_weight
-                aggregated_metrics["loss/context_aux_loss"] = ctx_aux_loss.detach()
+                ctx_aux_loss_raw = torch.stack(all_aux_losses).sum()
+                ctx_aux_loss = ctx_aux_loss_raw * aux_weight
+                aggregated_metrics["loss/context/context_aux_loss_raw"] = ctx_aux_loss_raw.detach()
+                aggregated_metrics["loss/context/context_aux_loss"] = ctx_aux_loss.detach()
 
         context_stats = shiva_metrics.collect_context_stats(self.device)
         aggregated_metrics.update(context_stats)
@@ -990,16 +996,11 @@ class DiffusionModelTrainer:
         aggregated_metrics.update(img_r_metrics)
         aggregated_metrics.update(ctx_r_metrics)
 
-        _, gp_metrics, per_layer_probs = (
-            shiva_metrics.collect_shiva_gate_prob(self.device)
-        )
-        aggregated_metrics.update(gp_metrics)
-
         self.step_per_layer_metrics.update(
             {
-                "adaptive_fuse_prob/per_layer_fuse_prob": per_layer_probs,
-                "adaptive_ratio/per_layer_ratios": per_layer_ratios,
-                "context_ratio/per_layer_context_ratios": per_layer_context_ratios,
+                "gater/per_layer_fuse_prob": per_layer_fuse_probs,
+                "ratio_policy/image_ratio/per_layer_ratios": per_layer_ratios,
+                "ratio_policy/context_ratio/per_layer_context_ratios": per_layer_context_ratios,
             }
         )
 
@@ -1035,11 +1036,6 @@ class DiffusionModelTrainer:
 
         main_loss = self._calculate_main_loss(noise_pred, noise, img_latents)
         hook_loss, hook_metrics = self._calculate_hook_loss(global_step, timesteps)
-
-        hook_metrics["distill/weight_final"] = torch.tensor(
-            loss_config.get("distill_final_weight", 0.0), 
-            device=self.device
-        )
 
         total_loss = main_loss + hook_loss + distill_loss
 
@@ -1239,10 +1235,10 @@ class DiffusionModelTrainer:
                 break
 
         metrics_to_log_tensors.update({
-            "train/total_loss": gathered_losses["total"],
-            "train/main_loss": gathered_losses["main"],
-            "train/extra_loss": gathered_losses["hook"],
-            "train/distill_loss": gathered_losses["distill"],
+            "loss/train/total_loss": gathered_losses["total"],
+            "loss/train/main_loss": gathered_losses["main"],
+            "loss/train/extra_loss": gathered_losses["hook"],
+            "loss/train/distill_loss": gathered_losses["distill"],
             "train/Ts": torch.tensor(current_Ts, device=self.device),
             "train/Tk": torch.tensor(current_Tk, device=self.device),
             "train/context_Ts": torch.tensor(context_Ts, device=self.device),
@@ -1360,15 +1356,15 @@ class DiffusionModelTrainer:
 
             if self.global_step % log_trigger == 0:
                 postfix_dict = {
-                    "loss": f"{self.metric_manager.get_metric('train/total_loss'):.4f}",
-                    "main_loss": f"{self.metric_manager.get_metric('train/main_loss'):.4f}",
-                    "extra_loss": f"{self.metric_manager.get_metric('train/extra_loss'):.4f}",
+                    "loss": f"{self.metric_manager.get_metric('loss/train/total_loss'):.4f}",
+                    "main_loss": f"{self.metric_manager.get_metric('loss/train/main_loss'):.4f}",
+                    "extra_loss": f"{self.metric_manager.get_metric('loss/train/extra_loss'):.4f}",
                     "step": self.global_step,
                 }
 
                 if self.hook_type == "shiva":
                     # Use get_metric with default 0.0 to avoid errors if mode is off
-                    img_rl = self.metric_manager.get_metric('loss/adaptive_ratio/ratio_loss', 0.0)
+                    img_rl = self.metric_manager.get_metric('loss/image_ratio/ratio_loss', 0.0)
                     ctx_rl = self.metric_manager.get_metric('loss/context_ratio/ratio_loss', 0.0)
                     postfix_dict["r_loss"] = f"I:{img_rl:.3f}/C:{ctx_rl:.3f}"
 
@@ -1438,121 +1434,122 @@ class DiffusionModelTrainer:
     def _log_router_visualization(self, batch=None):
         if not self.accelerator.is_main_process:
             return
-
-        if batch is not None and "pixel_values" in batch:
-            try:
-                import torchvision
-
-                try:
-                    import cv2
-                    import numpy as np
-                except ImportError:
-                    cv2 = None
-
-                images = batch["pixel_values"].detach().cpu().float()
-
-                timesteps = global_context.current_timestep
-                if timesteps is not None:
-                    timesteps = timesteps.detach().cpu().flatten()
-
-                images = (images + 1.0) / 2.0
-                images = images.clamp(0.0, 1.0)
-
-                annotated_images = []
-                for i in range(images.shape[0]):
-                    img_tensor = images[i]  # (C, H, W)
-
-                    if cv2 is not None and timesteps is not None and i < len(timesteps):
-                        # Tensor (C, H, W) -> Numpy (H, W, C)
-                        img_np = img_tensor.permute(1, 2, 0).numpy()
-                        img_np = (img_np * 255).astype(np.uint8)
-                        img_np = np.ascontiguousarray(img_np)
-
-                        t_val = timesteps[i].item()
-                        if t_val <= 1.0:
-                            text = f"t={t_val:.3f}"
-                        else:
-                            text = f"t={int(t_val)}"
-
-                        cv2.putText(
-                            img_np,
-                            text,
-                            (5, 20),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.6,
-                            (0, 0, 0),
-                            2,
-                        )
-                        cv2.putText(
-                            img_np,
-                            text,
-                            (5, 20),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.6,
-                            (255, 255, 255),
-                            1,
-                        )
-
-                        # Numpy (H, W, C) -> Tensor (C, H, W)
-                        img_tensor = (
-                            torch.from_numpy(img_np).permute(2, 0, 1).float() / 255.0
-                        )
-
-                    annotated_images.append(img_tensor)
-
-                if annotated_images:
-                    images = torch.stack(annotated_images)
-
-                grid_input = torchvision.utils.make_grid(
-                    images,
-                    nrow=int(len(images) ** 0.5) or 1,
-                    normalize=False,
-                    pad_value=1.0,
-                )
-
-                self.logger.log_image(
-                    "router_viz/input_image", grid_input, self.global_step
-                )
-            except Exception as e:
-                print(f"Failed to log input image: {e}")
-
-        num_layers = global_context.num_layers
-        if global_context.num_single_layers is not None:
-            num_layers += global_context.num_single_layers
-        target_layers = range(num_layers)
-
+        
         from shiva_dit.hook import HookManager
         all_hooks = HookManager.get_all_hooks()
+        hooks = list(HookManager.get_all_hooks().values())
+        if hasattr(hooks[0], 'shiva_mode') and hooks[0].shiva_mode == 'image':
+            if batch is not None and "pixel_values" in batch:
+                try:
+                    import torchvision
 
-        H = global_context.hidden_seq_height
-        W = global_context.hidden_seq_width
-
-        for layer_idx in target_layers:
-            target_hook = None
-            for name, hook in all_hooks.items():
-                if hook.layer_idx == layer_idx and hasattr(hook, "last_token_scores") and getattr(hook, "last_sel_idx", None) is not None:
-                    target_hook = hook
-                    break
-
-            if target_hook is not None and target_hook.last_token_scores is not None:
-                heatmap_tensor = shiva_metrics.generate_router_heatmap(
-                    target_hook.last_token_scores,
-                    target_hook.last_sel_idx,
-                    H, W
-                )
-
-                if heatmap_tensor is not None:
                     try:
-                        import torchvision
-                        grid_img_tensor = torchvision.utils.make_grid(
-                            heatmap_tensor, nrow=heatmap_tensor.shape[0], normalize=False, pad_value=0.5
-                        )
-                        self.logger.log_image(f"router_viz/layer_{layer_idx:02d}", grid_img_tensor, self.global_step)
+                        import cv2
+                        import numpy as np
                     except ImportError:
-                        self.logger.log_image(f"router_viz/layer_{layer_idx:02d}", heatmap_tensor[0], self.global_step)
+                        cv2 = None
 
-                target_hook.last_token_scores = None
-                target_hook.last_sel_idx = None
+                    images = batch["pixel_values"].detach().cpu().float()
+
+                    timesteps = global_context.current_timestep
+                    if timesteps is not None:
+                        timesteps = timesteps.detach().cpu().flatten()
+
+                    images = (images + 1.0) / 2.0
+                    images = images.clamp(0.0, 1.0)
+
+                    annotated_images = []
+                    for i in range(images.shape[0]):
+                        img_tensor = images[i]  # (C, H, W)
+
+                        if cv2 is not None and timesteps is not None and i < len(timesteps):
+                            # Tensor (C, H, W) -> Numpy (H, W, C)
+                            img_np = img_tensor.permute(1, 2, 0).numpy()
+                            img_np = (img_np * 255).astype(np.uint8)
+                            img_np = np.ascontiguousarray(img_np)
+
+                            t_val = timesteps[i].item()
+                            if t_val <= 1.0:
+                                text = f"t={t_val:.3f}"
+                            else:
+                                text = f"t={int(t_val)}"
+
+                            cv2.putText(
+                                img_np,
+                                text,
+                                (5, 20),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.6,
+                                (0, 0, 0),
+                                2,
+                            )
+                            cv2.putText(
+                                img_np,
+                                text,
+                                (5, 20),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.6,
+                                (255, 255, 255),
+                                1,
+                            )
+
+                            # Numpy (H, W, C) -> Tensor (C, H, W)
+                            img_tensor = (
+                                torch.from_numpy(img_np).permute(2, 0, 1).float() / 255.0
+                            )
+
+                        annotated_images.append(img_tensor)
+
+                    if annotated_images:
+                        images = torch.stack(annotated_images)
+
+                    grid_input = torchvision.utils.make_grid(
+                        images,
+                        nrow=int(len(images) ** 0.5) or 1,
+                        normalize=False,
+                        pad_value=1.0,
+                    )
+
+                    self.logger.log_image(
+                        "router_viz/input_image", grid_input, self.global_step
+                    )
+                except Exception as e:
+                    print(f"Failed to log input image: {e}")
+
+            num_layers = global_context.num_layers
+            if global_context.num_single_layers is not None:
+                num_layers += global_context.num_single_layers
+            target_layers = range(num_layers)
+
+            H = global_context.hidden_seq_height
+            W = global_context.hidden_seq_width
+
+            for layer_idx in target_layers:
+                target_hook = None
+                for name, hook in all_hooks.items():
+                    if hook.layer_idx == layer_idx and hasattr(hook, "last_token_scores") and getattr(hook, "last_sel_idx", None) is not None:
+                        target_hook = hook
+                        break
+
+                if target_hook is not None and target_hook.last_token_scores is not None:
+                    heatmap_tensor = shiva_metrics.generate_router_heatmap(
+                        target_hook.last_token_scores,
+                        target_hook.last_sel_idx,
+                        H, W
+                    )
+
+                    if heatmap_tensor is not None:
+                        try:
+                            import torchvision
+                            grid_img_tensor = torchvision.utils.make_grid(
+                                heatmap_tensor, nrow=heatmap_tensor.shape[0], normalize=False, pad_value=0.5
+                            )
+                            self.logger.log_image(f"router_viz/layer_{layer_idx:02d}", grid_img_tensor, self.global_step)
+                        except ImportError:
+                            self.logger.log_image(f"router_viz/layer_{layer_idx:02d}", heatmap_tensor[0], self.global_step)
+
+                    target_hook.last_token_scores = None
+                    target_hook.last_sel_idx = None
 
     def _log_context_visualization(self, batch):
         if not self.accelerator.is_main_process:
@@ -1560,58 +1557,59 @@ class DiffusionModelTrainer:
         if batch is None:
             return
 
-        input_ids = None
-        if "input_ids" in batch:
-            val = batch["input_ids"]
-            if isinstance(val, list) or isinstance(val, tuple):
-                input_ids = val[-1]
-            else:
-                input_ids = val
-        
-        if input_ids is None:
-            return
-
-        if isinstance(input_ids, torch.Tensor):
-            input_ids = input_ids[0].detach().cpu()
-        
-        tokenizer = self.tokenizers[-1]
-
-        try:
-            from shiva_dit.utils.text_viz import render_token_importance
-        except ImportError:
-            return
-
-        num_layers = global_context.num_layers
-        if global_context.num_single_layers is not None:
-            num_layers += global_context.num_single_layers
-        target_layers = range(num_layers)
-
         from shiva_dit.hook import HookManager
         all_hooks = HookManager.get_all_hooks()
-
-        for layer_idx in target_layers:
-            target_hook = None
-            for name, hook in all_hooks.items():
-                if hook.layer_idx == layer_idx and hasattr(hook, "last_context_mask"):
-                    target_hook = hook
-                    break
+        hooks = list(HookManager.get_all_hooks().values())
+        if hasattr(hooks[0], 'shiva_mode') and hooks[0].shiva_mode == 'context':
+            input_ids = None
+            if "input_ids" in batch:
+                val = batch["input_ids"]
+                if isinstance(val, list) or isinstance(val, tuple):
+                    input_ids = val[-1]
+                else:
+                    input_ids = val
             
-            if target_hook is not None and target_hook.last_context_mask is not None:
-                try:
-                    mask = target_hook.last_context_mask[0].cpu()
-                    viz_img = render_token_importance(
-                        tokenizer, 
-                        input_ids, 
-                        mask=mask,
-                        width=1000
-                    )
-                    
-                    self.logger.log_image(f"context_viz/layer_{layer_idx:02d}", viz_img, self.global_step)
+            if input_ids is None:
+                return
+
+            if isinstance(input_ids, torch.Tensor):
+                input_ids = input_ids[0].detach().cpu()
+            
+            tokenizer = self.tokenizers[-1]
+
+            try:
+                from shiva_dit.utils.text_viz import render_token_importance
+            except ImportError:
+                return
+
+            num_layers = global_context.num_layers
+            if global_context.num_single_layers is not None:
+                num_layers += global_context.num_single_layers
+            target_layers = range(num_layers)
+
+            for layer_idx in target_layers:
+                target_hook = None
+                for name, hook in all_hooks.items():
+                    if hook.layer_idx == layer_idx and hasattr(hook, "last_context_mask"):
+                        target_hook = hook
+                        break
                 
-                except Exception as e:
-                    print(f"Failed to log context viz for layer {layer_idx}: {e}")
-                finally:
-                    target_hook.last_context_mask = None
+                if target_hook is not None and target_hook.last_context_mask is not None:
+                    try:
+                        mask = target_hook.last_context_mask[0].cpu()
+                        viz_img = render_token_importance(
+                            tokenizer, 
+                            input_ids, 
+                            mask=mask,
+                            width=1000
+                        )
+                        
+                        self.logger.log_image(f"context_viz/layer_{layer_idx:02d}", viz_img, self.global_step)
+                    
+                    except Exception as e:
+                        print(f"Failed to log context viz for layer {layer_idx}: {e}")
+                    finally:
+                        target_hook.last_context_mask = None
 
     def _log_trainable_parameters(self, description: str = ""):
         if not self.accelerator.is_main_process:
@@ -1720,12 +1718,12 @@ class DiffusionModelTrainer:
                 val_metrics_to_log = {}
                 if all_hook_metrics:
                     keys_to_log = [
-                        "loss/adaptive_ratio/ratio_loss",
+                        "loss/image_ratio/ratio_loss",
                         "loss/context_ratio/ratio_loss",
                         "loss/gater/gate_loss",
-                        "adaptive_ratio/avg_ratio",
-                        "context/ratio/avg_ratio",
-                        "adaptive_fuse_prob/avg_fuse_prob"
+                        "ratio_policy/image_ratio/avg_ratio",
+                        "ratio_policy/context_ratio/avg_ratio",
+                        "gater/avg_fuse_prob"
                     ]
 
                     avg_hook_metrics = {}
