@@ -636,6 +636,8 @@ class QwenImageTransformer2DModel(
         attention_kwargs: Optional[Dict[str, Any]] = None,
         controlnet_block_samples=None,
         return_dict: bool = True,
+        output_hidden_states: bool = False,
+        output_hidden_states_step: int = None,
     ) -> Union[torch.Tensor, Transformer2DModelOutput]:
         """
         The [`QwenTransformer2DModel`] forward method.
@@ -693,6 +695,9 @@ class QwenImageTransformer2DModel(
 
         image_rotary_emb = self.pos_embed(img_shapes, txt_seq_lens, device=hidden_states.device)
 
+        if output_hidden_states:
+            all_hidden_states = ()
+
         for index_block, block in enumerate(self.transformer_blocks):
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 encoder_hidden_states, hidden_states = self._gradient_checkpointing_func(
@@ -713,6 +718,9 @@ class QwenImageTransformer2DModel(
                     image_rotary_emb=image_rotary_emb,
                     joint_attention_kwargs=attention_kwargs,
                 )
+            
+            if output_hidden_states and index_block % output_hidden_states_step == 0:
+                all_hidden_states = all_hidden_states + (hidden_states, )
 
             # controlnet residual
             if controlnet_block_samples is not None:
@@ -729,6 +737,8 @@ class QwenImageTransformer2DModel(
             unscale_lora_layers(self, lora_scale)
 
         if not return_dict:
+            if output_hidden_states:
+                return (output, all_hidden_states)
             return (output,)
 
         return Transformer2DModelOutput(sample=output)

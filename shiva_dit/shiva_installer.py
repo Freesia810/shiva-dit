@@ -35,7 +35,7 @@ def install_shiva_hooks(
     # Context Configs
     context_ratio_mode = kwargs.pop("context_ratio_mode", "fixed")
     fixed_context_ratio = kwargs.pop("fixed_context_ratio", 1.0)
-    proj_dim = kwargs.pop("proj_dim", 128)
+    proj_dim = kwargs.pop("context_proj_dim", 128)
 
     # Common Configs
     init_Ts = kwargs.pop("init_Ts", 30.0)

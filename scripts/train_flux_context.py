@@ -13,7 +13,7 @@ hook_config = {
     # --- Context Configs ---
     "context_ratio_mode": "fixed",
     "fixed_context_ratio": 0.1,  
-    "proj_dim": 128,
+    "context_proj_dim": 128,
     
     # --- Common ---
     "init_Ts": 2.0,

@@ -325,30 +325,41 @@ class QwenImageEditProcessor(BaseItemProcessor):
         self.tokenizer_max_length = kwargs.get("tokenizer_max_length", 1024)
 
     def __call__(self, item: Dict[str, Any]) -> Dict[str, Any]:
-        processed_image, original_size = self._load_and_process_image(item)
+        if self.pipe is None:
+            raise ValueError(
+                "QwenImageEditProcessor requires 'pipe' to be passed for text preprocessing."
+            )
 
+        processed_image, original_size = self._load_and_process_image(item)
         prompt = item["text"]
-        txt_tokens = self.tokenizers[0](
-            [prompt],
-            max_length=self.tokenizer_max_length,
-            padding="max_length",
-            truncation=True,
+
+        cond_image = self._load_image_entry(item["condition_image"])
+        cond_image = self.image_processor.resize(cond_image, original_size[0], original_size[1])
+        cond_pixel_values = self.image_processor.preprocess(cond_image)
+        template = self.pipe.prompt_template_encode
+        txt = [template.format(prompt)]
+        model_inputs = self.pipe.processor(
+            text=txt,
+            images=cond_image,
+            padding=True,
             return_tensors="pt",
         )
 
+        input_ids = (model_inputs.input_ids,)
+        attention_mask = (model_inputs.attention_mask,)
+        text_encoder_pixel_values = (model_inputs.pixel_values,)
+        image_grid_thw = (model_inputs.image_grid_thw,)
+
         result = {
             "pixel_values": processed_image,
-            "input_ids": (txt_tokens.input_ids[0],),
-            "attention_mask": (txt_tokens.attention_mask[0],),
             "original_size": torch.tensor(original_size),
-            "raw_text": prompt,
-        }
+            "condition_pixel_values": cond_pixel_values,
 
-        if "condition_image" in item:
-            cond_image = self._load_image_entry(item["condition_image"])
-            cond_image = self.image_processor.resize(cond_image, original_size[0], original_size[1])
-            cond_pixel_values = self.image_processor.preprocess(cond_image)
-            result["condition_pixel_values"] = cond_pixel_values
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "text_encoder_pixel_values": text_encoder_pixel_values,
+            "image_grid_thw": image_grid_thw,
+        }
 
         return result
 
@@ -411,58 +422,42 @@ class ImageTextDataset(Dataset):
 
 
 def collate_fn(batch):
+    if not batch:
+        return {}
+    
     elem = batch[0]
     collated_batch = {}
 
-    pixel_values_list = []
-    original_size_list = []
-
-    input_ids_tuple_len = len(elem["input_ids"])
-    input_ids_lists = [[] for _ in range(input_ids_tuple_len)]
-
-    has_attention_mask = "attention_mask" in elem
-    attention_mask_lists = (
-        [[] for _ in range(input_ids_tuple_len)] if has_attention_mask else None
-    )
-
-    for item in batch:
-        pixel_values_list.append(item["pixel_values"])
-        original_size_list.append(item["original_size"])
-
-        for i in range(input_ids_tuple_len):
-            input_ids_lists[i].append(item["input_ids"][i])
-
-        if has_attention_mask:
-            for i in range(input_ids_tuple_len):
-                attention_mask_lists[i].append(item["attention_mask"][i])
-
-    collated_batch["pixel_values"] = torch.concat(pixel_values_list, dim=0)
-    collated_batch["original_size"] = torch.stack(original_size_list)
-    collated_batch["input_ids"] = tuple(
-        torch.stack(id_list) for id_list in input_ids_lists
-    )
-
-    if has_attention_mask:
-        collated_batch["attention_mask"] = tuple(
-            torch.stack(mask_list) for mask_list in attention_mask_lists
-        )
-    else:
-        collated_batch["attention_mask"] = None
+    if "pixel_values" in elem:
+        collated_batch["pixel_values"] = torch.cat([item["pixel_values"] for item in batch], dim=0)
 
     if "condition_pixel_values" in elem:
-        cond_list = [
-            item["condition_pixel_values"]
-            for item in batch
-            if "condition_pixel_values" in item
-        ]
+        cond_list = [item["condition_pixel_values"] for item in batch if "condition_pixel_values" in item]
         if len(cond_list) == len(batch):
-            collated_batch["condition_pixel_values"] = torch.concat(cond_list, dim=0)
+            collated_batch["condition_pixel_values"] = torch.cat(cond_list, dim=0)
 
-    if "raw_text" in elem:
-        collated_batch["raw_text"] = [item["raw_text"] for item in batch]
+    if "original_size" in elem:
+        collated_batch["original_size"] = torch.stack([item["original_size"] for item in batch])
+
+    tuple_like_attrs = ['input_ids', 'attention_mask', 'text_encoder_pixel_values', 'image_grid_thw']
+
+    for attr in tuple_like_attrs:
+        if attr in elem and elem[attr] is not None:
+            tuple_len = len(elem[attr])
+            
+            # [[item0_idx0, item1_idx0...], [item0_idx1, item1_idx1...]]
+            batched_lists = [[] for _ in range(tuple_len)]
+            
+            for item in batch:
+                item_tuple = item[attr]
+                for i in range(tuple_len):
+                    batched_lists[i].append(item_tuple[i])
+            
+            collated_batch[attr] = tuple(torch.stack(l) for l in batched_lists)
+        else:
+            collated_batch[attr] = None
 
     return collated_batch
-
 
 if __name__ == "__main__":
     import sys
@@ -525,9 +520,6 @@ if __name__ == "__main__":
             print(f"  Condition Image (condition_pixel_values) Shape: {cond_pixels.shape}")
         else:
             print("  WARNING: 'condition_pixel_values' missing in batch! Is 'condition_image' in your jsonl?")
-
-        if "raw_text" in batch:
-            print(f"  Raw Text Example: {batch['raw_text'][0]}")
 
         B = pixel_values.shape[0]
         if "condition_pixel_values" in batch:
