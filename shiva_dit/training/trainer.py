@@ -623,6 +623,19 @@ class DiffusionModelTrainer:
         else:
             raise ValueError(f"Unknown training mode: {self.config.training_mode}")
 
+        if self.config.enable_gradient_checkpointing:
+            self.model.enable_gradient_checkpointing()
+            if self.accelerator.is_main_process:
+                print("Enabled gradient checkpointing for the model.")
+        
+        def make_inputs_require_grad(module, input, output):
+            output.requires_grad_(True)
+        
+        if hasattr(self.model, "base_model"):
+            self.model.base_model.register_forward_hook(make_inputs_require_grad)
+        else:
+            self.model.register_forward_hook(make_inputs_require_grad)
+
         lora_params = []
         gate_policy_params = []
         image_ratio_policy_params = []

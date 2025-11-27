@@ -19,6 +19,8 @@ class TrainerConfig:
     model_path: str = None
     output_dir: str = "./checkpoints/"
 
+    enable_gradient_checkpointing: bool = False
+
     log_with_tensorboard: bool = True
     tensorboard_log_dir: str = "logs"
 
