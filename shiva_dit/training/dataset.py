@@ -27,9 +27,9 @@ except ImportError:
 class BaseItemProcessor:
     def __init__(
         self,
-        image_dir: str,
         tokenizers: Tuple[Callable],
         image_processor: VaeImageProcessor,
+        image_dir: str = None,
         pipe: Any = None,
         **kwargs,
     ):
@@ -258,17 +258,17 @@ class SD3Processor(BaseItemProcessor):
 class QwenImageProcessor(BaseItemProcessor):
     def __init__(
         self,
-        image_dir: str,
         tokenizers: Tuple[Callable],
         image_processor: VaeImageProcessor,
+        image_dir: str = None,
         pipe: Any = None,
         **kwargs,
     ):
         super().__init__(
-            image_dir,
-            tokenizers,
-            image_processor,
-            pipe,
+            image_dir=image_dir,
+            tokenizers=tokenizers,
+            image_processor=image_processor,
+            pipe=pipe,
         )
         self.tokenizer_max_length = kwargs.get("tokenizer_max_length", 1024)
         self.prompt_template_encode = kwargs.get(
@@ -309,17 +309,17 @@ class QwenImageProcessor(BaseItemProcessor):
 class QwenImageEditProcessor(BaseItemProcessor):
     def __init__(
         self,
-        image_dir: str,
         tokenizers: Tuple[Callable],
         image_processor: VaeImageProcessor,
+        image_dir: str = None,
         pipe: Any = None,
         **kwargs,
     ):
         super().__init__(
-            image_dir,
-            tokenizers,
-            image_processor,
-            pipe,
+            image_dir=image_dir,
+            tokenizers=tokenizers,
+            image_processor=image_processor,
+            pipe=pipe,
         )
 
         self.tokenizer_max_length = kwargs.get("tokenizer_max_length", 1024)
@@ -345,13 +345,10 @@ class QwenImageEditProcessor(BaseItemProcessor):
         }
 
         if "condition_image" in item:
-            try:
-                # robust loader
-                cond_image = self._load_image_entry(item["condition_image"])
-                cond_pixel_values = self.image_processor.preprocess(cond_image)
-                result["condition_pixel_values"] = cond_pixel_values
-            except Exception as e:
-                print(f"Warning: Failed to load condition image: {e}")
+            cond_image = self._load_image_entry(item["condition_image"])
+            cond_image = self.image_processor.resize(cond_image, original_size[0], original_size[1])
+            cond_pixel_values = self.image_processor.preprocess(cond_image)
+            result["condition_pixel_values"] = cond_pixel_values
 
         return result
 
@@ -465,3 +462,77 @@ def collate_fn(batch):
         collated_batch["raw_text"] = [item["raw_text"] for item in batch]
 
     return collated_batch
+
+
+if __name__ == "__main__":
+    import sys
+    import numpy as np
+    from torch.utils.data import DataLoader
+    from shiva_dit.utils import get_pipeline
+
+    image_dir = None
+    metadata_file = "../dataset/MagicBrush/val.jsonl"
+
+    if not os.path.exists(metadata_file):
+        print(f"Error: Metadata file not found at {metadata_file}")
+        sys.exit(1)
+
+    print(f"Testing dataset with metadata: {metadata_file}")
+    print(f"Image directory: {image_dir}")
+
+    print("Initializing Tokenizer and Processor...")
+    model_type = "qwen-image-edit"
+    pipe, model_attrs = get_pipeline(model_type)
+    tokenizers = (pipe.tokenizer,)
+    
+    dataset = ImageTextDataset(
+        model_type=model_type,
+        image_dir=image_dir,
+        metadata_file=metadata_file,
+        tokenizers=tokenizers, 
+        image_processor=pipe.image_processor
+    )
+    
+    print(f"Dataset loaded. Total samples: {len(dataset)}")
+
+    dataloader = DataLoader(
+        dataset, 
+        batch_size=2,
+        shuffle=True, 
+        collate_fn=collate_fn,
+        num_workers=0
+    )
+
+    print("\n--- Starting Test Iteration ---")
+    for i, batch in enumerate(dataloader):
+        print(f"\n[Batch {i}] Keys:", batch.keys())
+
+        input_ids = batch["input_ids"]
+        if isinstance(input_ids, tuple):
+            print(f"  Input IDs (Tuple) Shape: {[t.shape for t in input_ids]}")
+        else:
+            print(f"  Input IDs Shape: {input_ids.shape}")
+        
+        if batch["attention_mask"] is not None:
+            masks = batch["attention_mask"]
+            print(f"  Attention Mask Shape: {[m.shape for m in masks]}")
+
+        pixel_values = batch["pixel_values"]
+        print(f"  Target Image (pixel_values) Shape: {pixel_values.shape}") 
+
+        if "condition_pixel_values" in batch:
+            cond_pixels = batch["condition_pixel_values"]
+            print(f"  Condition Image (condition_pixel_values) Shape: {cond_pixels.shape}")
+        else:
+            print("  WARNING: 'condition_pixel_values' missing in batch! Is 'condition_image' in your jsonl?")
+
+        if "raw_text" in batch:
+            print(f"  Raw Text Example: {batch['raw_text'][0]}")
+
+        B = pixel_values.shape[0]
+        if "condition_pixel_values" in batch:
+            assert batch["condition_pixel_values"].shape[0] == B, "Condition image batch size mismatch"
+            assert batch["condition_pixel_values"].shape[1:] == pixel_values.shape[1:], "Resolution mismatch between target and condition"
+        
+        print("✅ Batch check passed.")
+        break
