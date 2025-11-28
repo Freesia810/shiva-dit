@@ -1,0 +1,373 @@
+import torch
+import os
+import sys
+import json
+import argparse
+from PIL import Image
+from tqdm import tqdm
+from types import ModuleType
+import numpy as np
+
+try:
+    from torchmetrics.multimodal.clip_score import CLIPScore
+    from torchmetrics.image.fid import FrechetInceptionDistance
+    from torchmetrics.multimodal import CLIPImageQualityAssessment
+    import torchvision.transforms.functional as TF
+except ImportError:
+    print(
+        "Error: torchmetrics is required. Install via: pip install torchmetrics[image]"
+    )
+    sys.exit(1)
+
+# Bert Monkey Patch
+LOCAL_BERT_PATH = "../bert-base-uncased"
+from transformers import BertTokenizer, BertModel
+
+_original_tokenizer_from_pretrained = BertTokenizer.from_pretrained
+_original_model_from_pretrained = BertModel.from_pretrained
+
+
+def _patched_tokenizer_loader(cls, pretrained_model_name_or_path, *args, **kwargs):
+    if pretrained_model_name_or_path == "bert-base-uncased" and os.path.exists(
+        LOCAL_BERT_PATH
+    ):
+        pretrained_model_name_or_path = LOCAL_BERT_PATH
+    return _original_tokenizer_from_pretrained(
+        pretrained_model_name_or_path, *args, **kwargs
+    )
+
+
+def _patched_model_loader(cls, pretrained_model_name_or_path, *args, **kwargs):
+    if pretrained_model_name_or_path == "bert-base-uncased" and os.path.exists(
+        LOCAL_BERT_PATH
+    ):
+        pretrained_model_name_or_path = LOCAL_BERT_PATH
+    return _original_model_from_pretrained(
+        pretrained_model_name_or_path, *args, **kwargs
+    )
+
+
+BertTokenizer.from_pretrained = classmethod(_patched_tokenizer_loader)
+BertModel.from_pretrained = classmethod(_patched_model_loader)
+
+# ImageReward Monkey Patch
+sys.modules["ImageReward.ReFL"] = ModuleType("ImageReward.ReFL")
+
+# Transformers Patch
+import transformers.modeling_utils
+import transformers.pytorch_utils
+
+if not hasattr(transformers.modeling_utils, "apply_chunking_to_forward"):
+    if hasattr(transformers.pytorch_utils, "apply_chunking_to_forward"):
+        transformers.modeling_utils.apply_chunking_to_forward = (
+            transformers.pytorch_utils.apply_chunking_to_forward
+        )
+if not hasattr(transformers.modeling_utils, "find_pruneable_heads_and_indices"):
+    if hasattr(transformers.pytorch_utils, "find_pruneable_heads_and_indices"):
+        transformers.modeling_utils.find_pruneable_heads_and_indices = (
+            transformers.pytorch_utils.find_pruneable_heads_and_indices
+        )
+if not hasattr(transformers.modeling_utils, "prune_linear_layer"):
+    if hasattr(transformers.pytorch_utils, "prune_linear_layer"):
+        transformers.modeling_utils.prune_linear_layer = (
+            transformers.pytorch_utils.prune_linear_layer
+        )
+
+# Try Import ImageReward
+try:
+    import ImageReward as RM
+except ImportError:
+    RM = None
+    print("Warning: ImageReward not installed. IR score will be skipped.")
+
+# Shiva Imports
+from shiva_dit.utils.inference_utils import load_pipeline_for_inference
+from shiva_dit.utils.utils import process_quick_start
+from accelerate.utils import set_seed
+
+
+class GenerationEvaluator:
+    def __init__(self, device):
+        self.device = device
+        print(f"Initializing metrics on {device}...")
+
+        self.fid = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
+
+        self.clip_score = CLIPScore(
+            model_name_or_path="openai/clip-vit-base-patch16"
+        ).to(device)
+
+        self.clip_iqa = CLIPImageQualityAssessment(
+            model_name_or_path="openai/clip-vit-base-patch16"
+        ).to(device)
+
+        self.ir_model = None
+        if RM:
+            print("Loading ImageReward model...")
+            try:
+                self.ir_model = RM.load("ImageReward-v1.0", device=device)
+            except:
+                pass
+
+        self.results = {"ir_scores": [], "clip_scores": [], "clip_iqa_scores": []}
+
+    def preprocess(self, image):
+        return TF.to_tensor(image).to(self.device).unsqueeze(0)
+
+    def preprocess_uint8(self, image):
+        t = TF.to_tensor(image).to(self.device) * 255
+        return t.to(torch.uint8).unsqueeze(0)
+
+    @torch.no_grad()
+    def update_fake(self, generated_pil, prompt=None):
+        gen_tensor = self.preprocess(generated_pil)
+        gen_uint8 = self.preprocess_uint8(generated_pil)
+
+        # 1. FID Fake Update
+        self.fid.update(gen_uint8, real=False)
+
+        # 2. CLIP Score
+        if prompt:
+            score = self.clip_score(gen_uint8, [prompt])
+            self.results["clip_scores"].append(score.item())
+
+        # 3. CLIP-IQA
+        iqa_out = self.clip_iqa(gen_tensor)
+        if isinstance(iqa_out, dict):
+            mean_iqa = torch.stack(list(iqa_out.values())).mean().item()
+            self.results["clip_iqa_scores"].append(mean_iqa)
+        else:
+            self.results["clip_iqa_scores"].append(iqa_out.item())
+
+        # 4. ImageReward
+        if self.ir_model and prompt:
+            ir_score = self.ir_model.score(prompt, generated_pil)
+            self.results["ir_scores"].append(ir_score)
+
+    @torch.no_grad()
+    def update_real(self, real_pil):
+        real_uint8 = self.preprocess_uint8(real_pil)
+        self.fid.update(real_uint8, real=True)
+
+    def compute(self):
+        print("\nComputing aggregated metrics...")
+        metrics = {}
+
+        # FID
+        try:
+            if (
+                self.fid.real_features_num_samples > 0
+                and self.fid.fake_features_num_samples > 0
+            ):
+                metrics["FID"] = self.fid.compute().item()
+            else:
+                metrics["FID"] = -1.0
+                print("Warning: FID skipped (Not enough real/fake samples)")
+        except Exception as e:
+            print(f"FID computation warning: {e}")
+            metrics["FID"] = -1.0
+
+        # Averages
+        for key, val_list in self.results.items():
+            if val_list:
+                metric_name = key.replace("_scores", "").upper()
+                if metric_name == "CLIP":
+                    metric_name = "CLIP_SCORE"
+                metrics[metric_name] = sum(val_list) / len(val_list)
+
+        return metrics
+
+
+def load_data(jsonl_path, image_dir, limit=None):
+    data_items = []
+    if not os.path.exists(jsonl_path):
+        print(f"Error: JSONL file not found at {jsonl_path}")
+        return []
+
+    print(f"Loading data from {jsonl_path}...")
+    try:
+        with open(jsonl_path, "r", encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                if limit and i >= limit:
+                    break
+                item = json.loads(line)
+
+                img_rel_path = (
+                    item.get("file_name") or item.get("image") or item.get("jpg")
+                )
+                full_img_path = None
+                if img_rel_path and image_dir:
+                    full_img_path = os.path.join(image_dir, img_rel_path)
+                    if not os.path.exists(full_img_path):
+                        flat_path = os.path.join(
+                            image_dir, os.path.basename(img_rel_path)
+                        )
+                        if os.path.exists(flat_path):
+                            full_img_path = flat_path
+
+                if "text" in item:
+                    data_items.append(
+                        {"text": item["text"], "image_path": full_img_path}
+                    )
+    except Exception as e:
+        print(f"Error reading JSONL: {e}")
+        return []
+
+    print(f"Loaded {len(data_items)} items.")
+    return data_items
+
+
+def main(args):
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float16
+
+    save_dir = args.output_dir
+    os.makedirs(save_dir, exist_ok=True)
+    print(f"Output Directory: {save_dir}")
+
+    evaluator = GenerationEvaluator(device)
+
+    data_items = load_data(args.jsonl_path, args.image_dir, args.limit)
+    if not data_items:
+        return
+
+    print(f"Loading Pipeline...")
+    pipe = load_pipeline_for_inference(
+        ckpt_path=args.ckpt_path,
+        base_model_path=args.base_model_path,
+        model_type=args.model_type,
+        device=device,
+        dtype=dtype,
+        gater_lut_path=args.gater_lut,
+        optimize_hooks=args.optimize_hooks,
+        merge_lora=args.merge_lora,
+    )
+
+    total_samples = len(data_items) * args.samples_per_prompt
+    print("-" * 50)
+    print(f"Starting Benchmark: {args.model_type}")
+    print(f"Prompts: {len(data_items)}")
+    print(f"Samples per Prompt: {args.samples_per_prompt}")
+    print(f"Total Target Samples: {total_samples}")
+    print(f"Global Seed: {args.seed}")
+    print(f"Resume Mode: ON (Will skip existing images in {save_dir})")
+
+    pbar = tqdm(total=total_samples, desc="Processing")
+
+    for i, item in enumerate(data_items):
+        prompt = item["text"]
+        gt_path = item["image_path"]
+
+        if gt_path:
+            try:
+                real_image = Image.open(gt_path).convert("RGB")
+                evaluator.update_real(real_image)
+            except:
+                pass
+
+        for j in range(args.samples_per_prompt):
+            # i = Prompt Index, j = Sample Index
+            # Stride = 100
+            current_seed = args.seed + (i * 100) + j
+
+            # p{prompt_idx}_s{sample_idx}.png
+            file_name = f"p{i:04d}_s{j:02d}.png"
+            file_path = os.path.join(save_dir, file_name)
+
+            gen_image = None
+
+            if os.path.exists(file_path):
+                try:
+                    gen_image = Image.open(file_path).convert("RGB")
+                    # print(f"Skipping generation for {file_name} (Loaded from disk)")
+                except Exception as e:
+                    print(f"Error loading {file_name}, will regenerate: {e}")
+                    gen_image = None
+
+            if gen_image is None:
+                generator = torch.Generator(device=device).manual_seed(current_seed)
+                set_seed(current_seed)
+
+                kwargs = {"prompt": prompt, "generator": generator}
+                if args.steps > 0:
+                    kwargs["num_inference_steps"] = args.steps
+                if args.height > 0:
+                    kwargs["height"] = args.height
+                if args.width > 0:
+                    kwargs["width"] = args.width
+
+                gen_image = process_quick_start(pipe, **kwargs)
+
+                gen_image.save(file_path)
+
+            evaluator.update_fake(gen_image, prompt)
+            pbar.update(1)
+
+    pbar.close()
+
+    print(f"\nComputing final metrics on {total_samples} samples...")
+    metrics = evaluator.compute()
+
+    print("\n" + "=" * 20 + " Benchmark Report " + "=" * 20)
+    print(f"Model: {args.ckpt_path or args.model_type}")
+    print(f"Total Samples: {total_samples}")
+    print("-" * 30)
+    for k, v in metrics.items():
+        print(f"{k:<15}: {v:.4f}")
+    print("=" * 56)
+
+    # Save metrics to json
+    with open(os.path.join(save_dir, "metrics.json"), "w") as f:
+        json.dump(metrics, f, indent=4)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    # Model
+    parser.add_argument("--ckpt_path", type=str, default=None)
+    parser.add_argument("--model_type", type=str, default="flux-dev")
+    parser.add_argument("--base_model_path", type=str, default=None)
+    parser.add_argument("--gater_lut", type=str, default=None)
+
+    # Data
+    parser.add_argument(
+        "--jsonl_path", type=str, required=True, help="Path to val.jsonl"
+    )
+    parser.add_argument(
+        "--image_dir",
+        type=str,
+        default=None,
+        help="Root dir for GT images (for FID reference)",
+    )
+    parser.add_argument(
+        "--output_dir", type=str, default="eval_results", help="Where to save images"
+    )
+    parser.add_argument("--limit", type=int, default=None)
+
+    # Sampling Config
+    parser.add_argument(
+        "--samples_per_prompt",
+        type=int,
+        default=5,
+        help="Number of images per prompt (Total = N_prompts * N_samples)",
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Global base seed")
+    parser.add_argument("--steps", type=int, default=-1)
+    parser.add_argument("--height", type=int, default=1024)
+    parser.add_argument("--width", type=int, default=1024)
+    parser.add_argument("--dtype", type=str, default="bf16")
+
+    # Shiva
+    parser.add_argument("--optimize_hooks", action="store_true", default=True)
+    parser.add_argument(
+        "--no_optimize_hooks", action="store_false", dest="optimize_hooks"
+    )
+    parser.add_argument("--merge_lora", action="store_true", default=True)
+    parser.add_argument("--no_merge_lora", action="store_false", dest="merge_lora")
+
+    args = parser.parse_args()
+
+    if args.ckpt_path is None and args.model_type is None:
+        parser.error("Please provide --ckpt_path or --model_type")
+
+    main(args)
