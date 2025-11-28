@@ -1,5 +1,6 @@
 __pycache__
 .vscode/
+acm-data/
 checkpoints/
 wandb/
 mlruns/
