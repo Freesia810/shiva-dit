@@ -80,30 +80,33 @@ def load_pipeline_for_inference(
         HookClass = HOOK_CLASS_MAP.get(hook_class_name)
         if not HookClass:
             raise ValueError(f"Unknown hook class '{hook_class_name}'.")
+        
+        if hook_class_name == "ShivaDitBlockHook":
+            hook_kwargs["capture_mask_for_viz"] = True
 
-        hook_kwargs["capture_mask_for_viz"] = False
-
-        if gater_lut_path:
-            if os.path.exists(gater_lut_path):
-                print(f"  - Loading LUT from {gater_lut_path}")
-                lut_data = torch.load(gater_lut_path, map_location=device)
-                
-                hook_kwargs["use_gater_lut"] = True
-                
-                if isinstance(lut_data, dict):
-                    hook_kwargs["shared_gater_cache"] = lut_data.get("gater")
-                    hook_kwargs["shared_ratio_cache"] = lut_data.get("ratio")
-                    print("    > Loaded both Gater and Ratio tables.")
+            if gater_lut_path:
+                if os.path.exists(gater_lut_path):
+                    print(f"  - Loading LUT from {gater_lut_path}")
+                    lut_data = torch.load(gater_lut_path, map_location=device)
+                    
+                    hook_kwargs["use_gater_lut"] = True
+                    
+                    if isinstance(lut_data, dict):
+                        hook_kwargs["shared_gater_cache"] = lut_data.get("gater")
+                        hook_kwargs["shared_ratio_cache"] = lut_data.get("ratio")
+                        print("    > Loaded both Gater and Ratio tables.")
+                    else:
+                        print("    > Warning: Unknown LUT format. Ignoring.")
+                        hook_kwargs["use_gater_lut"] = False
                 else:
-                    print("    > Warning: Unknown LUT format. Ignoring.")
-                    hook_kwargs["use_gater_lut"] = False
-            else:
-                print(f"  - Warning: LUT path {gater_lut_path} provided but file not found.")
+                    print(f"  - Warning: LUT path {gater_lut_path} provided but file not found.")
 
-        skip_layer_indices = []
-        if optimize_hooks:
-            print("  - Optimization enabled: Skipping Layer 0 injection.")
-            skip_layer_indices.append(0)
+            skip_layer_indices = []
+            if optimize_hooks:
+                print("  - Optimization enabled: Skipping Layer 0 injection.")
+                skip_layer_indices.append(0)
+            
+            hook_kwargs["skip_layer_indices"] = skip_layer_indices
 
         HookManager.configure_hooks(
             model_type=model_type,
@@ -112,14 +115,10 @@ def load_pipeline_for_inference(
         HookManager.enable()
         
         print("  - Injecting Hooks into pipeline...")
-        install_shiva_hooks(
-            HookManager,
-            model_type,
-            pipe,
-            model_attrs,
-            HookClass,
-            skip_layer_indices=skip_layer_indices, 
-            **hook_kwargs
+        HookManager.inject_hooks(
+            model_type=model_type,
+            pipe=pipe,
+            model_attrs=model_attrs,
         )
 
     model = tuple(getattr(pipe, model) for model in model_attrs)[0]
