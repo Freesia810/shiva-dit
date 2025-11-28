@@ -26,20 +26,25 @@ NUM_THREADS = 5
 class RateLimiter:
     def __init__(self, max_qps):
         self.interval = 1.0 / max_qps
-        self.last_call_times = []
+        self.history = [] 
         self.lock = threading.Lock()
 
     def wait(self):
+        sleep_time = 0
         with self.lock:
-            current_time = time.time()
-            self.last_call_times = [t for t in self.last_call_times if current_time - t < 1.0]
+            now = time.time()
+            self.history = [t for t in self.history if now - t < 1.0]
             
-            if len(self.last_call_times) > 0:
-                elapsed = current_time - self.last_call_times[-1]
-                if elapsed < self.interval:
-                    time.sleep(self.interval - elapsed)
+            if len(self.history) > 0:
+                expected_time = self.history[-1] + self.interval
+                if expected_time > now:
+                    sleep_time = expected_time - now
             
-            self.last_call_times.append(time.time())
+            target_time = now + sleep_time
+            self.history.append(target_time)
+
+        if sleep_time > 0:
+            time.sleep(sleep_time)
 
 def pil_image_to_base64_url(image, fmt="JPEG"):
     buffered = io.BytesIO()
@@ -51,7 +56,7 @@ def pil_image_to_base64_url(image, fmt="JPEG"):
     mime_type = f"image/{fmt.lower()}"
     return f"data:{mime_type};base64,{base64_str}"
 
-def process_single_item(item, image_root, rate_limiter):
+def process_single_item(item, image_root, rate_limiter, worker_id):
     file_name = item.get('file_name') or item.get('image')
     if not file_name:
         return None, "No filename found"
@@ -105,9 +110,12 @@ def process_single_item(item, image_root, rate_limiter):
             }
         ]
 
-        extend_fields = {"top_k": 1}
-
+        # Debug print: Waiting
+        print(f"[Worker {worker_id}] {file_name} waiting for limiter...", flush=True)
         rate_limiter.wait()
+        
+        # Debug print: Sending
+        print(f"[Worker {worker_id}] {file_name} sending request...", flush=True)
 
         response = TextGeneration.chat(
             model=MODEL_NAME,
@@ -117,7 +125,7 @@ def process_single_item(item, image_root, rate_limiter):
             timeout=180,
             max_tokens=2000,
             top_p=0.8,
-            extend_fields=extend_fields
+            extend_fields={"top_k": 1}
         )
 
         if response._error_code is not None:
@@ -186,27 +194,33 @@ def main():
         return
 
     rate_limiter = RateLimiter(args.qps)
-    file_lock = threading.Lock()
 
     print(f"Starting processing with {args.workers} workers, Max QPS: {args.qps}...")
     
     with open(args.output, 'a', encoding='utf-8') as f_out:
         with ThreadPoolExecutor(max_workers=args.workers) as executor:
             future_to_item = {
-                executor.submit(process_single_item, item, args.image_root, rate_limiter): item 
-                for item in items_to_process
+                executor.submit(process_single_item, item, args.image_root, rate_limiter, i % args.workers): item 
+                for i, item in enumerate(items_to_process)
             }
 
-            for future in tqdm(as_completed(future_to_item), total=len(items_to_process)):
+            pbar = tqdm(as_completed(future_to_item), total=len(items_to_process))
+            for future in pbar:
                 item = future_to_item[future]
-                result, error = future.result()
-
-                if result:
-                    with file_lock:
+                try:
+                    result, error = future.result()
+                    
+                    if result:
                         f_out.write(json.dumps(result, ensure_ascii=False) + "\n")
                         f_out.flush()
-                else:
-                    tqdm.write(f"Failed to process {item.get('file_name', 'unknown')}: {error}")
+
+                        short_name = item.get('file_name', '')[:10]
+                        pbar.set_description(f"Wrote: {short_name}")
+                    else:
+                        tqdm.write(f"❌ Failed: {item.get('file_name', 'unknown')} | Err: {error}")
+                        
+                except Exception as e:
+                    tqdm.write(f"💥 Critical Error processing {item.get('file_name')}: {e}")
 
     print("Processing finished.")
 
