@@ -629,12 +629,25 @@ class DiffusionModelTrainer:
                 print("Enabled gradient checkpointing for the model.")
 
         lora_params = []
+        lora_names = []
+        
         gate_policy_params = []
+        gate_policy_names = []
+        
         image_ratio_policy_params = []
+        image_ratio_policy_names = []
+        
         fuser_params = []
+        fuser_names = []
+        
         context_ratio_policy_params = []
+        context_ratio_policy_names = []
+        
         context_pruner_params = []
+        context_pruner_names = []
+        
         other_model_params = []
+        other_model_names = []
 
         gate_policy_param_ids = set()
         image_ratio_policy_param_ids = set()
@@ -667,29 +680,50 @@ class DiffusionModelTrainer:
             pid = id(param)
             if pid in gate_policy_param_ids:
                 gate_policy_params.append(param)
+                gate_policy_names.append(name)
             elif pid in image_ratio_policy_param_ids:
                 image_ratio_policy_params.append(param)
+                image_ratio_policy_names.append(name)
             elif pid in fuser_param_ids:
                 fuser_params.append(param)
+                fuser_names.append(name)
             elif pid in context_ratio_policy_param_ids:
                 context_ratio_policy_params.append(param)
+                context_ratio_policy_names.append(name)
             elif pid in context_pruner_param_ids:
                 context_pruner_params.append(param)
+                context_pruner_names.append(name)
             elif "lora" in name:
                 lora_params.append(param)
+                lora_names.append(name)
             else:
                 other_model_params.append(param)
+                other_model_names.append(name)
 
         base_lr_params = other_model_params
+        base_lr_names = other_model_names
 
         if self.accelerator.is_main_process:
-            print(f"Optimizing {len(lora_params)} LoRA params")
-            print(f"Optimizing {len(gate_policy_params)} Gate params")
-            print(f"Optimizing {len(image_ratio_policy_params)} Image Ratio params")
-            print(f"Optimizing {len(fuser_params)} Fuser params")
-            print(f"Optimizing {len(context_ratio_policy_params)} Context Ratio params")
-            print(f"Optimizing {len(context_pruner_params)} Context Pruner params")
-            print(f"Optimizing {len(base_lr_params)} other params")
+            print(f"\n--- Optimizer Parameter Groups ---")
+            
+            def print_group_info(group_name, params, names):
+                print(f"Optimizing {len(params)} {group_name} params")
+                if len(names) > 0:
+                    if len(names) > 20:
+                        print(f"  Names (first 10): {names[:10]}")
+                        print(f"  Names (last 5):   {names[-5:]}")
+                    else:
+                        print(f"  Names: {names}")
+                print("-" * 30)
+
+            print_group_info("LoRA", lora_params, lora_names)
+            print_group_info("Gate Policy", gate_policy_params, gate_policy_names)
+            print_group_info("Image Ratio Policy", image_ratio_policy_params, image_ratio_policy_names)
+            print_group_info("Fuser", fuser_params, fuser_names)
+            print_group_info("Context Ratio Policy", context_ratio_policy_params, context_ratio_policy_names)
+            print_group_info("Context Pruner", context_pruner_params, context_pruner_names)
+            print_group_info("Base (Router/Other)", base_lr_params, base_lr_names)
+            print("----------------------------------\n")
 
         # Define explicit groups
         optimizer_grouped_parameters = [

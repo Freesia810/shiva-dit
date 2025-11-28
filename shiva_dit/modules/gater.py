@@ -70,3 +70,45 @@ class ShivaRatioPolicy(nn.Module):
         logits = self.head(features)
         
         return logits
+
+
+# class ShivaRatioPolicy(nn.Module):
+#     def __init__(
+#         self, 
+#         total_layers: int,
+#         ratio_bottleneck_dim: int = 32,
+#         init_ratio: float = 0.8,
+#         **kwargs
+#     ):
+#         super().__init__()
+        
+#         self.layer_emb = nn.Embedding(total_layers, ratio_bottleneck_dim)
+
+#         self.time_mlp = nn.Sequential(
+#             nn.Linear(1, ratio_bottleneck_dim),
+#             nn.SiLU(),
+#             nn.Linear(ratio_bottleneck_dim, ratio_bottleneck_dim * 2),
+#         )
+
+#         self.head = nn.Linear(ratio_bottleneck_dim, 1)
+
+#         nn.init.normal_(self.layer_emb.weight, std=0.01)
+#         eps = 1e-6
+#         safe_ratio = max(eps, min(init_ratio, 1.0 - eps))
+#         bias_val = math.log(safe_ratio / (1.0 - safe_ratio))
+#         nn.init.constant_(self.head.bias, bias_val)
+#         print(f"[ShivaRatioPolicy] Initialized bias to {bias_val:.4f} (Sigmoid -> {safe_ratio:.4f})")
+#         nn.init.zeros_(self.head.weight)
+
+#     def forward(self, t_scalar, layer_idx_tensor):
+#         """
+#         t_scalar: (B, 1)  0.0 ~ 1.0
+#         layer_idx_tensor: (B,)
+#         """
+#         time_out = self.time_mlp(t_scalar)
+#         scale, shift = time_out.chunk(2, dim=-1)
+#         l_feat = self.layer_emb(layer_idx_tensor)
+#         features = l_feat * (1 + scale) + shift
+#         logits = self.head(features)
+        
+#         return logits

@@ -2,11 +2,12 @@ import torch
 import torch.nn as nn
 
 class ShivaFuserExpert(nn.Module):
-    def __init__(self, hidden_dim: int, ffn_mult: int = 2):
+    def __init__(self, hidden_dim: int, ffn_mult: int = 2, dropout: float = 0.1):
         super().__init__()
         self.fusion_ffn = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim * ffn_mult),
             nn.SiLU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim * ffn_mult, hidden_dim),
         )
 

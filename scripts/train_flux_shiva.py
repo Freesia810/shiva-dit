@@ -79,17 +79,17 @@ trainer_config = {
             # Stage 0: Router Warmup (Random Ratio)
             # ------------------------------------------------------------------
             {
-                "steps": 1750,
+                "steps": 3500,
                 "weights": {
                     "ratio": [1.0, 50.0, 1.0],
                     "gate": 0.0,
                     "distill": [
-                        1.0,
+                        5.0,
                         0.0,
                     ],
                 },
                 # LR: [Base(Router), LoRA, Gate, Fuser, Policy, CtxRatio, CtxPruner]
-                "lr": [5e-4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                "lr": [1e-5, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
                 "temp": [2.0, 2.0, 2.0, 2.0],
             },
             # ------------------------------------------------------------------
@@ -102,7 +102,8 @@ trainer_config = {
                     "gate": 10.0,
                     "distill": [1.0, 0.0],
                 },
-                "lr": [1e-5, 0.0, 1e-4, 2e-4, 5e-4, 0.0, 0.0],
+                # LR: [Base(Router), LoRA, Gate, Fuser, Policy, CtxRatio, CtxPruner]
+                "lr": [0.0, 1e-4, 1e-5, 2e-5, 0.0, 0.0, 0.0],
                 "temp": [2.0, 5.0, 2.0, 5.0],
             },
             # ------------------------------------------------------------------
@@ -115,7 +116,8 @@ trainer_config = {
                     "gate": 1.0,
                     "distill": [1.0, 0.0],
                 },
-                "lr": [1e-5, 1e-4, 1e-5, 1e-5, 1e-5, 0.0, 0.0],
+                # LR: [Base(Router), LoRA, Gate, Fuser, Policy, CtxRatio, CtxPruner]
+                "lr": [0.0, 1e-4, 1e-5, 1e-5, 0.0, 0.0, 0.0],
                 "temp": [5.0, 10.0, 5.0, 50.0],
             },
         ],
