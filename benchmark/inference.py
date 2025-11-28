@@ -113,6 +113,59 @@ class FlopsMeasurer:
             self.flops = "Error"
             self.macs = "Error"
 
+class DiTProfiler:
+    def __init__(self, model):
+        self.model = model
+        self.events = [] 
+        self.enabled = False
+        self.handles = []
+        self.is_cuda = torch.cuda.is_available() and next(model.parameters()).is_cuda
+
+    def enable(self):
+        if self.enabled: return
+        self.enabled = True
+        self.handles.append(self.model.register_forward_pre_hook(self._pre_hook))
+        self.handles.append(self.model.register_forward_hook(self._post_hook))
+        
+    def disable(self):
+        if not self.enabled: return
+        self.enabled = False
+        for h in self.handles:
+            h.remove()
+        self.handles = []
+
+    def reset(self):
+        self.events = []
+        self.cpu_accumulated = 0.0
+        self._start_time = 0.0
+
+    def _pre_hook(self, module, args):
+        if not self.enabled: return
+        if self.is_cuda:
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            self._current_pair = (start, end)
+        else:
+            self._start_time = time.time()
+
+    def _post_hook(self, module, args, output):
+        if not self.enabled: return
+        if self.is_cuda:
+            start, end = self._current_pair
+            end.record()
+            self.events.append((start, end))
+        else:
+            self.cpu_accumulated += (time.time() - self._start_time)
+
+    def get_total_time_ms(self):
+        if self.is_cuda:
+            if not self.events: return 0.0
+            torch.cuda.synchronize()
+            return sum(s.elapsed_time(e) for s, e in self.events)
+        else:
+             return self.cpu_accumulated * 1000
+
 def benchmark(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float16
@@ -149,17 +202,25 @@ def benchmark(args):
     if args.measure_flops and CALFLOPS_AVAILABLE and model:
         flops_measurer = FlopsMeasurer(model)
         flops_measurer.enable() 
+    
+    dit_profiler = None
+    if model:
+        dit_profiler = DiTProfiler(model)
 
     print("-" * 50)
     print("Warming up (and measuring FLOPs if enabled)...")
     warmup_steps = 4 
     _ = process_quick_start(pipe, prompt=prompts[0], num_inference_steps=warmup_steps)
     torch.cuda.synchronize()
+
+    if dit_profiler:
+        dit_profiler.enable()
     
     print("-" * 50)
     print(f"Running End-to-End Inference Benchmark on {len(prompts)} items...")
     
     latencies = []
+    dit_latencies = []
     peak_memories = []
     
     save_dir = "benchmark_samples"
@@ -177,8 +238,6 @@ def benchmark(args):
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         
-        start_event.record()
-        
         kwargs = {"prompt": prompt}
         if args.steps > 0:
             kwargs["num_inference_steps"] = args.steps
@@ -187,24 +246,36 @@ def benchmark(args):
         if args.width > 0:
              kwargs["width"] = args.width
             
+        if dit_profiler:
+            dit_profiler.reset()
+
+        start_event.record()
+            
         image = process_quick_start(pipe, **kwargs)
         
         end_event.record()
         torch.cuda.synchronize()
+
+        dit_time_ms = 0
+        if dit_profiler:
+            dit_time_ms = dit_profiler.get_total_time_ms()
         
         latency_ms = start_event.elapsed_time(end_event)
         latencies.append(latency_ms)
+
+        dit_latencies.append(dit_time_ms)
         
         current_peak = torch.cuda.max_memory_allocated() / 1024 / 1024 # MB
         peak_memories.append(current_peak)
         
-        print(f"  [{i+1}/{len(prompts)}] E2E Time: {latency_ms:.2f}ms | Peak Mem: {current_peak:.0f}MB")
+        print(f"  [{i+1}/{len(prompts)}] E2E Time: {latency_ms:.2f}ms | DiT Time: {dit_time_ms:.2f}ms | Peak Mem: {current_peak:.0f}MB")
 
         if args.save_images:
             safe_name = "".join(c if c.isalnum() else "_" for c in prompt)[:30]
             image.save(os.path.join(save_dir, f"{i:03d}_{safe_name}.png"))
 
     avg_latency = statistics.mean(latencies)
+    avg_dit_latency = statistics.mean(dit_latencies)
     avg_memory = statistics.mean(peak_memories)
 
     display_name = os.path.basename(args.ckpt_path) if args.ckpt_path else "Baseline (No Checkpoint)"
@@ -232,7 +303,11 @@ def benchmark(args):
     print(f"System Performance (Avg over {len(prompts)} runs):")
     print(f"  Peak VRAM:          {avg_memory:.2f} MB")
     print(f"  End-to-End Latency: {avg_latency:.2f} ms ({avg_latency/1000:.2f} s)")
+    print(f"  DiT Latency:       {avg_dit_latency:.2f} ms ({avg_dit_latency/1000:.2f} s)")
     print("=" * 58)
+
+    if dit_profiler:
+        dit_profiler.disable()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
