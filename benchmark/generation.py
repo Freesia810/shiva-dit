@@ -94,20 +94,20 @@ class GenerationEvaluator:
         self.fid = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
 
         self.clip_score = CLIPScore(
-            model_name_or_path="openai/clip-vit-base-patch16"
+            model_name_or_path="../openai-clip-vit-base-patch16"
         ).to(device)
 
         self.clip_iqa = CLIPImageQualityAssessment(
-            model_name_or_path="openai/clip-vit-base-patch16"
+            model_name_or_path="../openai-clip-vit-base-patch16"
         ).to(device)
 
         self.ir_model = None
         if RM:
             print("Loading ImageReward model...")
             try:
-                self.ir_model = RM.load("ImageReward-v1.0", device=device)
-            except:
-                pass
+                self.ir_model = RM.load("../ImageReward/ImageReward.pt", device=device, med_config="../ImageReward/med_config.json")
+            except Exception as e:
+                print(f"Error loading ImageReward: {e}")
 
         self.results = {"ir_scores": [], "clip_scores": [], "clip_iqa_scores": []}
 
@@ -325,7 +325,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # Model
     parser.add_argument("--ckpt_path", type=str, default=None)
-    parser.add_argument("--model_type", type=str, default="flux-dev")
+    parser.add_argument("--model_type", type=str, default=None)
     parser.add_argument("--base_model_path", type=str, default=None)
     parser.add_argument("--gater_lut", type=str, default=None)
 
