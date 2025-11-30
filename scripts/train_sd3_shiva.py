@@ -8,8 +8,9 @@ hook_config = {
 
     # --- Image Configs ---
     "image_ratio_mode": "adaptive",
+    "fixed_image_ratio": 0.8,
     "num_router_groups": 24,
-    "bottleneck_dim": 256,
+    "bottleneck_dim": 512,
     "ratio_bottleneck_dim": 32,
     "layer_embed_dim": 256,
     "fuse_expert_ffn_mult": 2,
@@ -42,7 +43,7 @@ trainer_config = {
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
     "caption_dropout_rate": 0.1,
-    "num_epochs": 50,
+    "num_epochs": 30,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16,
     "optimizer": "AdamW",
@@ -73,13 +74,14 @@ trainer_config = {
             # Stage 0: Router Warmup (Random Ratio Phase)
             # ------------------------------------------------------------------
             {
-                "steps": 3500, # 约 2 epochs
+                "steps": 7000, # 约 4 epochs
                 "weights": {
                     "ratio": [1.0, 50.0, 1.0], 
                     "gate": 0.0,
-                    "distill": [1.0, 0.0]
+                    "distill": [5.0, 0.0]
                 },
-                "lr": [5e-4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                # LR: [Base(Router), LoRA, Gate, Fuser, Policy, CtxRatio, CtxPruner]
+                "lr": [1e-5, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
                 "temp": [2.0, 2.0, 2.0, 2.0],
             },
 
@@ -89,26 +91,35 @@ trainer_config = {
             {
                 "steps": 3500,
                 "weights": {
-                    "ratio": [1.0, 50.0, 1.0], 
-                    "gate": 1.0,
-                    "distill": [1.0, 0.0]
+                    "ratio": [1.0, 50.0, 0.1], 
+                    "gate": 0.0,
+                    "distill": [5.0, 0.0]
                 },
-                "lr": [1e-4, 0.0, 2e-4, 2e-4, 5e-4, 0.0, 0.0],
-                "temp": [5.0, 5.0, 5.0, 5.0],
+                # LR: [Base(Router), LoRA, Gate, Fuser, Policy, CtxRatio, CtxPruner]
+                "lr": [1e-5, 1e-5, 0.0, 0.0, 1e-3, 0.0, 0.0],
+                "temp": [2.0, 5.0, 2.0, 5.0],
             },
 
-            # ------------------------------------------------------------------
-            # Stage 2: Final Finetune (Hardening)
-            # ------------------------------------------------------------------
             {
-                "steps": -1,
+                "steps": 7000,
                 "weights": {
                     "ratio": [1.0, 50.0, 1.0], 
-                    "gate": 1.0,
+                    "gate": 10.0,
                     "distill": [1.0, 0.0]
                 },
                 "lr": [1e-5, 1e-4, 1e-5, 1e-5, 1e-5, 0.0, 0.0],
-                "temp": [5.0, 10.0, 5.0, 50.0],
+                "temp": [5.0, 10.0, 5.0, 10.0],
+            },
+
+            {
+                "steps": 35000,
+                "weights": {
+                    "ratio": [1.0, 50.0, 1.0], 
+                    "gate": 0.1,
+                    "distill": [1.0, 0.0]
+                },
+                "lr": [1e-5, 1e-4, 1e-5, 1e-5, 1e-5, 0.0, 0.0],
+                "temp": [10.0, 10.0, 10.0, 50.0],
             },
         ],
     },
