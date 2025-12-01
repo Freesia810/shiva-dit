@@ -13,7 +13,7 @@ hook_config = {
     "bottleneck_dim": 512,
     "ratio_bottleneck_dim": 32,
     "layer_embed_dim": 256,
-    "fuse_expert_ffn_mult": 2,
+    "fuse_expert_ffn_mult": 4,
     "use_gater_lut": False,
 
     # --- Common ---
@@ -47,7 +47,7 @@ trainer_config = {
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
     "caption_dropout_rate": 0.1,
-    "num_epochs": 50,
+    "num_epochs": 30,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16,  # 1750 steps * 16 = 28000 images (approx 1 epoch)
     "optimizer": "AdamW",
@@ -79,7 +79,7 @@ trainer_config = {
             # Stage 0: Router Warmup (Random Ratio)
             # ------------------------------------------------------------------
             {
-                "steps": 3500,
+                "steps": 1750,
                 "weights": {
                     "ratio": [1.0, 50.0, 1.0],
                     "gate": 0.0,
@@ -92,34 +92,55 @@ trainer_config = {
                 "lr": [1e-5, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
                 "temp": [2.0, 2.0, 2.0, 2.0],
             },
-            # ------------------------------------------------------------------
-            # Stage 1: Gater & Fuser & Policy Wakeup
-            # ------------------------------------------------------------------
+
+            # Ratio
             {
                 "steps": 3500,
                 "weights": {
-                    "ratio": [1.0, 50.0, 1.0],
-                    "gate": 10.0,
-                    "distill": [1.0, 0.0],
+                    "ratio": [1.0, 50.0, 5.0], 
+                    "gate": 0.0,
+                    "distill": [5.0, 0.0]
                 },
                 # LR: [Base(Router), LoRA, Gate, Fuser, Policy, CtxRatio, CtxPruner]
-                "lr": [0.0, 1e-4, 1e-5, 2e-5, 0.0, 0.0, 0.0],
+                "lr": [1e-5, 1e-4, 0.0, 0.0, 5e-4, 0.0, 0.0],
                 "temp": [2.0, 5.0, 2.0, 5.0],
             },
-            # ------------------------------------------------------------------
-            # Stage 2: Final Finetune (Hardening)
-            # ------------------------------------------------------------------
             {
                 "steps": -1,
                 "weights": {
                     "ratio": [1.0, 50.0, 1.0],
-                    "gate": 1.0,
+                    "gate": 0.05,
                     "distill": [1.0, 0.0],
                 },
                 # LR: [Base(Router), LoRA, Gate, Fuser, Policy, CtxRatio, CtxPruner]
-                "lr": [0.0, 1e-4, 1e-5, 1e-5, 0.0, 0.0, 0.0],
+                "lr": [1e-5, 1e-4, 0.0, 0.0, 1e-5, 0.0, 0.0],
                 "temp": [5.0, 10.0, 5.0, 50.0],
             },
+            # # Gate
+            # {
+            #     "steps": 3500,
+            #     "weights": {
+            #         "ratio": [1.0, 50.0, 1.0],
+            #         "gate": 10.0,
+            #         "distill": [1.0, 0.0],
+            #     },
+            #     # LR: [Base(Router), LoRA, Gate, Fuser, Policy, CtxRatio, CtxPruner]
+            #     "lr": [1e-5, 1e-4, 1e-5, 2e-5, 1e-5, 0.0, 0.0],
+            #     "temp": [5.0, 5.0, 5.0, 5.0],
+            # },
+
+
+            # {
+            #     "steps": -1,
+            #     "weights": {
+            #         "ratio": [1.0, 50.0, 1.0],
+            #         "gate": 0.05,
+            #         "distill": [1.0, 0.0],
+            #     },
+            #     # LR: [Base(Router), LoRA, Gate, Fuser, Policy, CtxRatio, CtxPruner]
+            #     "lr": [1e-5, 1e-4, 1e-5, 1e-5, 0.0, 0.0, 0.0],
+            #     "temp": [5.0, 10.0, 5.0, 50.0],
+            # },
         ],
     },
     "log_with_tensorboard": True,
