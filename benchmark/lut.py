@@ -44,7 +44,7 @@ def generate_lut(args):
     def capture_gater_hook(module, args, output):
         # output: gate_logits [B, 2]
         logits = output
-        decision = torch.argmax(logits, dim=-1).cpu().item() # 0 or 1
+        decision = torch.argmax(logits[0], dim=-1).cpu().item() # 0 or 1
         captured_gater_decisions.append(decision)
 
     # === Hook for Ratio ===
