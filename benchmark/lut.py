@@ -35,7 +35,7 @@ def generate_lut(args):
     print(f"Found {num_layers} hooked layers.")
     
     gater_policy = hooks[0].gater_policy
-    ratio_policy = hooks[0].ratio_policy
+    ratio_policy = hooks[0].image_ratio_policy
     
     captured_gater_decisions = []
     captured_ratios = []

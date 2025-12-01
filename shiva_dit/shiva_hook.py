@@ -436,7 +436,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             current_t_index = global_context.current_iteration
             decision = self.gater_cache[self.layer_idx, current_t_index].item()
         else:
-            gater_logits = self.gater_policy(pure_temb, layer_id_tensor)
+            gater_logits = self.current_gate_logits_for_loss
             decision = torch.argmax(gater_logits[0], dim=-1).item()
 
         if decision == 0:
