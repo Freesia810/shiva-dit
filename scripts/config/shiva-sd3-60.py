@@ -8,7 +8,7 @@ hook_config = {
 
     # --- Image Configs ---
     "image_ratio_mode": "adaptive",
-    "fixed_image_ratio": 0.8,
+    "fixed_image_ratio": 0.6,
     "num_router_groups": 24,
     "bottleneck_dim": 512,
     "ratio_bottleneck_dim": 32,
@@ -66,7 +66,7 @@ trainer_config = {
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",
     "extra_config": {
-        "target_ratio": 0.8,
+        "target_ratio": 0.6,
         # LR Order Mapping in Trainer: 
         # [0:Base/Router, 1:LoRA, 2:Gate, 3:Fuser, 4:ImageRatio(Policy), 5:CtxRatio, 6:CtxPruner]
         "stage_schedule": [
@@ -112,7 +112,7 @@ trainer_config = {
                 "steps": 35000,
                 "weights": {
                     "ratio": [1.0, 50.0, 1.0], 
-                    "gate": 0.1,
+                    "gate": 0.01,
                     "distill": [1.0, 0.0]
                 },
                 "lr": [1e-5, 1e-4, 1e-5, 1e-5, 1e-5, 0.0, 0.0],
