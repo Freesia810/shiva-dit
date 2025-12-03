@@ -2091,42 +2091,10 @@ class DiffusionModelTrainer:
 
         if latest_ckpt_dir is not None:
             try:
-                # if self.accelerator.is_main_process:
-                #     print(f"[{self.accelerator.process_index}] Attempting to resume from {latest_ckpt_dir}...")
-
-                # self.accelerator.load_state(latest_ckpt_dir)
-
-
-                # === [插入 Hot Patch] ===
                 if self.accelerator.is_main_process:
-                    print(f"HOT PATCH: Loading checkpoint {latest_ckpt_dir} with filtering...")
-                
-                # 1. 自动寻找文件
-                bin_path = os.path.join(latest_ckpt_dir, "pytorch_model.bin")
-                safe_path = os.path.join(latest_ckpt_dir, "model.safetensors")
-                
-                state_dict = None
-                if os.path.exists(bin_path):
-                    state_dict = torch.load(bin_path, map_location="cpu")
-                elif os.path.exists(safe_path):
-                    from safetensors.torch import load_file
-                    state_dict = load_file(safe_path)
-                
-                if state_dict:
-                    # 2. 过滤 Policy 权重 (因为架构改了)
-                    new_state_dict = {k: v for k, v in state_dict.items() if "image_ratio_policy" not in k and "gater_policy" not in k}
-                    
-                    # 3. 严格模式 False 加载
-                    unwrapped = self.accelerator.unwrap_model(self.model)
-                    unwrapped.load_state_dict(new_state_dict, strict=False)
-                    print("HOT PATCH: Model loaded (Policy weights dropped).")
-                    
-                    # 4. 跳过 Optimizer 加载 (必须重置)
-                    print("HOT PATCH: Skipping Optimizer load to reset momentum.")
-                else:
-                    # 兜底
-                    self.accelerator.load_state(latest_ckpt_dir)
+                    print(f"[{self.accelerator.process_index}] Attempting to resume from {latest_ckpt_dir}...")
 
+                self.accelerator.load_state(latest_ckpt_dir)
 
                 custom_state_path = os.path.join(latest_ckpt_dir, "trainer_state.json")
                 with open(custom_state_path, "r") as f:
