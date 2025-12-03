@@ -1509,12 +1509,11 @@ class DiffusionModelTrainer:
                     continue
                 
                 input_dim = 1
-                if hasattr(policy, "time_mlp") and len(policy.time_mlp) > 0:
-                    # Ratio Policy
-                    input_dim = policy.time_mlp[0].in_features
+                if hasattr(policy, "time_proj") and len(policy.time_proj) > 0:
+                    if isinstance(policy.time_proj[0], torch.nn.Linear):
+                        input_dim = policy.time_proj[0].in_features
                 elif hasattr(policy, "in_layer"):
-                    # Gater Policy (input = temb + layer_emb, so dim > 1)
-                    input_dim = policy.in_layer.in_features
+                    input_dim = policy.in_layer.in_features - policy.layer_embedder.embedding_dim
                 
                 p_param = next(policy.parameters())
                 
