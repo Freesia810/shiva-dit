@@ -484,7 +484,7 @@ class DiffusionModelTrainer:
                 "loss/diffcr_loss",
             ],
             "loss/losses_raw": [
-                "loss/gater/gate_loss_raw",
+                "loss/gater/fuse_penalty",
                 "loss/image_ratio/floor_loss",
                 "loss/image_ratio/mse_loss",
                 "loss/image_ratio/budget_loss",
@@ -508,12 +508,18 @@ class DiffusionModelTrainer:
                 "image_ratio/target_ratio",
                 "image_ratio/avg_ratio",
             ],
+            "ratio_policy/distribution": [
+                "image_ratio/std_ratio",
+                "context_ratio/std_ratio",
+            ],
             "ratio_policy/context_ratio": [ 
                 "context_ratio/avg_ratio",
                 "context_ratio/target_ratio",
             ],
             "gater": [
                 "gater/avg_fuse_prob",
+                "gater/max_fuse_prob",
+                "gater/min_fuse_prob",
             ],
             "context/scores": [
                 "context/align_score_mean",
@@ -1454,6 +1460,7 @@ class DiffusionModelTrainer:
 
         try:
             import matplotlib.pyplot as plt
+            import numpy as np
         except ImportError:
             return
 
@@ -1461,45 +1468,99 @@ class DiffusionModelTrainer:
         hooks = list(HookManager.get_all_hooks().values())
         if not hooks:
             return
-
-        # Try to visualize Image Policy first, then Context Policy
-        policy = getattr(hooks[0], "image_ratio_policy", None)
-        policy_name = "image_ratio"
-        if policy is None:
-            policy = getattr(hooks[0], "context_ratio_policy", None)
-            policy_name = "context_ratio"
-        
-        if policy is None:
-            return
-
-        total_layers = getattr(hooks[0], "total_layers", 1)
+        hook = hooks[0]
+        total_layers = getattr(hook, "total_layers", 1)
 
         steps = 50
+        # Time: 0.0 (Clean) -> 1.0 (Noise)
         t_values = torch.linspace(0, 1, steps, device=self.device) 
         l_values = torch.arange(total_layers, device=self.device, dtype=t_values.dtype)
         t_grid, l_grid = torch.meshgrid(t_values, l_values, indexing='ij') 
         
-        t_flat = t_grid.reshape(-1, 1) 
-        l_flat = l_grid.reshape(-1)    
+        t_flat = t_grid.reshape(-1) # (Steps * Layers, )
+        l_flat = l_grid.reshape(-1) # (Steps * Layers, )
         
+        temb_input = None
         with torch.no_grad():
-            model_params = next(policy.parameters(), None)
-            if model_params is not None:
-                target_dtype = model_params.dtype
-                t_flat = t_flat.to(dtype=target_dtype)
+            try:
+                unwrapped_model = self.accelerator.unwrap_model(self.model)
+                if self.model_type in ["sd3", "flux-dev", "pixart-sigma", "flux-kontext"]:
+                    t_model_input = t_flat * 1000.0 # Scale to 0-1000
+                    if self.model_type in ["flux-dev", "flux-kontext"]:
+                        t_model_input = t_model_input / 1000.0
+                    
+                    if hasattr(unwrapped_model, "time_text_embed"):
+                        timesteps_proj = unwrapped_model.time_text_embed.time_proj(t_model_input)
+                        timesteps_emb = unwrapped_model.time_text_embed.timestep_embedder(timesteps_proj.to(dtype=self.dtype))
+                        temb_input = timesteps_emb
+            except Exception as e:
+                print(f"[Viz] Warning: Failed to generate temb input: {e}")
 
-            logits = policy(t_flat, l_flat.long())
-            ratios = torch.sigmoid(logits).reshape(steps, total_layers).float().cpu().numpy()
-        
-        fig, ax = plt.subplots(figsize=(8, 6))
-        cax = ax.imshow(ratios, aspect='auto', origin='lower', extent=[0, total_layers, 0, 1], vmin=0, vmax=1, cmap='viridis')
-        ax.set_xlabel('Layer Index')
-        ax.set_ylabel('Timestep (0.0 -> 1.0)')
-        ax.set_title(f'Adaptive {policy_name.title()} Policy Landscape')
-        fig.colorbar(cax, ax=ax, label='Keep Ratio')
-        
-        self.logger.log_figure(f"policy_viz/{policy_name}_landscape", fig, self.global_step)
-        plt.close(fig)
+        policies_to_viz = [
+            ("image_ratio", "image_ratio_policy", "Keep Ratio"),
+            ("context_ratio", "context_ratio_policy", "Keep Ratio"),
+            ("gater", "gater_policy", "Fuse Probability"),
+        ]
+
+        with torch.no_grad():
+            for alias, attr_name, metric_name in policies_to_viz:
+                policy = getattr(hook, attr_name, None)
+                if policy is None:
+                    continue
+                
+                input_dim = 1
+                if hasattr(policy, "time_mlp") and len(policy.time_mlp) > 0:
+                    # Ratio Policy
+                    input_dim = policy.time_mlp[0].in_features
+                elif hasattr(policy, "in_layer"):
+                    # Gater Policy (input = temb + layer_emb, so dim > 1)
+                    input_dim = policy.in_layer.in_features
+                
+                p_param = next(policy.parameters())
+                
+                if input_dim > 1:
+                    # Vector Input
+                    if temb_input is None:
+                        print(f"[Viz] Skipping {alias}: Requires temb vector but extraction failed.")
+                        continue
+                    policy_input = temb_input.to(dtype=p_param.dtype)
+                else:
+                    policy_input = t_flat.unsqueeze(-1).to(dtype=p_param.dtype)
+
+                logits = policy(policy_input, l_flat.long())
+                
+                if "gater" in alias:
+                    # Gater Output: (B, 2) -> [Prune, Fuse] -> Softmax -> Index 1
+                    probs = torch.softmax(logits, dim=-1)
+                    values = probs[:, 1]
+                else:
+                    # Ratio Output: (B, 1) -> Sigmoid
+                    values = torch.sigmoid(logits).reshape(-1)
+
+                # Reshape back to (Steps, Layers)
+                grid_values = values.reshape(steps, total_layers).float().cpu().numpy()
+
+                print(f"\n{'='*20} Policy Visualization: {alias.upper()} ({metric_name}) {'='*20}")
+                print(f"Stats: Min={grid_values.min():.4f} | Max={grid_values.max():.4f} | Mean={grid_values.mean():.4f}")
+                print("Values Matrix (Rows: Time 0.0->1.0, Cols: Layer 0->N):")
+                with np.printoptions(precision=3, suppress=True, linewidth=200, edgeitems=10, threshold=10000):
+                    print(grid_values)
+                print(f"{'='*60}\n")
+
+                fig, ax = plt.subplots(figsize=(10, 6))
+                cax = ax.imshow(grid_values, aspect='auto', origin='lower', 
+                                extent=[0, total_layers, 0, 1], 
+                                vmin=0, vmax=1, cmap='viridis')
+                
+                ax.set_xlabel('Layer Index (Input -> Output)')
+                ax.set_ylabel('Timestep (0.0=Clean -> 1.0=Noise)')
+                ax.set_title(f'Adaptive {alias.title()} - {metric_name}')
+                
+                cbar = fig.colorbar(cax, ax=ax)
+                cbar.set_label(metric_name)
+
+                self.logger.log_figure(f"policy_viz/{alias}_landscape", fig, self.global_step)
+                plt.close(fig)
 
     def _log_router_visualization(self, batch=None):
         if not self.accelerator.is_main_process:
@@ -1833,7 +1894,7 @@ class DiffusionModelTrainer:
                 if hasattr(hook, "is_validating"):
                     hook.is_validating = False
 
-        return avg_val_loss if "avg_val_loss" in locals() else None
+        return avg_main_loss if "avg_main_loss" in locals() else None
 
     @torch.no_grad()
     def run_inference_validation(self, global_step):
@@ -2030,10 +2091,43 @@ class DiffusionModelTrainer:
 
         if latest_ckpt_dir is not None:
             try:
-                if self.accelerator.is_main_process:
-                    print(f"[{self.accelerator.process_index}] Attempting to resume from {latest_ckpt_dir}...")
+                # if self.accelerator.is_main_process:
+                #     print(f"[{self.accelerator.process_index}] Attempting to resume from {latest_ckpt_dir}...")
 
-                self.accelerator.load_state(latest_ckpt_dir)
+                # self.accelerator.load_state(latest_ckpt_dir)
+
+
+                # === [插入 Hot Patch] ===
+                if self.accelerator.is_main_process:
+                    print(f"HOT PATCH: Loading checkpoint {latest_ckpt_dir} with filtering...")
+                
+                # 1. 自动寻找文件
+                bin_path = os.path.join(latest_ckpt_dir, "pytorch_model.bin")
+                safe_path = os.path.join(latest_ckpt_dir, "model.safetensors")
+                
+                state_dict = None
+                if os.path.exists(bin_path):
+                    state_dict = torch.load(bin_path, map_location="cpu")
+                elif os.path.exists(safe_path):
+                    from safetensors.torch import load_file
+                    state_dict = load_file(safe_path)
+                
+                if state_dict:
+                    # 2. 过滤 Policy 权重 (因为架构改了)
+                    new_state_dict = {k: v for k, v in state_dict.items() if "image_ratio_policy" not in k and "gater_policy" not in k}
+                    
+                    # 3. 严格模式 False 加载
+                    unwrapped = self.accelerator.unwrap_model(self.model)
+                    unwrapped.load_state_dict(new_state_dict, strict=False)
+                    print("HOT PATCH: Model loaded (Policy weights dropped).")
+                    
+                    # 4. 跳过 Optimizer 加载 (必须重置)
+                    print("HOT PATCH: Skipping Optimizer load to reset momentum.")
+                else:
+                    # 兜底
+                    self.accelerator.load_state(latest_ckpt_dir)
+
+
                 custom_state_path = os.path.join(latest_ckpt_dir, "trainer_state.json")
                 with open(custom_state_path, "r") as f:
                     custom_state = json.load(f)

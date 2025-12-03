@@ -16,19 +16,51 @@ def _get_shiva_hooks():
             yield hook
 
 
+# def calculate_gate_loss(config: dict, device: torch.device) -> torch.Tensor:
+#     gate_losses = []
+#     metrics = {}
+#     gate_probs_per_hook = []
+#     gate_probs_per_layer = {}
+
+#     for hook in _get_shiva_hooks():
+#         accumulator = hook.gate_loss_accumulator
+#         if accumulator:
+#             avg_loss_for_hook = torch.stack(accumulator).mean()
+#             gate_losses.append(avg_loss_for_hook)
+#             device = avg_loss_for_hook.device
+#         hook.gate_loss_accumulator.clear()
+
+#         accumulator = hook.gater_fuse_prob_accumulator
+#         if accumulator:
+#             avg_prob_for_hook = torch.stack(accumulator).mean()
+#             gate_probs_per_hook.append(avg_prob_for_hook)
+#             gate_probs_per_layer[f"layer_{hook.layer_idx:02d}"] = avg_prob_for_hook
+#         hook.gater_fuse_prob_accumulator.clear()
+    
+#     final_loss = torch.tensor(0.0, device=device)
+
+#     if gate_losses:
+#         loss_weight = config.get("gate_loss_weight", 0.0)
+#         raw_loss = torch.stack(gate_losses).mean()
+#         final_loss = raw_loss * loss_weight
+        
+#         metrics["loss/gater/gate_loss_raw"] = raw_loss.detach()
+#         metrics["loss/gater/gate_loss"] = final_loss.detach()
+    
+#     if gate_probs_per_hook:
+#         global_avg_prob = torch.stack(gate_probs_per_hook).mean()
+#         metrics['gater/avg_fuse_prob'] = global_avg_prob
+        
+#     return final_loss, metrics, gate_probs_per_layer
+
 def calculate_gate_loss(config: dict, device: torch.device) -> torch.Tensor:
-    gate_losses = []
     metrics = {}
     gate_probs_per_hook = []
     gate_probs_per_layer = {}
 
     for hook in _get_shiva_hooks():
-        accumulator = hook.gate_loss_accumulator
-        if accumulator:
-            avg_loss_for_hook = torch.stack(accumulator).mean()
-            gate_losses.append(avg_loss_for_hook)
-            device = avg_loss_for_hook.device
-        hook.gate_loss_accumulator.clear()
+        if hook.gate_loss_accumulator:
+            hook.gate_loss_accumulator.clear()
 
         accumulator = hook.gater_fuse_prob_accumulator
         if accumulator:
@@ -39,74 +71,59 @@ def calculate_gate_loss(config: dict, device: torch.device) -> torch.Tensor:
     
     final_loss = torch.tensor(0.0, device=device)
 
-    if gate_losses:
-        loss_weight = config.get("gate_loss_weight", 0.0)
-        raw_loss = torch.stack(gate_losses).mean()
-        final_loss = raw_loss * loss_weight
-        
-        metrics["loss/gater/gate_loss_raw"] = raw_loss.detach()
-        metrics["loss/gater/gate_loss"] = final_loss.detach()
-    
     if gate_probs_per_hook:
-        global_avg_prob = torch.stack(gate_probs_per_hook).mean()
-        metrics['gater/avg_fuse_prob'] = global_avg_prob
+        all_probs = torch.stack(gate_probs_per_hook)
+        global_avg_prob = all_probs.mean()
+        
+        loss_weight = config.get("gate_loss_weight", 0.0)
+        final_loss = global_avg_prob * loss_weight
+        
+        metrics["loss/gater/fuse_penalty"] = final_loss.detach()
+        metrics["gater/avg_fuse_prob"] = global_avg_prob.detach()
+        metrics["gater/max_fuse_prob"] = all_probs.max().detach()
+        metrics["gater/min_fuse_prob"] = all_probs.min().detach()
         
     return final_loss, metrics, gate_probs_per_layer
 
 
-def _calc_ratio_loss_common(ratios_list, config, device, prefix="adaptive_ratio"):
-    """
-    Common logic for calculating budget/floor/mse loss for a list of ratios.
-    """
-    if not ratios_list:
+def _calc_ratio_loss_flat(all_ratios, config, device, prefix="adaptive_ratio"):
+    if all_ratios.numel() == 0:
         return torch.tensor(0.0, device=device), {}
 
-    # Config parsing: [budget_weight, floor_weight, mse_weight]
+    # Config parsing
     w_config = config.get("ratio_loss_weight", 1.0)
     if isinstance(w_config, list):
         w_budget = w_config[0]
         w_floor = w_config[1] if len(w_config) > 1 else 0.0
-        w_mse = w_config[2] if len(w_config) > 2 else 0.0
     else:
         w_budget = w_config
         w_floor = 0.0
-        w_mse = 0.0
 
     current_target_ratio = config.get("target_ratio", 0.8)
-
-    all_ratios = torch.stack(ratios_list) # (Num_Active_Layers,)
-    
-    global_avg_ratio = torch.mean(all_ratios)
     target = torch.tensor(current_target_ratio, device=device, dtype=all_ratios.dtype)
+    
+    # 1. Budget Loss: Global L1 Loss
+    global_avg_ratio = torch.mean(all_ratios)
+    budget_loss = w_budget * torch.abs(global_avg_ratio - target)
 
-    # 1. Budget Loss (Hinge Loss)
-    diff = global_avg_ratio - target
-    budget_loss = w_budget * torch.relu(diff)
-
-    # 2. Floor Loss (Penalty for going too low)
+    # 2. Floor Loss: (Element-wise)
     if w_floor > 0.0:
         min_allowed = 0.1
         floor_penalties = torch.relu(min_allowed - all_ratios)
-        floor_loss = torch.sum(floor_penalties) * w_floor
+        floor_loss = torch.sum(floor_penalties) * w_floor / all_ratios.numel()
     else:
         floor_loss = torch.tensor(0.0, device=device)
 
-    # 3. MSE Loss (Target adherence)
-    if w_mse > 0.0:
-        target_full = torch.full_like(all_ratios, current_target_ratio)
-        mse_loss_val = F.mse_loss(all_ratios, target_full)
-        mse_loss = w_mse * mse_loss_val
-    else:
-        mse_loss = torch.tensor(0.0, device=device)
+    ratio_std = torch.std(all_ratios)
 
-    final_loss = budget_loss + floor_loss + mse_loss
+    final_loss = budget_loss + floor_loss
 
     metrics = {
         f"{prefix}/avg_ratio": global_avg_ratio.detach(),
+        f"{prefix}/std_ratio": ratio_std.detach(),
         f"{prefix}/target_ratio": target,
         f"loss/{prefix}/budget_loss": budget_loss.detach(),
         f"loss/{prefix}/floor_loss": floor_loss.detach(),
-        f"loss/{prefix}/mse_loss": mse_loss.detach(),
         f"loss/{prefix}/ratio_loss": final_loss.detach(),
     }
     return final_loss, metrics
@@ -115,25 +132,26 @@ def _calc_ratio_loss_common(ratios_list, config, device, prefix="adaptive_ratio"
 def calculate_image_ratio_loss(
     config: dict, device: torch.device
 ) -> tuple[torch.Tensor, dict, dict]:
-    """
-    Calculates loss for Image Token Pruning ratios.
-    """
-    ratios_for_loss = []
+    all_ratios_flat = []
     per_layer_ratios = {}
 
     for hook in _get_shiva_hooks():            
         accumulator = getattr(hook, "image_ratio_accumulator", [])
         if accumulator:
-            avg_ratio = torch.stack(accumulator).mean()
-            ratios_for_loss.append(avg_ratio)
-            per_layer_ratios[f"layer_{hook.layer_idx:02d}"] = avg_ratio.item()
+            stacked_ratios = torch.stack(accumulator)
+            all_ratios_flat.append(stacked_ratios)
+            per_layer_ratios[f"layer_{hook.layer_idx:02d}"] = stacked_ratios.mean().item()
         
-        # Clear after reading
         if hasattr(hook, "image_ratio_accumulator"):
             hook.image_ratio_accumulator.clear()
 
-    # Use 'adaptive_ratio' prefix for backward compatibility/standard image naming
-    loss, metrics = _calc_ratio_loss_common(ratios_for_loss, config, device, prefix="image_ratio")
+    if not all_ratios_flat:
+        return torch.tensor(0.0, device=device), {}, {}
+
+    # (Total_Layers * Total_MicroBatches, )
+    ratios_concat = torch.cat(all_ratios_flat).flatten()
+
+    loss, metrics = _calc_ratio_loss_flat(ratios_concat, config, device, prefix="image_ratio")
     
     return loss, metrics, per_layer_ratios
 
@@ -141,25 +159,134 @@ def calculate_image_ratio_loss(
 def calculate_context_ratio_loss(
     config: dict, device: torch.device
 ) -> tuple[torch.Tensor, dict]:
-    """
-    Calculates loss for Context Pruning ratios.
-    """
-    ratios_for_loss = []
+    all_ratios_flat = []
     per_layer_ratios = {}
     
     for hook in _get_shiva_hooks():
         accumulator = getattr(hook, "context_ratio_accumulator", [])
         if accumulator:
-            avg_ratio = torch.stack(accumulator).mean()
-            ratios_for_loss.append(avg_ratio)
-            per_layer_ratios[f"layer_{hook.layer_idx:02d}"] = avg_ratio.item()
+            stacked_ratios = torch.stack(accumulator)
+            all_ratios_flat.append(stacked_ratios)
+            per_layer_ratios[f"layer_{hook.layer_idx:02d}"] = stacked_ratios.mean().item()
         
         if hasattr(hook, "context_ratio_accumulator"):
             hook.context_ratio_accumulator.clear()
             
-    loss, metrics = _calc_ratio_loss_common(ratios_for_loss, config, device, prefix="context_ratio")
+    if not all_ratios_flat:
+        return torch.tensor(0.0, device=device), {}, {}
+
+    ratios_concat = torch.cat(all_ratios_flat).flatten()
+    loss, metrics = _calc_ratio_loss_flat(ratios_concat, config, device, prefix="context_ratio")
     
     return loss, metrics, per_layer_ratios
+
+
+# def _calc_ratio_loss_common(ratios_list, config, device, prefix="adaptive_ratio"):
+#     """
+#     Common logic for calculating budget/floor/mse loss for a list of ratios.
+#     """
+#     if not ratios_list:
+#         return torch.tensor(0.0, device=device), {}
+
+#     # Config parsing: [budget_weight, floor_weight, mse_weight]
+#     w_config = config.get("ratio_loss_weight", 1.0)
+#     if isinstance(w_config, list):
+#         w_budget = w_config[0]
+#         w_floor = w_config[1] if len(w_config) > 1 else 0.0
+#         w_mse = w_config[2] if len(w_config) > 2 else 0.0
+#     else:
+#         w_budget = w_config
+#         w_floor = 0.0
+#         w_mse = 0.0
+
+#     current_target_ratio = config.get("target_ratio", 0.8)
+
+#     all_ratios = torch.stack(ratios_list) # (Num_Active_Layers,)
+    
+#     global_avg_ratio = torch.mean(all_ratios)
+#     target = torch.tensor(current_target_ratio, device=device, dtype=all_ratios.dtype)
+
+#     # 1. Budget Loss (Hinge Loss)
+#     diff = global_avg_ratio - target
+#     budget_loss = w_budget * torch.relu(diff)
+
+#     # 2. Floor Loss (Penalty for going too low)
+#     if w_floor > 0.0:
+#         min_allowed = 0.1
+#         floor_penalties = torch.relu(min_allowed - all_ratios)
+#         floor_loss = torch.sum(floor_penalties) * w_floor
+#     else:
+#         floor_loss = torch.tensor(0.0, device=device)
+
+#     # 3. MSE Loss (Target adherence)
+#     if w_mse > 0.0:
+#         target_full = torch.full_like(all_ratios, current_target_ratio)
+#         mse_loss_val = F.mse_loss(all_ratios, target_full)
+#         mse_loss = w_mse * mse_loss_val
+#     else:
+#         mse_loss = torch.tensor(0.0, device=device)
+
+#     final_loss = budget_loss + floor_loss + mse_loss
+
+#     metrics = {
+#         f"{prefix}/avg_ratio": global_avg_ratio.detach(),
+#         f"{prefix}/target_ratio": target,
+#         f"loss/{prefix}/budget_loss": budget_loss.detach(),
+#         f"loss/{prefix}/floor_loss": floor_loss.detach(),
+#         f"loss/{prefix}/mse_loss": mse_loss.detach(),
+#         f"loss/{prefix}/ratio_loss": final_loss.detach(),
+#     }
+#     return final_loss, metrics
+
+
+# def calculate_image_ratio_loss(
+#     config: dict, device: torch.device
+# ) -> tuple[torch.Tensor, dict, dict]:
+#     """
+#     Calculates loss for Image Token Pruning ratios.
+#     """
+#     ratios_for_loss = []
+#     per_layer_ratios = {}
+
+#     for hook in _get_shiva_hooks():            
+#         accumulator = getattr(hook, "image_ratio_accumulator", [])
+#         if accumulator:
+#             avg_ratio = torch.stack(accumulator).mean()
+#             ratios_for_loss.append(avg_ratio)
+#             per_layer_ratios[f"layer_{hook.layer_idx:02d}"] = avg_ratio.item()
+        
+#         # Clear after reading
+#         if hasattr(hook, "image_ratio_accumulator"):
+#             hook.image_ratio_accumulator.clear()
+
+#     # Use 'adaptive_ratio' prefix for backward compatibility/standard image naming
+#     loss, metrics = _calc_ratio_loss_common(ratios_for_loss, config, device, prefix="image_ratio")
+    
+#     return loss, metrics, per_layer_ratios
+
+
+# def calculate_context_ratio_loss(
+#     config: dict, device: torch.device
+# ) -> tuple[torch.Tensor, dict]:
+#     """
+#     Calculates loss for Context Pruning ratios.
+#     """
+#     ratios_for_loss = []
+#     per_layer_ratios = {}
+    
+#     for hook in _get_shiva_hooks():
+#         accumulator = getattr(hook, "context_ratio_accumulator", [])
+#         if accumulator:
+#             avg_ratio = torch.stack(accumulator).mean()
+#             ratios_for_loss.append(avg_ratio)
+#             per_layer_ratios[f"layer_{hook.layer_idx:02d}"] = avg_ratio.item()
+        
+#         if hasattr(hook, "context_ratio_accumulator"):
+#             hook.context_ratio_accumulator.clear()
+            
+#     loss, metrics = _calc_ratio_loss_common(ratios_for_loss, config, device, prefix="context_ratio")
+    
+#     return loss, metrics, per_layer_ratios
 
 
 def collect_context_stats(device: torch.device) -> dict:

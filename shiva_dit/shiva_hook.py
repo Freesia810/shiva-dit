@@ -15,6 +15,8 @@ from shiva_dit.modules.pruner import ShivaContextPruner, ShivaPrunerExpert
 from shiva_dit.modules.fuser import ShivaFuserExpert
 
 RANDOM_STAGE = 0
+RATIO_STAGE = 1
+GATER_STAGE = 2
 
 class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
@@ -180,7 +182,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         if encoder_hidden_states is not None:
             L = encoder_hidden_states.shape[1]
 
-        pure_temb = global_context.pure_temb
+        pure_temb = global_context.pure_temb.detach()
 
         # --- Metadata Preparation ---
         layer_id_tensor = self.layer_id_tensor.expand(B)
@@ -232,9 +234,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             if ctx_ratio is None:
                 if self.context_ratio_policy is not None:
                     # Adaptive Ratio
-                    t_scalar = get_t_scalar()
                     ctx_ratio_logits = self.context_ratio_policy(
-                        t_scalar, layer_id_tensor
+                        pure_temb, layer_id_tensor
                     )
                     ctx_ratio_pred = torch.sigmoid(ctx_ratio_logits).squeeze(-1).mean()
 
@@ -303,9 +304,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             if predicted_ratio is None:
                 if self.image_ratio_policy is not None:
                     # Adaptive Ratio
-                    t_scalar = get_t_scalar()
                     img_ratio_logits = self.image_ratio_policy(
-                        t_scalar, layer_id_tensor
+                        pure_temb, layer_id_tensor
                     )
                     policy_ratio = torch.sigmoid(img_ratio_logits).squeeze(-1).mean()
 
@@ -396,21 +396,41 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
     def _forward_train_image(self, x_sel, x_rej, N):
         dtype = x_sel.dtype
+        device = x_sel.device
 
-        gating_weights = F.softmax(self.current_gate_logits_for_loss, dim=-1).to(dtype)
+        current_stage = getattr(global_context, "current_stage_idx", -1)
+        is_gater_active = (self.training and current_stage == GATER_STAGE)
+        logits = self.current_gate_logits_for_loss
+        
+        if is_gater_active and self.training:
+            noise = torch.randn_like(logits) * 1.0 
+            logits = logits + noise
+        
+        gating_weights = F.softmax(logits, dim=-1).to(dtype)
+        
+        raw_g_prune = gating_weights[:, 0].unsqueeze(-1).unsqueeze(-1)
+        raw_g_fuse = gating_weights[:, 1].unsqueeze(-1).unsqueeze(-1)
 
-        avg_gating_probs = gating_weights.mean(dim=0)
-        num_experts = 2
-        load_balancing_loss = num_experts * torch.sum(avg_gating_probs.pow(2))
-        avg_fuse_prob = gating_weights[:, 1].mean()
+        if not is_gater_active:
+            g_fuse = raw_g_fuse * 0.0
+            g_prune = torch.ones_like(raw_g_prune)
+            empty_discarded = x_rej[:, :0, :] 
+            output_fuse = self.fuse_expert(x_sel.to(dtype), empty_discarded.to(dtype))
+            
+            load_balancing_loss = torch.tensor(0.0, device=device, dtype=dtype)
+            
+            with torch.no_grad():
+                avg_fuse_prob = gating_weights[:, 1].mean()
+        else:
+            g_prune = raw_g_prune
+            g_fuse = raw_g_fuse
+            
+            output_fuse = self.fuse_expert(x_sel.to(dtype), x_rej.to(dtype))
+            
+            avg_fuse_prob = gating_weights[:, 1].mean()
+            load_balancing_loss = torch.tensor(0.0, device=device, dtype=dtype)
 
-        g_prune = gating_weights[:, 0].unsqueeze(-1).unsqueeze(-1)
-        g_fuse = gating_weights[:, 1].unsqueeze(-1).unsqueeze(-1)
-
-        output_prune = x_sel
-        output_fuse = self.fuse_expert(x_sel.to(dtype), x_rej.to(dtype))
-
-        final_topk_states = (g_prune * output_prune) + (g_fuse * output_fuse)
+        final_topk_states = (g_prune * x_sel) + (g_fuse * output_fuse)
 
         self._collect_training_metrics_image(
             load_balancing_loss=load_balancing_loss,

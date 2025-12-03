@@ -8,20 +8,33 @@ class ShivaGaterPolicy(nn.Module):
         self.layer_embedder = nn.Embedding(num_layers, layer_embed_dim)
         
         self.in_layer = nn.Linear(time_embed_dim + layer_embed_dim, bottleneck_dim)
-        self.out_layer = nn.Linear(bottleneck_dim, 2)  # [Keep, Fuse]
+        self.out_layer = nn.Linear(bottleneck_dim, 2)  # [Choice A, Choice B]
         self.act = nn.SiLU()
+        
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        nn.init.normal_(self.layer_embedder.weight, std=0.02)
+        
+        nn.init.xavier_uniform_(self.in_layer.weight)
+        nn.init.zeros_(self.in_layer.bias)
 
+        nn.init.normal_(self.out_layer.weight, mean=0.0, std=0.01)
+        
         nn.init.constant_(self.out_layer.bias, 0.0)
         with torch.no_grad():
-            self.out_layer.bias[0] = 3.0   # Prune Logit
-            self.out_layer.bias[1] = 0.0  # Fuse Logit
+            self.out_layer.bias[0] = 1.0   
+            self.out_layer.bias[1] = 0.0   
+        
+        print(f"[ShivaGaterPolicy] Initialized. Gradient Flow: ACTIVE. Init Prob[0]: ~73%")
 
     def forward(self, temb, layer_idx_tensor):
-        # temb: (B, D)
-        # layer_idx: (B,)
-        
-        layer_emb = self.layer_embedder(layer_idx_tensor) # (B, layer_dim)
+        # layer_idx_tensor: (B,) -> layer_emb: (B, layer_dim)
+        layer_emb = self.layer_embedder(layer_idx_tensor) 
 
+        if temb.dim() > 2: 
+            temb = temb.squeeze(1) 
+            
         x = torch.cat([temb, layer_emb], dim=-1)
         x = self.in_layer(x)
         x = self.act(x)
@@ -29,86 +42,84 @@ class ShivaGaterPolicy(nn.Module):
         return logits
 
 
-# class ShivaRatioPolicy(nn.Module):
-#     def __init__(
-#         self, 
-#         total_layers: int,
-#         ratio_bottleneck_dim: int = 32,
-#         init_ratio: float = 0.8,
-#         **kwargs
-#     ):
-#         super().__init__()
-        
-#         self.layer_emb = nn.Embedding(total_layers, ratio_bottleneck_dim)
-
-#         self.time_mlp = nn.Sequential(
-#             nn.Linear(1, ratio_bottleneck_dim),
-#             nn.SiLU(),
-#             nn.Linear(ratio_bottleneck_dim, ratio_bottleneck_dim),
-#             nn.SiLU(),
-#         )
-
-#         self.head = nn.Linear(ratio_bottleneck_dim, 1)
-
-#         nn.init.normal_(self.layer_emb.weight, std=0.01)
-#         eps = 1e-6
-#         safe_ratio = max(eps, min(init_ratio, 1.0 - eps))
-#         bias_val = math.log(safe_ratio / (1.0 - safe_ratio))
-#         nn.init.constant_(self.head.bias, bias_val)
-#         print(f"[ShivaRatioPolicy] Initialized bias to {bias_val:.4f} (Sigmoid -> {safe_ratio:.4f})")
-#         nn.init.zeros_(self.head.weight)
-
-#     def forward(self, t_scalar, layer_idx_tensor):
-#         """
-#         t_scalar: (B, 1)  0.0 ~ 1.0
-#         layer_idx_tensor: (B,)
-#         """
-#         t_feat = self.time_mlp(t_scalar)
-#         l_feat = self.layer_emb(layer_idx_tensor)
-        
-#         features = l_feat * t_feat + l_feat
-#         logits = self.head(features)
-        
-#         return logits
-
-
 class ShivaRatioPolicy(nn.Module):
     def __init__(
         self, 
         total_layers: int,
-        ratio_bottleneck_dim: int = 32,
-        init_ratio: float = 0.8,
+        time_embed_dim: int,
+        ratio_bottleneck_dim: int,
+        init_ratio: float,
         **kwargs
     ):
         super().__init__()
+        self.init_ratio_val = init_ratio
         
+        # 1. Layer Identity Embedding
         self.layer_emb = nn.Embedding(total_layers, ratio_bottleneck_dim)
 
-        self.time_mlp = nn.Sequential(
-            nn.Linear(1, ratio_bottleneck_dim),
+        # 2. Time Projection (Dimension Reduction)
+        self.time_proj = nn.Sequential(
+            nn.Linear(time_embed_dim, ratio_bottleneck_dim),
             nn.SiLU(),
-            nn.Linear(ratio_bottleneck_dim, ratio_bottleneck_dim * 2),
         )
 
-        self.head = nn.Linear(ratio_bottleneck_dim, 1)
-
-        nn.init.normal_(self.layer_emb.weight, std=0.01)
-        eps = 1e-6
-        safe_ratio = max(eps, min(init_ratio, 1.0 - eps))
-        bias_val = math.log(safe_ratio / (1.0 - safe_ratio))
-        nn.init.constant_(self.head.bias, bias_val)
-        print(f"[ShivaRatioPolicy] Initialized bias to {bias_val:.4f} (Sigmoid -> {safe_ratio:.4f})")
-        nn.init.zeros_(self.head.weight)
-
-    def forward(self, t_scalar, layer_idx_tensor):
-        """
-        t_scalar: (B, 1)  0.0 ~ 1.0
-        layer_idx_tensor: (B,)
-        """
-        time_out = self.time_mlp(t_scalar)
-        scale, shift = time_out.chunk(2, dim=-1)
-        l_feat = self.layer_emb(layer_idx_tensor)
-        features = l_feat * (1 + scale) + shift
-        logits = self.head(features)
+        # 3. Mixing MLP (The "Brain")
+        in_dim = ratio_bottleneck_dim * 2
+        self.mix_mlp = nn.Sequential(
+            nn.Linear(in_dim, ratio_bottleneck_dim),
+            nn.SiLU(),
+            nn.Linear(ratio_bottleneck_dim, 1)  # Output scalar logit
+        )
         
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        # 1. Layer Embedding: Use small normal distribution to break symmetry.
+        nn.init.normal_(self.layer_emb.weight, mean=0.0, std=0.02)
+
+        # 2. Linear Layers (Time Proj & MLP): Standard Xavier/Kaiming
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+        # 3. Final Head Logic (Controlling the Start Point)
+        # We want the model to start predicting ~init_ratio, but allow immediate learning.
+        head = self.mix_mlp[-1]
+        
+        # Set weights to small random noise (not zero!) to allow gradient flow back to features
+        nn.init.normal_(head.weight, mean=0.0, std=0.01)
+        
+        # Set bias to match the target init_ratio (Inverse Sigmoid)
+        eps = 1e-6
+        safe_ratio = max(eps, min(self.init_ratio_val, 1.0 - eps))
+        bias_val = math.log(safe_ratio / (1.0 - safe_ratio))
+        
+        nn.init.constant_(head.bias, bias_val)
+        
+        print(f"[ShivaRatioPolicy] Initialized: Strategy=Concat+MLP, InitRatio={self.init_ratio_val}, Bias={bias_val:.4f}")
+
+    def forward(self, temb, layer_idx_tensor):
+        """
+        Args:
+            temb: [B, time_embed_dim] - Time embeddings from DiT
+            layer_idx_tensor: [B] or [1] - Layer indices
+        Returns:
+            logits: [B, 1] - Raw logits (apply sigmoid outside to get ratio)
+        """
+        # A. Project Time
+        t_feat = self.time_proj(temb)      # [B, 256]
+        
+        # B. Embed Layer
+        l_feat = self.layer_emb(layer_idx_tensor) # [B, 256] (Broadcasting works if layer_idx is scalar)
+        if l_feat.shape[0] != t_feat.shape[0]:
+             l_feat = l_feat.expand(t_feat.shape[0], -1)
+
+        # C. Concat & Mix (Parallel Circuit Strategy)
+        # Concatenation ensures that even if one feature is small/zero, 
+        # the weights for the other feature still receive gradients.
+        combined = torch.cat([t_feat, l_feat], dim=-1) # [B, 512]
+        
+        logits = self.mix_mlp(combined) # [B, 1]
         return logits
