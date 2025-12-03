@@ -71,34 +71,28 @@ class ShivaRatioPolicy(nn.Module):
             nn.Linear(ratio_bottleneck_dim, 1)  # Output scalar logit
         )
         
+        # self.has_reset_parameters = False
         self.reset_parameters()
 
     def reset_parameters(self):
-        # 1. Layer Embedding: Use small normal distribution to break symmetry.
-        nn.init.normal_(self.layer_emb.weight, mean=0.0, std=0.02)
+        nn.init.xavier_uniform_(self.layer_emb.weight)
 
-        # 2. Linear Layers (Time Proj & MLP): Standard Xavier/Kaiming
+
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-        # 3. Final Head Logic (Controlling the Start Point)
-        # We want the model to start predicting ~init_ratio, but allow immediate learning.
         head = self.mix_mlp[-1]
+        nn.init.xavier_uniform_(head.weight)
         
-        # Set weights to small random noise (not zero!) to allow gradient flow back to features
-        nn.init.normal_(head.weight, mean=0.0, std=0.01)
-        
-        # Set bias to match the target init_ratio (Inverse Sigmoid)
         eps = 1e-6
         safe_ratio = max(eps, min(self.init_ratio_val, 1.0 - eps))
         bias_val = math.log(safe_ratio / (1.0 - safe_ratio))
-        
         nn.init.constant_(head.bias, bias_val)
         
-        print(f"[ShivaRatioPolicy] Initialized: Strategy=Concat+MLP, InitRatio={self.init_ratio_val}, Bias={bias_val:.4f}")
+        print(f"[ShivaRatioPolicy] Reset: InitRatio={self.init_ratio_val}, Bias={bias_val:.4f}, Head=Xavier, Layer=Xavier(Boosted)")
 
     def forward(self, temb, layer_idx_tensor):
         """
@@ -108,17 +102,16 @@ class ShivaRatioPolicy(nn.Module):
         Returns:
             logits: [B, 1] - Raw logits (apply sigmoid outside to get ratio)
         """
-        # A. Project Time
+        # if self.has_reset_parameters is False:
+        #     self.has_reset_parameters = True
+        #     self.reset_parameters()
+
         t_feat = self.time_proj(temb)      # [B, 256]
         
-        # B. Embed Layer
         l_feat = self.layer_emb(layer_idx_tensor) # [B, 256] (Broadcasting works if layer_idx is scalar)
         if l_feat.shape[0] != t_feat.shape[0]:
              l_feat = l_feat.expand(t_feat.shape[0], -1)
 
-        # C. Concat & Mix (Parallel Circuit Strategy)
-        # Concatenation ensures that even if one feature is small/zero, 
-        # the weights for the other feature still receive gradients.
         combined = torch.cat([t_feat, l_feat], dim=-1) # [B, 512]
         
         logits = self.mix_mlp(combined) # [B, 1]

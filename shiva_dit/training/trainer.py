@@ -2201,9 +2201,9 @@ class DiffusionModelTrainer:
                     if self.accelerator.sync_gradients:
                         self.accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
                         # Optional: tighter clip for policies
-                        policy_params = [p for n, p in self.model.named_parameters() if "policy" in n or "pruner" in n]
-                        if policy_params:
-                            self.accelerator.clip_grad_norm_(policy_params, 0.5)
+                        # policy_params = [p for n, p in self.model.named_parameters() if "policy" in n or "pruner" in n]
+                        # if policy_params:
+                        #     self.accelerator.clip_grad_norm_(policy_params, 0.5)
 
                     self.optimizer.step()
                     self.global_step += 1
