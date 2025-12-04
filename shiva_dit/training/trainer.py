@@ -539,6 +539,9 @@ class DiffusionModelTrainer:
                 "topkgrads/grad_probs_sum",
                 "topkgrads/grad_probs_std",
             ],
+            "topkgrads/gap": [
+                "topkgrads/gap_mean",
+            ],
             "topkgrads/module": [
                 "topkgrads/router_avg_norm",
                 "topkgrads/gater_policy_avg_norm",

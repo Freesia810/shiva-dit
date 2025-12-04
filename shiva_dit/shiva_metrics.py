@@ -370,6 +370,12 @@ def collect_autograd_stats(device):
         stats["topkgrads/sigmoid_prime_std"] = (
             ShivaTopkFunc._last_selection_probs_stats.get("grad_std", 0.0)
         )
+    
+    if (
+        hasattr(ShivaTopkFunc, "_last_gap_stats")
+        and ShivaTopkFunc._last_gap_stats
+    ):
+        stats["topkgrads/gap_mean"] = ShivaTopkFunc._last_gap_stats.get("mean", 0.0)
 
     return stats
 

@@ -123,6 +123,34 @@ class ShivaTopkFunc(torch.autograd.Function):
 
             if torch.rand(1) < 0.05:
                 with torch.no_grad():
+                    logits_values = logits.detach()
+                    B, N = logits_values.shape
+                    k_int = topk_idx.shape[1]
+                    
+                    if B == 2:
+                        scores_uncond, scores_cond = logits_values.chunk(2, dim=0)
+                        unified_scores = torch.maximum(scores_uncond, scores_cond)
+                        B_prime = 1
+                    else:
+                        unified_scores = logits_values
+                        B_prime = B
+
+                    logits_sorted = torch.sort(unified_scores, dim=-1, descending=True).values
+                    k_int = min(k_int, N)
+                    
+                    if k_int > 0 and k_int < N:
+                        # Gap = score[k] - score[k+1] (0-indexed)
+                        score_k = logits_sorted[:, k_int - 1]
+                        score_k_plus_1 = logits_sorted[:, k_int]
+                        gap = score_k - score_k_plus_1
+                    else:
+                        gap = torch.zeros((B_prime,), device=logits.device)
+                    
+                    ShivaTopkFunc._last_gap_stats = {
+                        "mean": gap.mean(),
+                    }
+
+                with torch.no_grad():
                     ShivaTopkFunc._last_grad_probs_stats = {
                         "norm": torch.norm(grad_probs),
                         "mean": grad_probs.mean(),

@@ -19,10 +19,13 @@ class ShivaRouter(nn.Module):
         self.prompt_proj = nn.Linear(prompt_embed_dim, bottleneck_dim, bias=False)
         self.temb_proj = nn.Linear(time_embed_dim, bottleneck_dim, bias=False)
         self.layer_proj = nn.Linear(layer_embed_dim, bottleneck_dim, bias=False)
-        self.layernorm = nn.LayerNorm(bottleneck_dim)
+
+        self.context_norm = nn.LayerNorm(bottleneck_dim)
+        self.fused_norm = nn.LayerNorm(bottleneck_dim)
+
         self.router_head = nn.Linear(bottleneck_dim, 1, bias=True)
 
-        nn.init.normal_(self.router_head.weight, mean=0.0, std=0.02)
+        nn.init.normal_(self.router_head.weight, mean=0.0, std=0.001)
         nn.init.constant_(self.router_head.bias, 0.0)
 
     def forward(
@@ -42,10 +45,17 @@ class ShivaRouter(nn.Module):
         time_feat = self.temb_proj(temb).unsqueeze(1)
         prompt_feat = self.prompt_proj(pooled_encoder_states).unsqueeze(1)
         layer_feat = self.layer_proj(layer_emb).unsqueeze(1)
-        context_feat = time_feat + prompt_feat + layer_feat
-
+        context_feat_unnorm = time_feat + prompt_feat + layer_feat
+        context_feat = self.context_norm(context_feat_unnorm)
+        
         token_feat = self.token_proj(hidden_states)  # (B, N, c)
-        fused_hidden = F.silu(token_feat + context_feat)
-        fused_hidden = self.layernorm(fused_hidden)
-        token_scores = self.router_head(fused_hidden)  # (B, N, 1)
-        return token_scores.squeeze(-1)  # (B, N)
+
+        fused_hidden_pre_norm = token_feat + context_feat
+        
+        fused_hidden = F.silu(fused_hidden_pre_norm)
+        
+        fused_hidden = self.fused_norm(fused_hidden)
+        
+        token_scores = self.router_head(fused_hidden)
+        
+        return token_scores.squeeze(-1)
