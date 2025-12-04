@@ -68,6 +68,7 @@ class ShivaRatioPolicy(nn.Module):
         self.mix_mlp = nn.Sequential(
             nn.Linear(in_dim, ratio_bottleneck_dim),
             nn.SiLU(),
+            nn.LayerNorm(ratio_bottleneck_dim),
             nn.Linear(ratio_bottleneck_dim, 1)  # Output scalar logit
         )
         

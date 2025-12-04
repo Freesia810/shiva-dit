@@ -186,6 +186,16 @@ class ShivaTopkFunc(torch.autograd.Function):
         grad_logits = grads[0]
         grad_k = grads[1]
 
+        if torch.rand(1) < 0.05:
+            with torch.no_grad():
+                grad_k_tensor = grad_k.flatten()
+
+                 ShivaTopkFunc._last_k_grad_stats = {
+                     "norm": torch.norm(grad_k_tensor), 
+                     "mean": grad_k_tensor.mean(), 
+                     "std": grad_k_tensor.std(),
+                 }
+
         return grad_x, grad_logits, grad_k, grad_Ts, grad_Tk
 
 ceil_ste = CeilSTE.apply

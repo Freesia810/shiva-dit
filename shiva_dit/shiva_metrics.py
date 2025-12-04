@@ -376,6 +376,14 @@ def collect_autograd_stats(device):
         and ShivaTopkFunc._last_gap_stats
     ):
         stats["topkgrads/gap_mean"] = ShivaTopkFunc._last_gap_stats.get("mean", 0.0)
+    
+    if (
+        hasattr(ShivaTopkFunc, "_last_k_grad_stats")
+        and ShivaTopkFunc._last_k_grad_stats
+    ):
+        stats["topkgrads/grad_k_norm"] = ShivaTopkFunc._last_k_grad_stats.get("norm", 0.0)
+        stats["topkgrads/grad_k_std"] = ShivaTopkFunc._last_k_grad_stats.get("std", 0.0)
+        stats["topkgrads/grad_k_mean"] = ShivaTopkFunc._last_k_grad_stats.get("mean", 0.0)
 
     return stats
 
