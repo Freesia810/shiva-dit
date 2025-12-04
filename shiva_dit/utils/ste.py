@@ -115,6 +115,8 @@ class ShivaTopkFunc(torch.autograd.Function):
             )
 
             N_float = float(logits_detached.shape[1])
+
+            # (k - rank) \in (-N, N)
             z = T_select * (k_detached.unsqueeze(-1) - soft_ranks) / N_float
             # z = T_select * (k_detached.unsqueeze(-1) - soft_ranks)
             selection_probs = torch.sigmoid(z)
@@ -155,9 +157,6 @@ class ShivaTopkFunc(torch.autograd.Function):
 
         grad_logits = grads[0]
         grad_k = grads[1]
-
-        if grad_k is not None:
-            grad_k = grad_k * 2
 
         return grad_x, grad_logits, grad_k, grad_Ts, grad_Tk
 
