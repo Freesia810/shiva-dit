@@ -135,16 +135,16 @@ class ShivaTopkFunc(torch.autograd.Function):
                         "max": soft_ranks.max(),
                     }
 
-                    # ShivaTopkFunc._last_z_stats = {
-                    #     "mean": z.mean(),
-                    #     "std": z.std(),
-                    # }
+                    ShivaTopkFunc._last_z_stats = {
+                        "mean": z.mean(),
+                        "std": z.std(),
+                    }
 
-                    # sigmoid_prime = selection_probs * (1 - selection_probs)
-                    # ShivaTopkFunc._last_selection_probs_stats = {
-                    #     "grad_mean": sigmoid_prime.mean(),
-                    #     "grad_std": sigmoid_prime.std(),
-                    # }
+                    sigmoid_prime = selection_probs * (1 - selection_probs)
+                    ShivaTopkFunc._last_selection_probs_stats = {
+                        "grad_mean": sigmoid_prime.mean(),
+                        "grad_std": sigmoid_prime.std(),
+                    }
 
         grads = torch.autograd.grad(
             outputs=selection_probs,

@@ -924,36 +924,60 @@ class DiffusionModelTrainer:
         return img_latents, noise, noisy_latents, timesteps, model_kwargs
 
     def _forward_pass_with_distillation(self, noisy_latents, timesteps, model_kwargs, dynamic_distill_weights=None):
-        distill_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
+        distill_loss_final = torch.tensor(0.0, device=self.device, dtype=self.dtype)
+        distill_loss_mid = torch.tensor(0.0, device=self.device, dtype=self.dtype)
 
         if dynamic_distill_weights:
             w_final = dynamic_distill_weights.get("distill_final_weight", 0.0)
+            w_mid = dynamic_distill_weights.get("distill_middle_weight", 0.0)
         else:
             w_final = self.config.distillation_final_weight
+            w_mid = self.config.distillation_middle_weight
 
-        if self.teacher_model is not None and w_final > 0:
-            # Teacher Forward
+        if self.teacher_model is not None:
+            enable_final = w_final > 0
+            enable_mid = w_mid > 0
+
+            if enable_mid:
+                model_kwargs["output_hidden_states"] = True
+                model_kwargs["output_hidden_states_step"] = 1
+            
             teacher_kwargs = copy.deepcopy(model_kwargs)
-            teacher_kwargs["output_hidden_states"] = False
             with torch.no_grad():
                 teacher_output = self.teacher_model(
                     hidden_states=noisy_latents,
                     timestep=timesteps,
-                    **teacher_kwargs,
+                    **model_kwargs,
                 )
-                Y_s = teacher_output[0]
-
-            # Student Forward
+            
             student_output = self.model(
                 hidden_states=noisy_latents,
                 timestep=timesteps,
                 **model_kwargs,
             )
-            Y_d = student_output[0]
-            noise_pred = Y_d
+            
+            if enable_mid:
+                Y_s, Y_s_per = teacher_output
+                Y_d, Y_d_per = student_output
+                noise_pred = Y_d
+            else:
+                Y_s = teacher_output[0]
+                Y_d = student_output[0]
+                noise_pred = Y_d
+            
+            if enable_final:
+                distill_loss_final = F.mse_loss(Y_d.float(), Y_s.float(), reduction="mean")
+                distill_loss_final = distill_loss_final * w_final
+            
+            if enable_mid:
+                assert len(Y_s_per) == len(Y_d_per), "Teacher / student layer count mismatch!"
+                for idx, (s_i, d_i) in enumerate(zip(Y_s_per, Y_d_per)):
+                    # s_i/d_i shape: (B, C, H, W)
+                    layer_loss = F.mse_loss(d_i.float(), s_i.float(), reduction="mean")
+                    distill_loss_mid += layer_loss
 
-            loss_v = F.mse_loss(Y_d.float(), Y_s.float(), reduction="mean")
-            distill_loss += loss_v * w_final
+                distill_loss_mid = distill_loss_mid / len(Y_s_per)
+                distill_loss_mid = distill_loss_mid * w_mid
         else:
             noise_pred = self.model(
                 hidden_states=noisy_latents,
@@ -961,7 +985,7 @@ class DiffusionModelTrainer:
                 **model_kwargs,
             )[0]
 
-        return noise_pred, distill_loss
+        return noise_pred, distill_loss_final, distill_loss_mid
 
     def _calculate_main_loss(self, noise_pred, noise, img_latents):
         if self.model_type == "pixart-sigma":
@@ -1102,21 +1126,25 @@ class DiffusionModelTrainer:
 
         loss_config = self._get_shiva_loss_config(global_step)
 
-        noise_pred, distill_loss = self._forward_pass_with_distillation(
+        noise_pred, distill_loss_final, distill_loss_mid = self._forward_pass_with_distillation(
             noisy_latents, timesteps, model_kwargs, dynamic_distill_weights=loss_config
         )
 
         main_loss = self._calculate_main_loss(noise_pred, noise, img_latents)
         hook_loss, hook_metrics = self._calculate_hook_loss(global_step, timesteps)
 
-        total_loss = main_loss + hook_loss + distill_loss
+        total_loss = main_loss + hook_loss + distill_loss_final + distill_loss_mid
 
-        return total_loss, main_loss, hook_loss, distill_loss, hook_metrics
+        return total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid, hook_metrics
 
     def _train_step(self, batch):
-        total_loss, main_loss, hook_loss, distill_loss, hook_metrics = (
+        total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid, hook_metrics = (
             self._compute_loss(batch, self.global_step)
         )
+
+        # if self.global_step % 10 == 0:
+        #     self.monitor_gradient_conflict(distill_loss, hook_loss)
+
         self.accelerator.backward(total_loss)
         if self.config.enable_gradient_checkpointing:
             for hook in HookManager.get_all_hooks().values():
@@ -1129,7 +1157,8 @@ class DiffusionModelTrainer:
             total_loss.detach(),
             main_loss.detach(),
             hook_loss.detach(),
-            distill_loss.detach(),
+            distill_loss_final.detach(),
+            distill_loss_mid.detach(),
         )
 
     def _set_finetuning_trainable_state(self, requires_grad: bool):        
@@ -1252,6 +1281,48 @@ class DiffusionModelTrainer:
 
             pass
 
+    def monitor_gradient_conflict(self, loss1, loss2):
+        # 确保 loss 是 tensor 且需要梯度
+        if not loss1.requires_grad or not loss2.requires_grad:
+            print("Warning: One of the losses does not require grad. Skipping monitor.")
+            return
+
+        # 获取参数
+        named_params = [(n, p) for n, p in self.model.named_parameters() if p.requires_grad]
+        names, params = zip(*named_params)
+
+        # 计算梯度 (retain_graph=True 保证不影响后续真正的 backward)
+        # allow_unused=True 防止因为某些层没用到而报错
+        grads1 = torch.autograd.grad(loss1, params, retain_graph=True, allow_unused=True)
+        grads2 = torch.autograd.grad(loss2, params, retain_graph=True, allow_unused=True)
+
+        print(f"\n[Grad Monitor Step] Layer Conflict Check:")
+        print(f"{'Layer Name':<50} | {'L1 Norm':<10} | {'L2 Norm':<10} | {'Cos Sim':<10}")
+        print("-" * 90)
+
+        for name, g1, g2 in zip(names, grads1, grads2):
+            if g1 is None or g2 is None:
+                continue
+
+            if 'layer_emb' not in name:
+                continue
+                
+            g1_flat = g1.view(-1)
+            g2_flat = g2.view(-1)
+            
+            norm1 = torch.norm(g1_flat).item()
+            norm2 = torch.norm(g2_flat).item()
+
+            if norm1 > 0 and norm2 > 0:
+                cos_sim = torch.nn.functional.cosine_similarity(
+                    g1_flat.unsqueeze(0), g2_flat.unsqueeze(0)
+                ).item()
+            else:
+                cos_sim = 0.0
+                
+            print(f"{name:<50} | {norm1:<10.4f} | {norm2:<10.4f} | {cos_sim:<10.4f}")
+        print("-" * 90)
+
     def _on_update_step_end(self, gathered_losses, progress_bar, batch=None):
         log_trigger = self.log_trigger
         validate_trigger = self.validate_trigger
@@ -1314,7 +1385,8 @@ class DiffusionModelTrainer:
             "loss/train/total_loss": gathered_losses["total"],
             "loss/train/main_loss": gathered_losses["main"],
             "loss/train/extra_loss": gathered_losses["hook"],
-            "loss/train/distill_loss": gathered_losses["distill"],
+            "loss/train/distill_loss_final": gathered_losses["distill_final"],
+            "loss/train/distill_loss_mid": gathered_losses["distill_mid"],
             "train/Ts": torch.tensor(current_Ts, device=self.device),
             "train/Tk": torch.tensor(current_Tk, device=self.device),
             "train/context_Ts": torch.tensor(context_Ts, device=self.device),
@@ -1808,14 +1880,14 @@ class DiffusionModelTrainer:
 
         for batch in val_progress_bar:
             try:
-                total_loss, main_loss, hook_loss, distill_loss, hook_metrics = self._compute_loss(
+                total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid, hook_metrics = self._compute_loss(
                     batch, global_step
                 )
 
                 all_total_losses.append(total_loss)
                 all_main_losses.append(main_loss)
                 all_hook_losses.append(hook_loss)
-                all_distill_losses.append(distill_loss)
+                all_distill_losses.append(distill_loss_final + distill_loss_mid)
                 all_hook_metrics.append(hook_metrics) 
             except Exception as e:
                 if self.accelerator.is_main_process:
@@ -2191,7 +2263,7 @@ class DiffusionModelTrainer:
                 if step % self.config.gradient_accumulation_steps == 0:
                     self.optimizer.zero_grad(set_to_none=True)
 
-                total_loss, main_loss, hook_loss, distill_loss = self._train_step(batch)
+                total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid = self._train_step(batch)
                 is_update_step = (
                     step + 1
                 ) % self.config.gradient_accumulation_steps == 0
@@ -2214,7 +2286,8 @@ class DiffusionModelTrainer:
                         "total": self.accelerator.gather(total_loss).mean(),
                         "main": self.accelerator.gather(main_loss).mean(),
                         "hook": self.accelerator.gather(hook_loss).mean(),
-                        "distill": self.accelerator.gather(distill_loss).mean()
+                        "distill_final": self.accelerator.gather(distill_loss_final).mean(),
+                        "distill_mid": self.accelerator.gather(distill_loss_mid).mean(),
                     }
                     self._on_update_step_end(gathered_losses, progress_bar, batch)
 
