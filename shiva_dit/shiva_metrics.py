@@ -91,22 +91,32 @@ def _calc_ratio_loss_flat(all_ratios, config, device, prefix="adaptive_ratio"):
         return torch.tensor(0.0, device=device), {}
 
     # Config parsing
+    # Format: [w_budget_L1, w_floor, w_budget_MSE]
     w_config = config.get("ratio_loss_weight", 1.0)
+    
+    w_budget_l1 = 0.0
+    w_floor = 0.0
+    w_budget_mse = 0.0
+
     if isinstance(w_config, list):
-        w_budget = w_config[0]
-        w_floor = w_config[1] if len(w_config) > 1 else 0.0
+        if len(w_config) >= 1: w_budget_l1 = w_config[0]
+        if len(w_config) >= 2: w_floor = w_config[1]
+        if len(w_config) >= 3: w_budget_mse = w_config[2]
     else:
-        w_budget = w_config
-        w_floor = 0.0
+        w_budget_l1 = w_config
 
     current_target_ratio = config.get("target_ratio", 0.8)
     target = torch.tensor(current_target_ratio, device=device, dtype=all_ratios.dtype)
     
-    # 1. Budget Loss: Global L1 Loss
     global_avg_ratio = torch.mean(all_ratios)
-    budget_loss = w_budget * torch.abs(global_avg_ratio - target)
 
-    # 2. Floor Loss: (Element-wise)
+    # 1. Budget Loss (L1)
+    if w_budget_l1 > 0.0:
+        budget_loss_l1 = w_budget_l1 * torch.abs(global_avg_ratio - target)
+    else:
+        budget_loss_l1 = torch.tensor(0.0, device=device)
+
+    # 2. Floor Loss
     if w_floor > 0.0:
         min_allowed = 0.1
         floor_penalties = torch.relu(min_allowed - all_ratios)
@@ -114,15 +124,23 @@ def _calc_ratio_loss_flat(all_ratios, config, device, prefix="adaptive_ratio"):
     else:
         floor_loss = torch.tensor(0.0, device=device)
 
+    # 3. Budget Loss (MSE)
+    if w_budget_mse > 0.0:
+        # MSE = (avg - target)^2
+        budget_loss_mse = w_budget_mse * ((global_avg_ratio - target) ** 2)
+    else:
+        budget_loss_mse = torch.tensor(0.0, device=device)
+
     ratio_std = torch.std(all_ratios)
 
-    final_loss = budget_loss + floor_loss
+    final_loss = budget_loss_l1 + floor_loss + budget_loss_mse
 
     metrics = {
         f"{prefix}/avg_ratio": global_avg_ratio.detach(),
         f"{prefix}/std_ratio": ratio_std.detach(),
         f"{prefix}/target_ratio": target,
-        f"loss/{prefix}/budget_loss": budget_loss.detach(),
+        f"loss/{prefix}/budget_loss": budget_loss_l1.detach(),
+        f"loss/{prefix}/mse_loss": budget_loss_mse.detach(),
         f"loss/{prefix}/floor_loss": floor_loss.detach(),
         f"loss/{prefix}/ratio_loss": final_loss.detach(),
     }
