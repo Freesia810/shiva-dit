@@ -529,6 +529,10 @@ class DiffusionModelTrainer:
             "context/distribution": [
                 "context/align_score_std",
             ],
+            "grad/img_policy/grad_std": [
+                "grad/img_policy/temb_proj_std",
+                "grad/img_policy/layer_proj_std",
+            ],
             "topkgrads/soft_ranks": [
                 "topkgrads/soft_ranks_mean",
                 "topkgrads/soft_ranks_min",
@@ -546,6 +550,9 @@ class DiffusionModelTrainer:
             ],
             "topkgrads/gap": [
                 "topkgrads/gap_mean",
+            ],
+            "topkgrads/grad_k_pos_rate": [
+                "topkgrads/grad_k_pos_rate",
             ],
             "topkgrads/module": [
                 "topkgrads/router_avg_norm",
@@ -979,13 +986,27 @@ class DiffusionModelTrainer:
             
             if enable_mid:
                 assert len(Y_s_per) == len(Y_d_per), "Teacher / student layer count mismatch!"
-                for idx, (s_i, d_i) in enumerate(zip(Y_s_per, Y_d_per)):
-                    # s_i/d_i shape: (B, C, H, W)
-                    layer_loss = F.mse_loss(d_i.float(), s_i.float(), reduction="mean")
-                    distill_loss_mid += layer_loss
+                # for idx, (s_i, d_i) in enumerate(zip(Y_s_per, Y_d_per)):
+                #     # s_i/d_i shape: (B, C, H, W)
+                #     layer_loss = F.mse_loss(d_i.float(), s_i.float(), reduction="mean")
+                #     distill_loss_mid += layer_loss
 
-                distill_loss_mid = distill_loss_mid / len(Y_s_per)
-                distill_loss_mid = distill_loss_mid * w_mid
+                # distill_loss_mid = distill_loss_mid / len(Y_s_per)
+                # distill_loss_mid = distill_loss_mid * w_mid
+
+                loss_list = []
+                for idx, (s_i, d_i) in enumerate(zip(Y_s_per, Y_d_per)):
+                    target = s_i.float().detach()
+                    pred = d_i.float()
+
+                    pred_norm = F.layer_norm(pred, pred.shape[1:]) 
+                    target_norm = F.layer_norm(target, target.shape[1:])
+                    layer_loss = F.mse_loss(pred_norm, target_norm, reduction="mean")
+                    loss_list.append(layer_loss)
+
+                if loss_list:
+                    distill_loss_mid = torch.stack(loss_list).mean()
+                    distill_loss_mid = distill_loss_mid * w_mid
         else:
             noise_pred = self.model(
                 hidden_states=noisy_latents,
@@ -1150,9 +1171,6 @@ class DiffusionModelTrainer:
             self._compute_loss(batch, self.global_step)
         )
 
-        # if self.global_step % 10 == 0:
-        #     self.monitor_gradient_conflict(distill_loss, hook_loss)
-
         self.accelerator.backward(total_loss)
         if self.config.enable_gradient_checkpointing:
             for hook in HookManager.get_all_hooks().values():
@@ -1288,48 +1306,6 @@ class DiffusionModelTrainer:
                     hook.context_pruner.Tk = tk_val.float()
 
             pass
-
-    def monitor_gradient_conflict(self, loss1, loss2):
-        # 确保 loss 是 tensor 且需要梯度
-        if not loss1.requires_grad or not loss2.requires_grad:
-            print("Warning: One of the losses does not require grad. Skipping monitor.")
-            return
-
-        # 获取参数
-        named_params = [(n, p) for n, p in self.model.named_parameters() if p.requires_grad]
-        names, params = zip(*named_params)
-
-        # 计算梯度 (retain_graph=True 保证不影响后续真正的 backward)
-        # allow_unused=True 防止因为某些层没用到而报错
-        grads1 = torch.autograd.grad(loss1, params, retain_graph=True, allow_unused=True)
-        grads2 = torch.autograd.grad(loss2, params, retain_graph=True, allow_unused=True)
-
-        print(f"\n[Grad Monitor Step] Layer Conflict Check:")
-        print(f"{'Layer Name':<50} | {'L1 Norm':<10} | {'L2 Norm':<10} | {'Cos Sim':<10}")
-        print("-" * 90)
-
-        for name, g1, g2 in zip(names, grads1, grads2):
-            if g1 is None or g2 is None:
-                continue
-
-            if 'layer_emb' not in name:
-                continue
-                
-            g1_flat = g1.view(-1)
-            g2_flat = g2.view(-1)
-            
-            norm1 = torch.norm(g1_flat).item()
-            norm2 = torch.norm(g2_flat).item()
-
-            if norm1 > 0 and norm2 > 0:
-                cos_sim = torch.nn.functional.cosine_similarity(
-                    g1_flat.unsqueeze(0), g2_flat.unsqueeze(0)
-                ).item()
-            else:
-                cos_sim = 0.0
-                
-            print(f"{name:<50} | {norm1:<10.4f} | {norm2:<10.4f} | {cos_sim:<10.4f}")
-        print("-" * 90)
 
     def _on_update_step_end(self, gathered_losses, progress_bar, batch=None):
         log_trigger = self.log_trigger
@@ -2175,6 +2151,21 @@ class DiffusionModelTrainer:
 
                 self.accelerator.load_state(latest_ckpt_dir)
 
+                # w_path = os.path.join(latest_ckpt_dir, "model.safetensors")
+                # if os.path.exists(w_path):
+                #     from safetensors.torch import load_file
+                #     sd = load_file(w_path)
+                # else:
+                #     sd = torch.load(os.path.join(latest_ckpt_dir, "pytorch_model.bin"), map_location="cpu")
+                # model = self.accelerator.unwrap_model(self.model)
+                # curr_sd = model.state_dict()
+                # sd = {k: v for k, v in sd.items() if k in curr_sd and v.shape == curr_sd[k].shape}
+                # model.load_state_dict(sd, strict=False)
+                # print(f"Force loaded weights! Filtered {len(curr_sd) - len(sd)} mismatched keys (Policy reset)")
+                # for k, v in curr_sd.items():
+                #     if k not in sd:
+                #         print(f"  {k} not in old model")
+
                 custom_state_path = os.path.join(latest_ckpt_dir, "trainer_state.json")
                 with open(custom_state_path, "r") as f:
                     custom_state = json.load(f)
@@ -2280,10 +2271,15 @@ class DiffusionModelTrainer:
                 if is_update_step or is_last_step:
                     if self.accelerator.sync_gradients:
                         self.accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
-                        # Optional: tighter clip for policies
-                        # policy_params = [p for n, p in self.model.named_parameters() if "policy" in n or "pruner" in n]
-                        # if policy_params:
-                        #     self.accelerator.clip_grad_norm_(policy_params, 0.5)
+
+                    if self.accelerator.is_main_process and self.global_step % self.log_trigger == 0:
+                        try:
+                            policy_grad_stats = shiva_metrics.collect_policy_gradient_stats(
+                                self.model, HookManager, self.device
+                            )
+                            self.logger.log_scalars(policy_grad_stats, step=self.global_step)
+                        except Exception as e:
+                            print(f"Gradient stats collection failed: {e}")
 
                     self.optimizer.step()
                     self.global_step += 1

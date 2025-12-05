@@ -382,8 +382,14 @@ def collect_autograd_stats(device):
         and ShivaTopkFunc._last_k_grad_stats
     ):
         stats["topkgrads/grad_k_norm"] = ShivaTopkFunc._last_k_grad_stats.get("norm", 0.0)
-        stats["topkgrads/grad_k_std"] = ShivaTopkFunc._last_k_grad_stats.get("std", 0.0)
         stats["topkgrads/grad_k_mean"] = ShivaTopkFunc._last_k_grad_stats.get("mean", 0.0)
+        
+        grad_std = ShivaTopkFunc._last_k_grad_stats.get("std", torch.tensor(0.0))
+        if torch.isnan(grad_std):
+            grad_std = torch.tensor(0.0, device=device)
+        stats["topkgrads/grad_k_std"] = grad_std
+        
+        stats["topkgrads/grad_k_pos_rate"] = ShivaTopkFunc._last_k_grad_stats.get("pos_rate", 0.0)
 
     return stats
 
@@ -475,3 +481,44 @@ def generate_router_heatmap(token_scores, sel_idx, height, width):
     final_tensor = torch.from_numpy(masked_rgb_np).permute(0, 3, 1, 2).float()
     
     return final_tensor
+
+def collect_policy_gradient_stats(model, hook_manager, device) -> dict:
+    stats = {}
+    target_hook = None
+    for hook in hook_manager.get_all_hooks().values():
+        if hasattr(hook, 'image_ratio_policy') and hook.image_ratio_policy is not None:
+            target_hook = hook
+            break
+            
+    if target_hook is None:
+        return stats
+
+    policies = {
+        "img_policy": target_hook.image_ratio_policy,
+        # "ctx_policy": getattr(target_hook, 'context_ratio_policy', None) 
+    }
+
+    for name, policy_net in policies.items():
+        if policy_net is None: continue
+
+        if hasattr(policy_net, 'layer_emb'):
+            param = policy_net.layer_emb.weight
+            if param.grad is not None:
+                grad = param.grad.detach()
+                
+                stats[f"grad/{name}/layer_proj_std"] = grad.std()
+                grad_norms = grad.norm(dim=0) # [In_Features]
+                stats[f"grad/{name}/layer_sensitivity_cv"] = grad_norms.std() / (grad_norms.mean() + 1e-6)
+
+        if hasattr(policy_net, 'time_proj'):
+            param = policy_net.time_proj[-1].weight
+            if param.grad is not None:
+                grad = param.grad.detach()
+                stats[f"grad/{name}/temb_proj_std"] = grad.std()
+
+        if hasattr(policy_net, 'mix_mlp'):
+            param = policy_net.mix_mlp[-1].weight
+            if param.grad is not None:
+                stats[f"grad/{name}/head_grad_norm"] = param.grad.norm()
+
+    return stats

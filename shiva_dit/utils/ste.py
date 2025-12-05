@@ -190,11 +190,19 @@ class ShivaTopkFunc(torch.autograd.Function):
             with torch.no_grad():
                 grad_k_tensor = grad_k.flatten()
 
-                 ShivaTopkFunc._last_k_grad_stats = {
-                     "norm": torch.norm(grad_k_tensor), 
-                     "mean": grad_k_tensor.mean(), 
-                     "std": grad_k_tensor.std(),
-                 }
+                if grad_k_tensor.numel() > 1:
+                    g_std = grad_k_tensor.std()
+                else:
+                    g_std = torch.tensor(0.0, device=grad_k.device)
+
+                pos_rate = (grad_k_tensor > 0).float().mean()
+
+                ShivaTopkFunc._last_k_grad_stats = {
+                    "norm": torch.norm(grad_k_tensor), 
+                    "mean": grad_k_tensor.mean(), 
+                    "std": grad_k_tensor.std(),
+                    "pos_rate": pos_rate,
+                }
 
         return grad_x, grad_logits, grad_k, grad_Ts, grad_Tk
 
