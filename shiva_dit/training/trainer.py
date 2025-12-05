@@ -957,7 +957,6 @@ class DiffusionModelTrainer:
                 model_kwargs["output_hidden_states"] = True
                 model_kwargs["output_hidden_states_step"] = 1
             
-            teacher_kwargs = copy.deepcopy(model_kwargs)
             with torch.no_grad():
                 teacher_output = self.teacher_model(
                     hidden_states=noisy_latents,
@@ -994,18 +993,16 @@ class DiffusionModelTrainer:
                 # distill_loss_mid = distill_loss_mid / len(Y_s_per)
                 # distill_loss_mid = distill_loss_mid * w_mid
 
-                loss_list = []
-                for idx, (s_i, d_i) in enumerate(zip(Y_s_per, Y_d_per)):
-                    target = s_i.float().detach()
-                    pred = d_i.float()
+                if len(Y_d_per) > 0:
+                    pred_stack = torch.stack(Y_d_per).float()
+                    target_stack = torch.stack(Y_s_per).float().detach()
 
-                    pred_norm = F.layer_norm(pred, pred.shape[1:]) 
-                    target_norm = F.layer_norm(target, target.shape[1:])
-                    layer_loss = F.mse_loss(pred_norm, target_norm, reduction="mean")
-                    loss_list.append(layer_loss)
+                    norm_shape = (pred_stack.shape[-2], pred_stack.shape[-1])
+                    
+                    pred_norm = F.layer_norm(pred_stack, norm_shape)
+                    target_norm = F.layer_norm(target_stack, norm_shape)
 
-                if loss_list:
-                    distill_loss_mid = torch.stack(loss_list).mean()
+                    distill_loss_mid = F.mse_loss(pred_norm, target_norm, reduction="mean")
                     distill_loss_mid = distill_loss_mid * w_mid
         else:
             noise_pred = self.model(
