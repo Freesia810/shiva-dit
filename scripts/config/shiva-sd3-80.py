@@ -188,7 +188,7 @@ trainer_config = {
                 "weights": {
                     "ratio": [0.0, 0.0, 0.0], 
                     "gate": 0.0,
-                    "distill": [1.0, 1.0]
+                    "distill": [1.0, 0.0]
                 },
                 # LR: [Base(Router), LoRA, Gate, Fuser, Policy, CtxRatio, CtxPruner]
                 "lr": [5e-4, 1e-5, 0.0, 0.0, 0.0, 0.0, 0.0],
@@ -201,11 +201,11 @@ trainer_config = {
             {
                 "steps": 17500, 
                 "weights": {
-                    "ratio": [5.0, 100.0, 0.0],
+                    "ratio": [1.0, 100.0, 0.0],
                     "gate": 0.0,
                     "distill": [2.0, 10.0]
                 },
-                "lr": [1e-5, 1e-5, 0.0, 0.0, 1e-5, 0.0, 0.0],
+                "lr": [1e-5, 1e-5, 0.0, 0.0, 5e-4, 0.0, 0.0],
                 "temp": [10.0, 10.0, 20.0, 100.0],
             },
 
