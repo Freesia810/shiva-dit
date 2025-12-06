@@ -3,14 +3,32 @@ import torch
 import copy
 import json
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+from PIL import Image
+import numpy as np
+
 from shiva_dit.training.config import TrainerConfig, LoraConfig
 from shiva_dit.training.trainer import DiffusionModelTrainer
-
 from shiva_dit.hook import HookManager
 from shiva_dit.shiva_hook import ShivaDitBlockHook
 from shiva_dit.utils import global_context
-
 from scripts.config.shiva_router import hook_config, lora_config
+
+
+plt.rcParams.update(
+    {
+        "font.family": "serif",
+        "font.serif": ["Times New Roman"],
+        "mathtext.fontset": "stix",
+        "font.size": 12,
+        "axes.labelsize": 12,
+        "axes.titlesize": 14,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+    }
+)
 
 mode = "shared"
 HOOK_CONFIG = copy.deepcopy(hook_config[mode])
@@ -26,7 +44,6 @@ CHECKPOINT_PATH = f"./checkpoints-{mode}/best_val_main_loss.pt"
 TIMESTEPS_TO_VIZ = [800, 600, 400, 200]
 LAYERS_TO_VIZ = [1, 8, 15, 23]
 TEMP_META_FILE = "./viz_temp_meta.jsonl"
-
 
 def create_temp_metadata():
     abs_image_path = os.path.abspath(IMAGE_PATH)
@@ -47,20 +64,33 @@ def load_weights(trainer, ckpt_path):
     print("Weights loaded.")
 
 
-def plot_combined_grid(data_storage, row_labels, col_labels, save_path):
+def plot_paper_figure(image_path, data_storage, row_labels, col_labels, save_path):
+    original_img = Image.open(image_path).convert("RGB")
+
+    fig = plt.figure(figsize=(14, 6), constrained_layout=False)
+
+    outer_gs = gridspec.GridSpec(1, 2, figure=fig, width_ratios=[1, 2.8], wspace=0.15)
+
+    ax_img = fig.add_subplot(outer_gs[0])
+    ax_img.imshow(original_img)
+    ax_img.set_title("Input Image", fontweight="bold", pad=10)
+    ax_img.axis("off")
+
     rows = len(row_labels)
     cols = len(col_labels)
-
-    fig, axes = plt.subplots(
-        rows, cols, figsize=(11, 11.5), gridspec_kw={"wspace": 0.02, "hspace": 0.02}
+    inner_gs = gridspec.GridSpecFromSubplotSpec(
+        rows, cols, subplot_spec=outer_gs[1], wspace=0.05, hspace=0.05
     )
 
     cmap = "viridis"
     vmin, vmax = 0.0, 1.0
 
+    axes_grid = []
+
     for i, t_val in enumerate(row_labels):
         for j, layer_idx in enumerate(col_labels):
-            ax = axes[i, j]
+            ax = fig.add_subplot(inner_gs[i, j])
+            axes_grid.append(ax)
 
             key = (t_val, layer_idx)
             if key in data_storage:
@@ -70,35 +100,42 @@ def plot_combined_grid(data_storage, row_labels, col_labels, save_path):
                 )
             else:
                 ax.text(0.5, 0.5, "N/A", ha="center", va="center")
+                ax.set_facecolor("#f0f0f0")
 
             ax.set_xticks([])
             ax.set_yticks([])
 
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+
             if i == 0:
                 ax.set_title(
-                    f"Layer {layer_idx}", fontsize=16, fontweight="bold", pad=12
+                    f"Layer {layer_idx}", fontsize=13, fontweight="bold", pad=8
                 )
 
             if j == 0:
                 t_display = int(t_val) if t_val > 1.0 else f"{t_val:.2f}"
                 ax.set_ylabel(
-                    f"t ≈ {t_display}",
-                    fontsize=16,
+                    f"$t \\approx {t_display}$",
+                    fontsize=13,
                     fontweight="bold",
                     rotation=90,
-                    labelpad=12,
+                    labelpad=8,
                 )
 
-    plt.subplots_adjust(bottom=0.08)
-    cbar_ax = fig.add_axes([0.15, 0.02, 0.7, 0.02])
+    bbox = outer_gs[1].get_position(fig)
+    # [left, bottom, width, height]
+    cbar_ax = fig.add_axes([bbox.x0 + 0.05, 0.05, bbox.width - 0.1, 0.03])
     cbar = fig.colorbar(im, cax=cbar_ax, orientation="horizontal")
-    cbar.set_label("Importance Score", fontsize=14)
+    cbar.set_label("Importance Score (Router Output)", fontsize=12)
     cbar.outline.set_visible(False)
+
+    plt.subplots_adjust(bottom=0.15, top=0.92, left=0.05, right=0.95)
 
     os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
     plt.savefig(save_path, format="pdf", bbox_inches="tight", dpi=300)
     plt.close(fig)
-    print(f"✅ Combined Grid Visualization saved to {save_path}")
+    print(f"Figure saved to {save_path}")
 
 
 def main():
@@ -158,7 +195,6 @@ def main():
 
         diffs = torch.abs(all_scheduler_timesteps - desired_t)
         nearest_idx = torch.argmin(diffs)
-
         actual_t_tensor = all_scheduler_timesteps[nearest_idx]
 
         actual_timesteps_used.append(actual_t_tensor.item())
@@ -213,19 +249,21 @@ def main():
                 try:
                     score_map = token_scores.reshape(B, grid_h, grid_w)
                     score_np = score_map[0].float().cpu().numpy()
-
                     collected_maps[(actual_t_tensor.item(), layer_idx)] = score_np
-
                 except Exception as e:
                     print(f"Reshape failed layer {layer_idx}: {e}")
 
                 target_hook.last_token_scores = None
 
-    print("\n>>> Generating 4x4 Grid PDF...")
-    save_pdf_path = os.path.join(OUTPUT_DIR, "router_viz_grid.pdf")
+    print("\n>>> Generating Paper-Ready Figure...")
+    save_pdf_path = os.path.join(OUTPUT_DIR, "router_viz_paper.pdf")
 
-    plot_combined_grid(
-        collected_maps, actual_timesteps_used, LAYERS_TO_VIZ, save_pdf_path
+    plot_paper_figure(
+        IMAGE_PATH,
+        collected_maps,
+        actual_timesteps_used,
+        LAYERS_TO_VIZ,
+        save_pdf_path,
     )
 
     if os.path.exists(TEMP_META_FILE):
