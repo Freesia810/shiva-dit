@@ -183,6 +183,17 @@ class ShivaRatioPolicy(nn.Module):
         
         scale, shift = self.time_proj(temb).chunk(2, dim=-1)
 
+        # if self.training and torch.rand(1) < 0.01:
+        #     with torch.no_grad():
+        #         mag_layer = l_feat.abs().mean()
+        #         mag_time_scale = scale.abs().mean()
+        #         mag_time_shift = shift.abs().mean()
+        #         ratio_impact = (mag_time_scale + mag_time_shift) / (mag_layer + 1e-6)
+                
+        #         print(f"\n[Policy Monitor] LayerMag: {mag_layer:.4f} | "
+        #               f"TimeScale: {mag_time_scale:.4f} | TimeShift: {mag_time_shift:.4f} | "
+        #               f"Time/Layer Ratio: {ratio_impact:.4f}")
+
         if l_feat.shape[0] != scale.shape[0]:
              l_feat = l_feat.expand(scale.shape[0], -1)
 
@@ -190,3 +201,89 @@ class ShivaRatioPolicy(nn.Module):
         
         logits = self.mix_mlp(combined) # [B, 1]
         return logits
+
+
+# class ShivaRatioPolicy(nn.Module):
+#     def __init__(
+#         self, 
+#         total_layers: int,
+#         time_embed_dim: int,
+#         ratio_bottleneck_dim: int,
+#         init_ratio: float,
+#         **kwargs
+#     ):
+#         super().__init__()
+#         self.init_ratio_val = init_ratio
+        
+#         time_hidden_dim = max(256, ratio_bottleneck_dim * 4)
+        
+#         self.time_base_mlp = nn.Sequential(
+#             nn.Linear(time_embed_dim, time_hidden_dim),
+#             nn.SiLU(),
+#             nn.Linear(time_hidden_dim, ratio_bottleneck_dim),
+#         )
+        
+#         self.layer_emb = nn.Embedding(total_layers, ratio_bottleneck_dim)
+#         self.layer_modulator = nn.Sequential(
+#             nn.Linear(ratio_bottleneck_dim, ratio_bottleneck_dim * 2) 
+#         )
+
+
+#         self.base_norm = nn.LayerNorm(ratio_bottleneck_dim)
+        
+#         in_dim = ratio_bottleneck_dim 
+#         self.mix_mlp = nn.Sequential(
+#             nn.Linear(in_dim, ratio_bottleneck_dim),
+#             nn.SiLU(),
+#             nn.Linear(ratio_bottleneck_dim, 1)
+#         )
+        
+#         self.has_reset_parameters = False
+#         self.reset_parameters()
+
+#     def reset_parameters(self):
+#         for m in self.time_base_mlp.modules():
+#             if isinstance(m, nn.Linear):
+#                 nn.init.xavier_uniform_(m.weight)
+#                 if m.bias is not None: nn.init.zeros_(m.bias)
+
+#         nn.init.xavier_uniform_(self.layer_emb.weight)
+
+#         with torch.no_grad():
+#             last_mod_linear = self.layer_modulator[-1]
+#             last_mod_linear.weight.data.normal_(0, 0.05)
+#             last_mod_linear.bias.data.fill_(0)
+
+#         head = self.mix_mlp[-1]
+#         nn.init.normal_(head.weight, std=1e-3)
+        
+#         eps = 1e-6
+#         safe_ratio = max(eps, min(self.init_ratio_val, 1.0 - eps))
+#         bias_val = math.log(safe_ratio / (1.0 - safe_ratio))
+#         nn.init.constant_(head.bias, bias_val)
+        
+#         print(f"[ShivaRatioPolicy] Reset (Inverted FiLM/Time-Base): InitRatio={self.init_ratio_val}, Bias={bias_val:.4f}")
+
+#     def forward(self, temb, layer_idx_tensor):
+#         if self.has_reset_parameters is False:
+#             self.has_reset_parameters = True
+#             self.reset_parameters()
+
+#         t_feat = self.time_base_mlp(temb)
+#         t_feat = self.base_norm(t_feat)
+        
+#         l_emb = self.layer_emb(layer_idx_tensor)
+        
+#         scale, shift = self.layer_modulator(l_emb).chunk(2, dim=-1)
+        
+#         if t_feat.shape[0] != scale.shape[0]:
+#             if scale.shape[0] == 1:
+#                  scale = scale.expand(t_feat.shape[0], -1)
+#                  shift = shift.expand(t_feat.shape[0], -1)
+#             elif t_feat.shape[0] == 1:
+#                  t_feat = t_feat.expand(scale.shape[0], -1)
+        
+#         combined = t_feat * (1 + scale) + shift 
+        
+#         logits = self.mix_mlp(combined) # [B, 1]
+#         return logits
