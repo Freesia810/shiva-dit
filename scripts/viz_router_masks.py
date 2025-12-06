@@ -58,48 +58,27 @@ def plot_heatmap_vector(score_map, save_path, title=None):
     except ImportError:
         raise Exception("torchvision not found.")
 
-    # todo
-    # 1. 转换 Tensor (C, H, W) -> Numpy (H, W, C)
-    # 需要先 detach 并在 cpu 上操作
     grid_np = grid_img_tensor.permute(1, 2, 0).detach().cpu().numpy()
 
-    # 2. 创建 Matplotlib Figure
-    # 动态调整画布宽度，避免图片太长导致显示过小
     aspect_ratio = grid_np.shape[1] / grid_np.shape[0] # W / H
     fig_height = 4
     fig_width = fig_height * aspect_ratio
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
 
-    # 3. 绘制热力图
-    # make_grid 输出的是 RGB (3通道)，为了应用 'viridis' 等彩色映射，我们只取第一个通道
-    # grid_np[..., 0] 的形状是 (H, W)
     im = ax.imshow(grid_np[..., 0], cmap='viridis', vmin=0, vmax=1)
 
-    # 4. 设置标题和移除坐标轴
     if title:
         ax.set_title(title, fontsize=14)
     ax.axis('off')
 
-    # 5. 紧凑布局 (移除白边)
     plt.subplots_adjust(top=1, bottom=0, right=1, left=0, hspace=0, wspace=0)
     plt.margins(0, 0)
 
-    # 6. 保存为 PDF (矢量格式)
-    # 确保目录存在
     os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
     plt.savefig(save_path, format='pdf', bbox_inches='tight', pad_inches=0)
     plt.close(fig)
     
     print(f"Saved vector heatmap to {save_path}")
-
-    # fig, ax = plt.subplots(figsize=(4, 4))
-    # ax.imshow(score_map, cmap="viridis", vmin=0, vmax=1)
-    # if title:
-    #     ax.set_title(title, fontsize=12)
-    # ax.axis("off")
-    # plt.subplots_adjust(0, 0, 1, 1, 0, 0)
-    # plt.savefig(save_path, format="pdf", bbox_inches="tight", pad_inches=0)
-    # plt.close(fig)
 
 
 def main():
