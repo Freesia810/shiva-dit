@@ -109,7 +109,7 @@ trainer_config = {
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config[prefix]),
     "caption_dropout_rate": 0.1,
-    "num_epochs": 30,
+    "num_epochs": 4,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16,
     "optimizer": "AdamW",
