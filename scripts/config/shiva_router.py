@@ -150,10 +150,11 @@ trainer_config = {
     "log_with_tensorboard": True,
 }
 
-print(hook_config[prefix])
-print(lora_config)
-print(trainer_config)
+if __name__ == "__main__":
+    print(hook_config[prefix])
+    print(lora_config)
+    print(trainer_config)
 
-config = TrainerConfig(**trainer_config)
-trainer = DiffusionModelTrainer(config=config)
-trainer.train()
+    config = TrainerConfig(**trainer_config)
+    trainer = DiffusionModelTrainer(config=config)
+    trainer.train()
