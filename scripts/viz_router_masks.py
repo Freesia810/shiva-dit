@@ -23,7 +23,7 @@ PROMPT = "A jawdropping image of a bold red Ferrari SF90 Stradale, displayed ins
 OUTPUT_DIR = "./viz_results"
 CHECKPOINT_PATH = f"./checkpoints-{mode}/best_val_main_loss.pt"
 
-TIMESTEPS_TO_VIZ = [900, 700, 500, 100]
+TIMESTEPS_TO_VIZ = [800, 600, 400, 200]
 LAYERS_TO_VIZ = [1, 8, 15, 23]
 TEMP_META_FILE = "./viz_temp_meta.jsonl"
 
@@ -92,7 +92,7 @@ def plot_combined_grid(data_storage, row_labels, col_labels, save_path):
     plt.subplots_adjust(bottom=0.08)
     cbar_ax = fig.add_axes([0.15, 0.02, 0.7, 0.02])
     cbar = fig.colorbar(im, cax=cbar_ax, orientation="horizontal")
-    cbar.set_label("Router Importance Score", fontsize=14)
+    cbar.set_label("Importance Score", fontsize=14)
     cbar.outline.set_visible(False)
 
     os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
@@ -158,14 +158,13 @@ def main():
 
         diffs = torch.abs(all_scheduler_timesteps - desired_t)
         nearest_idx = torch.argmin(diffs)
-        actual_t_val = all_scheduler_timesteps[nearest_idx]
 
-        actual_timesteps_used.append(actual_t_val.item())
-        print(f"  Target: {desired_t} -> Nearest Actual: {actual_t_val.item():.4f}")
+        actual_t_tensor = all_scheduler_timesteps[nearest_idx]
 
-        target_t = torch.full(
-            (B,), actual_t_val.item(), device=trainer.device, dtype=trainer.dtype
-        )
+        actual_timesteps_used.append(actual_t_tensor.item())
+        print(f"  Target: {desired_t} -> Nearest Actual: {actual_t_tensor.item():.4f}")
+
+        target_t = actual_t_tensor.unsqueeze(0).repeat(B)
 
         if config.model_type in ["flux-dev", "sd3", "qwen-image-edit"]:
             noisy_latents_input = trainer.scheduler.scale_noise(
@@ -215,7 +214,7 @@ def main():
                     score_map = token_scores.reshape(B, grid_h, grid_w)
                     score_np = score_map[0].float().cpu().numpy()
 
-                    collected_maps[(actual_t_val.item(), layer_idx)] = score_np
+                    collected_maps[(actual_t_tensor.item(), layer_idx)] = score_np
 
                 except Exception as e:
                     print(f"Reshape failed layer {layer_idx}: {e}")
