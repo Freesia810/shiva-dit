@@ -134,7 +134,9 @@ class DiffusionModelTrainer:
 
         self._setup_caption_dropout_embeds()
 
-        self.best_metrics_state = {} 
+        self.best_metrics_state = {}
+
+        self.distill_viz_buffer = []
 
         if self.accelerator.is_main_process:
             self.evaluators = {}
@@ -1161,10 +1163,10 @@ class DiffusionModelTrainer:
 
         total_loss = main_loss + hook_loss + distill_loss_final + distill_loss_mid
 
-        return total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid, hook_metrics
+        return total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid, hook_metrics, timesteps
 
     def _train_step(self, batch):
-        total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid, hook_metrics = (
+        total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid, hook_metrics, timesteps = (
             self._compute_loss(batch, self.global_step)
         )
 
@@ -1182,6 +1184,7 @@ class DiffusionModelTrainer:
             hook_loss.detach(),
             distill_loss_final.detach(),
             distill_loss_mid.detach(),
+            timesteps.detach(),
         )
 
     def _set_finetuning_trainable_state(self, requires_grad: bool):        
@@ -1500,6 +1503,7 @@ class DiffusionModelTrainer:
                 progress_bar.set_postfix(postfix_dict)
                 self._log_router_visualization(batch=batch)
                 self._log_context_visualization(batch=batch)
+                self._log_distill_loss_distribution()
 
             self.metric_manager.log_step(self.global_step)
             if hasattr(self, "step_per_layer_metrics"):
@@ -1565,6 +1569,9 @@ class DiffusionModelTrainer:
                 if hasattr(policy, "time_proj") and len(policy.time_proj) > 0:
                     if isinstance(policy.time_proj[0], torch.nn.Linear):
                         input_dim = policy.time_proj[0].in_features
+                # elif hasattr(policy, "time_base_mlp") and len(policy.time_base_mlp) > 0:
+                #     if isinstance(policy.time_base_mlp[0], torch.nn.Linear):
+                #         input_dim = policy.time_base_mlp[0].in_features
                 elif hasattr(policy, "in_layer"):
                     input_dim = policy.in_layer.in_features - policy.layer_embedder.embedding_dim
                 
@@ -1580,6 +1587,30 @@ class DiffusionModelTrainer:
                     policy_input = t_flat.unsqueeze(-1).to(dtype=p_param.dtype)
 
                 logits = policy(policy_input, l_flat.long())
+
+                if hasattr(policy, "time_proj"):
+                    try:
+                        time_out = policy.time_proj(policy_input)
+                        if time_out.shape[-1] % 2 == 0:
+                            scale_flat, shift_flat = time_out.chunk(2, dim=-1)
+                            
+                            scale_grid = scale_flat.reshape(steps, total_layers, -1)
+                            shift_grid = shift_flat.reshape(steps, total_layers, -1)
+                            
+                            vec_start_scale = scale_grid[0, 0, :] # [Dim]
+                            vec_end_scale = scale_grid[-1, 0, :]  # [Dim]
+                            
+                            vec_start_shift = shift_grid[0, 0, :]
+                            vec_end_shift = shift_grid[-1, 0, :]
+                            
+                            sim_scale = torch.nn.functional.cosine_similarity(vec_start_scale, vec_end_scale, dim=0).item()
+                            sim_shift = torch.nn.functional.cosine_similarity(vec_start_shift, vec_end_shift, dim=0).item()
+                            
+                            print(f"[Viz Analysis] {alias.upper()} Time Cosine Similarity (t=0 vs t=1):")
+                            print(f"  Scale Sim: {sim_scale:.4f}")
+                            print(f"  Shift Sim: {sim_shift:.4f}  (Lower = Stronger Time Differentiation)")
+                    except Exception as e:
+                        pass
                 
                 if "gater" in alias:
                     # Gater Output: (B, 2) -> [Prune, Fuse] -> Softmax -> Index 1
@@ -1794,6 +1825,48 @@ class DiffusionModelTrainer:
                     finally:
                         target_hook.last_context_mask = None
 
+    def _log_distill_loss_distribution(self):
+        if not self.accelerator.is_main_process:
+            return
+        
+        if len(self.distill_viz_buffer) < 500: 
+            return
+
+        try:
+            import matplotlib.pyplot as plt
+            import numpy as np
+        except ImportError:
+            return
+
+        data = np.array(self.distill_viz_buffer)
+        x = data[:, 0] # Time
+        y = data[:, 1] # Loss
+        
+        self.distill_viz_buffer = []
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        sc = ax.scatter(x, y, s=5, alpha=0.6, c=y, cmap='viridis')
+        try:
+            sort_idx = np.argsort(x)
+            x_sorted = x[sort_idx]
+            y_sorted = y[sort_idx]
+            window_size = 50
+            if len(x_sorted) > window_size:
+                y_smooth = np.convolve(y_sorted, np.ones(window_size)/window_size, mode='valid')
+                ax.plot(x_sorted[window_size//2 : -window_size//2 + 1], y_smooth, 'r-', linewidth=2, label='Trend')
+        except Exception:
+            pass
+
+        ax.set_xlabel('Timestep (0 -> 1000)')
+        ax.set_ylabel('Distill Loss (Middle)')
+        ax.set_title(f'Distill Loss Distribution (Last {len(x)} steps)')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        plt.colorbar(sc, ax=ax, label='Loss Magnitude')
+
+        self.logger.log_figure("debug/distill_loss_vs_time", fig, self.global_step)
+        plt.close(fig)
+
     def _log_trainable_parameters(self, description: str = ""):
         if not self.accelerator.is_main_process:
             return
@@ -1861,7 +1934,7 @@ class DiffusionModelTrainer:
 
         for batch in val_progress_bar:
             try:
-                total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid, hook_metrics = self._compute_loss(
+                total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid, hook_metrics, _ = self._compute_loss(
                     batch, global_step
                 )
 
@@ -2259,11 +2332,20 @@ class DiffusionModelTrainer:
                 if step % self.config.gradient_accumulation_steps == 0:
                     self.optimizer.zero_grad(set_to_none=True)
 
-                total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid = self._train_step(batch)
+                total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid, timesteps = self._train_step(batch)
                 is_update_step = (
                     step + 1
                 ) % self.config.gradient_accumulation_steps == 0
                 is_last_step = (step + 1) == len(self.train_dataloader)
+
+                if self.accelerator.is_main_process:
+                    t_val = timesteps.float().mean().item()
+                    l_val = distill_loss_mid.float().item()
+
+                    if self.model_type in ["flux-dev", "flux-kontext"] and t_val <= 1.0:
+                        t_val *= 1000.0
+                        
+                    self.distill_viz_buffer.append((t_val, l_val))
 
                 if is_update_step or is_last_step:
                     if self.accelerator.sync_gradients:

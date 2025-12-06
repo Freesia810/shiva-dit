@@ -511,10 +511,27 @@ def collect_policy_gradient_stats(model, hook_manager, device) -> dict:
                 stats[f"grad/{name}/layer_sensitivity_cv"] = grad_norms.std() / (grad_norms.mean() + 1e-6)
 
         if hasattr(policy_net, 'time_proj'):
-            param = policy_net.time_proj[-1].weight
+            param = policy_net.time_proj[-1].weight 
             if param.grad is not None:
-                grad = param.grad.detach()
+                grad = param.grad.detach() # Shape: [Out_Dim, In_Dim]
+
                 stats[f"grad/{name}/temb_proj_std"] = grad.std()
+
+                grad_norm_per_channel = grad.norm(dim=1) # [Out_Dim]
+                stats[f"grad/{name}/temb_spatial_cv"] = grad_norm_per_channel.std() / (grad_norm_per_channel.mean() + 1e-6)
+
+                out_dim = grad.shape[0]
+                scale_grad = grad[:out_dim//2, :]
+                shift_grad = grad[out_dim//2:, :]
+                
+                stats[f"grad/{name}/temb_scale_grad_norm"] = scale_grad.norm()
+                stats[f"grad/{name}/temb_shift_grad_norm"] = shift_grad.norm()
+        
+        # if hasattr(policy_net, 'time_base_mlp'):
+        #     param = policy_net.time_base_mlp[-1].weight
+        #     if param.grad is not None:
+        #         grad = param.grad.detach()
+        #         stats[f"grad/{name}/temb_proj_std"] = grad.std()
 
         if hasattr(policy_net, 'mix_mlp'):
             param = policy_net.mix_mlp[-1].weight
