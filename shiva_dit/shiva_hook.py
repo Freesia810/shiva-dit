@@ -16,7 +16,7 @@ from shiva_dit.modules.fuser import ShivaFuserExpert
 
 RANDOM_STAGE = 0
 RATIO_STAGE = 1
-GATER_STAGE = 2
+GATER_STAGE = 99
 
 class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
@@ -420,7 +420,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             load_balancing_loss = torch.tensor(0.0, device=device, dtype=dtype)
             
             with torch.no_grad():
-                avg_fuse_prob = gating_weights[:, 1].mean()
+                avg_fuse_prob = torch.zeros_like(gating_weights[:, 1].mean())
         else:
             g_prune = raw_g_prune
             g_fuse = raw_g_fuse
