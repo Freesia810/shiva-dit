@@ -7,3 +7,4 @@ mlruns/
 *.log
 shiva_env/
 *.pt
+*.ttf
