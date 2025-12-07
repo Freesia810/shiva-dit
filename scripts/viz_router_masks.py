@@ -4,7 +4,7 @@ import copy
 import json
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
-import numpy as np
+import matplotlib.gridspec as gridspec
 from shiva_dit.training.config import TrainerConfig, LoraConfig
 from shiva_dit.training.trainer import DiffusionModelTrainer
 
@@ -14,7 +14,7 @@ from shiva_dit.utils import global_context
 
 from scripts.config.shiva_router import hook_config, lora_config
 
-FONT_PATH = "./Times New Roman.ttf"
+FONT_PATH = "./Times New Roman.ttf" 
 custom_font_name = 'serif'
 
 if os.path.exists(FONT_PATH):
@@ -66,53 +66,81 @@ def load_weights(trainer, ckpt_path):
     trainer.model.load_state_dict(new_sd, strict=False)
     print("Weights loaded.")
 
-def plot_combined_grid(data_storage, row_labels, col_labels, save_path):
+def plot_paper_grid(data_storage, row_labels, col_labels, save_path):
     rows = len(row_labels)
-    cols = len(col_labels)
+    n_layers = len(col_labels)
     
-    fig, axes = plt.subplots(rows, cols, figsize=(10, 10), constrained_layout=True)
+    fig = plt.figure(figsize=(11, 2.3 * rows + 1), constrained_layout=True)
     
+    width_ratios = [1, 0.15] + [1] * n_layers
+    
+    gs_main = gridspec.GridSpec(rows + 1, 2 + n_layers, figure=fig, 
+                                width_ratios=width_ratios,
+                                height_ratios=[1.0] * rows + [0.08], 
+                                hspace=0.05, wspace=0.02)
+
     cmap = 'viridis'
     vmin, vmax = 0.0, 1.0
+    images_for_cbar = []
 
-    images = []
+    for row_idx, t_val in enumerate(row_labels):
+        ax_img = fig.add_subplot(gs_main[row_idx, 0])
+        
+        img_key = (t_val, 'input')
+        if img_key in data_storage:
+            img_data = data_storage[img_key]
+            ax_img.imshow(img_data, aspect='equal')
+        else:
+            ax_img.text(0.5, 0.5, "N/A", ha='center', va='center')
+        
+        ax_img.set_xticks([])
+        ax_img.set_yticks([])
+        # ax_img.axis('off')
+        
+        t_display = int(t_val) if t_val > 1.0 else f"{t_val:.2f}"
+        ax_img.text(-0.1, 0.5, f"t ≈ {t_display}", fontsize=16, fontweight='bold', 
+                    rotation=90, ha='right', va='center', transform=ax_img.transAxes)
+        
+        if row_idx == 0:
+            ax_img.set_title("Input", fontsize=16, fontweight='bold', pad=10)
 
-    for i, t_val in enumerate(row_labels):
-        for j, layer_idx in enumerate(col_labels):
-            ax = axes[i, j]
+        for i, layer_idx in enumerate(col_labels):
+            grid_col = 2 + i
+            ax_mask = fig.add_subplot(gs_main[row_idx, grid_col])
             
-            key = (t_val, layer_idx)
-            if key in data_storage:
-                heatmap = data_storage[key]
-                im = ax.imshow(heatmap, cmap=cmap, vmin=vmin, vmax=vmax, interpolation='nearest')
-                if i == 0 and j == 0: images.append(im)
+            mask_key = (t_val, layer_idx)
+            if mask_key in data_storage:
+                heatmap = data_storage[mask_key]
+                im = ax_mask.imshow(heatmap, cmap=cmap, vmin=vmin, vmax=vmax, 
+                                    interpolation='nearest', aspect='equal')
+                if row_idx == 0 and i == 0: images_for_cbar.append(im)
             else:
-                ax.text(0.5, 0.5, "N/A", ha='center', va='center')
-                ax.axis('off')
+                ax_mask.text(0.5, 0.5, "N/A", ha='center', va='center')
+                ax_mask.axis('off')
                 continue
-
-            ax.set_xticks([])
-            ax.set_yticks([])
-            # 如果想去掉子图的黑色边框，解开下面这行：
-            # ax.axis('off') 
             
-            if i == 0:
-                ax.set_title(f"Layer {layer_idx}", fontsize=18, fontweight='bold', pad=8)
+            ax_mask.set_xticks([])
+            ax_mask.set_yticks([])
+            # ax_mask.axis('off')
             
-            if j == 0:
-                t_display = int(t_val) if t_val > 1.0 else f"{t_val:.2f}"
-                ax.set_ylabel(f"t ≈ {t_display}", fontsize=18, fontweight='bold', rotation=90, labelpad=8)
+            if row_idx == 0:
+                ax_mask.set_title(f"Layer {layer_idx}", fontsize=16, fontweight='bold', pad=10)
 
-    cbar = fig.colorbar(images[0], ax=axes, orientation='horizontal', fraction=0.05, aspect=35, pad=0.02)
-    cbar.set_label('Router Importance Score', fontsize=16, fontweight='bold')
+    cbar_ax = fig.add_subplot(gs_main[rows, :])
+
+    cbar = fig.colorbar(images_for_cbar[0], cax=cbar_ax, orientation='horizontal', fraction=0.5)
+    
+    cbar.ax.xaxis.set_ticks_position('bottom')
+    cbar.set_label('Router Importance Score', fontsize=14, fontweight='bold', labelpad=5)
     cbar.ax.tick_params(labelsize=12)
     cbar.outline.set_visible(False)
+    
+    cbar_ax.set_aspect(0.03) 
 
     os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
     plt.savefig(save_path, format='pdf', bbox_inches='tight', dpi=300)
     plt.close(fig)
-    print(f"✅ Visualization saved to {save_path} (Layout: Constrained)")
-
+    print(f"✅ Visualization saved to {save_path}")
 
 def main():
     image_dir = create_temp_metadata()
@@ -170,9 +198,10 @@ def main():
         diffs = torch.abs(all_scheduler_timesteps - desired_t)
         nearest_idx = torch.argmin(diffs)
         actual_t_tensor = all_scheduler_timesteps[nearest_idx] 
-        actual_timesteps_used.append(actual_t_tensor.item())
+        actual_t_val = actual_t_tensor.item()
+        actual_timesteps_used.append(actual_t_val)
         
-        print(f"  Target: {desired_t} -> Nearest: {actual_t_tensor.item():.4f}")
+        print(f"  Target: {desired_t} -> Nearest: {actual_t_val:.4f}")
 
         target_t = actual_t_tensor.unsqueeze(0).repeat(B)
 
@@ -189,6 +218,21 @@ def main():
                 timesteps=target_t,
             )
 
+        with torch.no_grad():
+            # SD3: (x - shift) * scale -> x / scale + shift
+            if config.model_type == "sd3":
+                latents_for_viz = (noisy_latents_input / trainer.vae.config.scaling_factor) + trainer.vae.config.shift_factor
+            else:
+                latents_for_viz = noisy_latents_input / trainer.vae.config.scaling_factor
+
+            # VAE Decode
+            decoded_img = trainer.vae.decode(latents_for_viz, return_dict=False)[0]
+            decoded_img = (decoded_img / 2 + 0.5).clamp(0, 1)
+            img_np = decoded_img[0].permute(1, 2, 0).cpu().float().numpy()
+            
+            collected_maps[(actual_t_val, 'input')] = img_np
+
+        # 3. Model Forward
         if config.model_type in ["flux-dev", "qwen-image-edit"]:
             global_context.update(current_timestep=target_t)
             model_t_input = target_t / 1000.0
@@ -207,19 +251,16 @@ def main():
         for layer_idx in LAYERS_TO_VIZ:
             target_hook = None
             for h in hooks.values():
-                if h.layer_idx == layer_idx:
-                    target_hook = h
-                    break
+                if h.layer_idx == layer_idx: target_hook = h; break
 
             if target_hook and hasattr(target_hook, "last_token_scores") and target_hook.last_token_scores is not None:
                 token_scores = target_hook.last_token_scores
-                if token_scores.dim() == 3:
-                    token_scores = token_scores.squeeze(-1)
+                if token_scores.dim() == 3: token_scores = token_scores.squeeze(-1)
                 
                 try:
                     score_map = token_scores.reshape(B, grid_h, grid_w)
                     score_np = score_map[0].float().cpu().numpy() 
-                    collected_maps[(actual_t_tensor.item(), layer_idx)] = score_np
+                    collected_maps[(actual_t_val, layer_idx)] = score_np
                 except Exception as e:
                     print(f"Reshape failed layer {layer_idx}: {e}")
 
@@ -227,7 +268,7 @@ def main():
 
     print("\n>>> Generating Final PDF...")
     save_pdf_path = os.path.join(OUTPUT_DIR, "router_viz_grid.pdf")
-    plot_combined_grid(collected_maps, actual_timesteps_used, LAYERS_TO_VIZ, save_pdf_path)
+    plot_paper_grid(collected_maps, actual_timesteps_used, LAYERS_TO_VIZ, save_pdf_path)
 
     if os.path.exists(TEMP_META_FILE):
         os.remove(TEMP_META_FILE)

@@ -96,7 +96,7 @@ hook_config = {
     "grouped": hook_config_grouped,
 }
 
-prefix = 'max'
+prefix = 'shared'
 
 trainer_config = {
     "metadata_file": "../dataset/MJHQ-30K/train.jsonl",
@@ -142,7 +142,7 @@ trainer_config = {
                     "distill": [1.0, 0.0]
                 },
                 # LR: [Base(Router), LoRA, Gate, Fuser, Policy, CtxRatio, CtxPruner]
-                "lr": [5e-4, 1e-5, 0.0, 0.0, 0.0, 0.0, 0.0],
+                "lr": [5e-4, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
                 "temp": [5.0, 10.0, 10.0, 20.0],
             },
         ],
