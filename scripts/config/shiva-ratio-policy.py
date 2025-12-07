@@ -14,8 +14,8 @@ lora_config = {
     ],
 }
 
-# mode = "fixed"
-mode = "adaptive"
+mode = "fixed"
+# mode = "adaptive"
 
 hook_config = {
     # --- Mode Selection ---
@@ -82,7 +82,7 @@ stage_config_dict = {
                 "distill": [1.0, 0.0]
             },
             # LR: [Base(Router), LoRA, Gate, Fuser, Policy, CtxRatio, CtxPruner]
-            "lr": [5e-4, 1e-5, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "lr": [5e-4, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
             "temp": [5.0, 10.0, 10.0, 20.0],
         },
 
@@ -93,7 +93,7 @@ stage_config_dict = {
                 "gate": 0.0,
                 "distill": [2.0, 5.0],
             },
-            "lr": [1e-5, 1e-5, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "lr": [1e-6, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
             "temp": [10.0, 10.0, 20.0, 100.0],
         },
 
@@ -104,7 +104,7 @@ stage_config_dict = {
                 "gate": 0.0,
                 "distill": [2.0, 5.0],
             },
-            "lr": [1e-5, 1e-5, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "lr": [1e-6, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
             "temp": [10.0, 10.0, 100.0, 100.0],
         },
     ],
