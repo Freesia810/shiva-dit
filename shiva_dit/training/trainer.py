@@ -175,7 +175,7 @@ class DiffusionModelTrainer:
 
         if 'stage_schedule' not in self.config.extra_config:
             self.processed_stage_schedule.append({
-                "threshold": total_train_steps,
+                "threshold": self._scale_steps(total_train_steps),
                 "start_step": 0,
                 "weights": {"ratio": 0.5, "gate": 0.1},
                 "lr": None,
@@ -187,13 +187,14 @@ class DiffusionModelTrainer:
                 stage_duration = stage["steps"]
                 start_step = current_step_threshold
                 is_last_stage = (i == len(schedule_list) - 1)
+                scaled_total_steps = self._scale_steps(total_train_steps)
                 if stage_duration < 0 or is_last_stage:
-                    scaled_threshold = total_train_steps
+                    scaled_threshold = scaled_total_steps
                 else:
                     scaled_duration = self._scale_steps(stage_duration)
                     scaled_threshold = current_step_threshold + scaled_duration
-                    if scaled_threshold > total_train_steps:
-                        scaled_threshold = total_train_steps
+                    if scaled_threshold > scaled_total_steps:
+                        scaled_threshold = scaled_total_steps
 
                 self.processed_stage_schedule.append({
                     "threshold": scaled_threshold,
