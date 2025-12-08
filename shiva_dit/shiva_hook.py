@@ -70,7 +70,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.ratio_cache = shared_ratio_cache
         self.context_ratio_cache = shared_context_ratio_cache
 
-        self._internal_forward_counter = 0
+        self._ratio_buffer = []
 
         if self.use_gater_lut:
             if self.shiva_mode in ["image", "both"]:
@@ -101,6 +101,27 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.context_aux_loss_accumulator = []
 
         self.capture_mask_for_viz = capture_mask_for_viz
+
+    def _get_stratified_ratio_val(self, device):
+        if not self._ratio_buffer:
+            min_r = 0.2 
+            max_r = 0.9
+            steps = ACCUMULATION_STEPS
+            
+            span = (max_r - min_r) / steps
+            bases = torch.linspace(min_r, max_r - span, steps, device=device)
+            
+            offsets = torch.rand(steps, device=device) * span
+            ratios = bases + offsets
+            
+            ratios = ratios[torch.randperm(steps, device=device)]
+            
+            self._ratio_buffer = ratios.tolist()
+            
+            # if self.layer_idx == 0:
+            #     print(f"[RatioBuffer] Refilled: {[round(x, 2) for x in self._ratio_buffer]}")
+
+        return self._ratio_buffer.pop(0)
 
     def on_register_hook(self, block: nn.Module):
         self.register_buffer(
@@ -248,8 +269,12 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                         == RANDOM_STAGE
                     )
                     if is_random_training:
-                        noise = torch.rand(1, device=device, dtype=dtype) * 0.8 + 0.1
-                        ctx_ratio = noise + (0.0 * ctx_ratio_pred)
+                        ratio_val = self._get_stratified_ratio_val(device=pure_temb.device)
+
+                        random_ratio = torch.tensor(
+                            ratio_val, device=pure_temb.device, dtype=dtype
+                        )
+                        ctx_ratio = random_ratio + (0.0 * ctx_ratio_pred)
                     else:
                         ctx_ratio = ctx_ratio_pred
                 else:
@@ -319,19 +344,12 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                     )
 
                     if is_random_training:
-                        self._internal_forward_counter += 1
-                        min_r = 0.2
-                        max_r = 0.9
-                        cycle_idx = self._internal_forward_counter % ACCUMULATION_STEPS
-                        ratio_val = min_r + (max_r - min_r) * (cycle_idx / (ACCUMULATION_STEPS - 1 + 1e-6))
+                        ratio_val = self._get_stratified_ratio_val(device=pure_temb.device)
 
                         random_ratio = torch.tensor(
                             ratio_val, device=pure_temb.device, dtype=dtype
                         )
                         predicted_ratio = random_ratio + (0.0 * policy_ratio)
-
-                        # if self.layer_idx == 0 and cycle_idx == 0:
-                        #     print(f"DEBUG: New Accumulation Cycle Started. Reset Ratio to {ratio_val:.2f}")
                     else:
                         predicted_ratio = policy_ratio
                 else:

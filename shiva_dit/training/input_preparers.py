@@ -5,14 +5,16 @@ def stratified_timestep_sampler(batch_size, num_timesteps, device):
     if batch_size > num_timesteps:
         return torch.randint(0, num_timesteps, (batch_size,), device=device)
 
-    span = num_timesteps // batch_size
+    boundaries = torch.linspace(0, num_timesteps, batch_size + 1, device=device).long()
     
-    start_indices = torch.arange(0, num_timesteps, step=span, device=device)[:batch_size]
+    start_indices = boundaries[:-1]
     
-    offsets = torch.randint(0, span, (batch_size,), device=device)
+    spans = boundaries[1:] - boundaries[:-1]
+    
+    offsets = (torch.rand(batch_size, device=device) * spans).long()
     
     indices = start_indices + offsets
-    
+
     indices = indices[torch.randperm(batch_size, device=device)]
     
     return indices
