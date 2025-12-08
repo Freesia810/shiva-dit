@@ -1,6 +1,45 @@
 import torch
 from diffusers.pipelines.flux.pipeline_flux_kontext import retrieve_latents
 
+def stratified_timestep_sampler(batch_size, num_timesteps, device):
+    if batch_size > num_timesteps:
+        return torch.randint(0, num_timesteps, (batch_size,), device=device)
+
+    span = num_timesteps // batch_size
+    
+    start_indices = torch.arange(0, num_timesteps, step=span, device=device)[:batch_size]
+    
+    offsets = torch.randint(0, span, (batch_size,), device=device)
+    
+    indices = start_indices + offsets
+    
+    indices = indices[torch.randperm(batch_size, device=device)]
+    
+    return indices
+
+def get_stratified_indices_from_buffer(trainer, micro_batch_size):
+    if not hasattr(trainer, "timestep_buffer"):
+        trainer.timestep_buffer = []
+
+    if len(trainer.timestep_buffer) < micro_batch_size:
+        accum_steps = getattr(trainer.config, "gradient_accumulation_steps", 1)
+        total_batch_size = micro_batch_size * accum_steps
+        
+        total_batch_size = max(total_batch_size, micro_batch_size)
+
+        new_indices = stratified_timestep_sampler(
+            total_batch_size,
+            trainer.scheduler.config.num_train_timesteps,
+            trainer.device
+        )
+        
+        trainer.timestep_buffer.extend(new_indices.tolist())
+
+    current_indices_list = trainer.timestep_buffer[:micro_batch_size]
+    
+    trainer.timestep_buffer = trainer.timestep_buffer[micro_batch_size:]
+
+    return torch.tensor(current_indices_list, device=trainer.device, dtype=torch.long)
 
 def prepare_flux_inputs(trainer, batch):
     model_kwargs = {}
@@ -71,12 +110,7 @@ def prepare_flux_inputs(trainer, batch):
 
     # add noise
     noise = torch.randn_like(img_latents)
-    indices = torch.randint(
-        0,
-        trainer.scheduler.config.num_train_timesteps,
-        (batch_size,),
-        device=trainer.device,
-    )
+    indices = get_stratified_indices_from_buffer(trainer, batch_size)
     schedule_timesteps_gpu = trainer.scheduler.timesteps.to(trainer.device)
     timesteps = schedule_timesteps_gpu[indices]
     noisy_latents = trainer.scheduler.scale_noise(
@@ -143,12 +177,7 @@ def prepare_pixart_sigma_inputs(trainer, batch):
 
     # add noise
     noise = torch.randn_like(img_latents)
-    indices = torch.randint(
-        0,
-        trainer.scheduler.config.num_train_timesteps,
-        (batch_size,),
-        device=trainer.device,
-    )
+    indices = get_stratified_indices_from_buffer(trainer, batch_size)
     schedule_timesteps_gpu = trainer.scheduler.timesteps.to(trainer.device)
     timesteps = schedule_timesteps_gpu[indices]
     noisy_latents = trainer.scheduler.add_noise(
@@ -256,12 +285,7 @@ def prepare_sd3_inputs(trainer, batch):
 
     # add noise
     noise = torch.randn_like(img_latents)
-    indices = torch.randint(
-        0,
-        trainer.scheduler.config.num_train_timesteps,
-        (batch_size,),
-        device=trainer.device,
-    )
+    indices = get_stratified_indices_from_buffer(trainer, batch_size)
     schedule_timesteps_gpu = trainer.scheduler.timesteps.to(trainer.device)
     timesteps = schedule_timesteps_gpu[indices]
     noisy_latents = trainer.scheduler.scale_noise(
@@ -356,12 +380,7 @@ def prepare_qwen_image_inputs(trainer, batch):
 
     # add noise
     noise = torch.randn_like(img_latents)
-    indices = torch.randint(
-        0,
-        trainer.scheduler.config.num_train_timesteps,
-        (batch_size,),
-        device=trainer.device,
-    )
+    indices = get_stratified_indices_from_buffer(trainer, batch_size)
     schedule_timesteps_gpu = trainer.scheduler.timesteps.to(trainer.device)
     timesteps = schedule_timesteps_gpu[indices]
     noisy_latents = trainer.scheduler.scale_noise(
@@ -447,12 +466,7 @@ def prepare_qwen_image_edit_inputs(trainer, batch):
 
     # add noise
     noise = torch.randn_like(img_latents)
-    indices = torch.randint(
-        0,
-        trainer.scheduler.config.num_train_timesteps,
-        (batch_size,),
-        device=trainer.device,
-    )
+    indices = get_stratified_indices_from_buffer(trainer, batch_size)
     schedule_timesteps_gpu = trainer.scheduler.timesteps.to(trainer.device)
     timesteps = schedule_timesteps_gpu[indices]
     noisy_latents = trainer.scheduler.scale_noise(

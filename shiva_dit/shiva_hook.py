@@ -16,6 +16,7 @@ from shiva_dit.modules.fuser import ShivaFuserExpert
 
 RANDOM_STAGE = 0
 RATIO_STAGE = 1
+ACCUMULATION_STEPS = 16
 GATER_STAGE = 99
 
 class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
@@ -68,6 +69,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.gater_cache = shared_gater_cache
         self.ratio_cache = shared_ratio_cache
         self.context_ratio_cache = shared_context_ratio_cache
+
+        self._internal_forward_counter = 0
 
         if self.use_gater_lut:
             if self.shiva_mode in ["image", "both"]:
@@ -316,13 +319,19 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                     )
 
                     if is_random_training:
-                        random_ratio_val = (
-                            torch.rand(1, device=pure_temb.device).item() * 0.8 + 0.1
-                        )
+                        self._internal_forward_counter += 1
+                        min_r = 0.2
+                        max_r = 0.9
+                        cycle_idx = self._internal_forward_counter % ACCUMULATION_STEPS
+                        ratio_val = min_r + (max_r - min_r) * (cycle_idx / (ACCUMULATION_STEPS - 1 + 1e-6))
+
                         random_ratio = torch.tensor(
-                            random_ratio_val, device=pure_temb.device, dtype=dtype
+                            ratio_val, device=pure_temb.device, dtype=dtype
                         )
                         predicted_ratio = random_ratio + (0.0 * policy_ratio)
+
+                        # if self.layer_idx == 0 and cycle_idx == 0:
+                        #     print(f"DEBUG: New Accumulation Cycle Started. Reset Ratio to {ratio_val:.2f}")
                     else:
                         predicted_ratio = policy_ratio
                 else:

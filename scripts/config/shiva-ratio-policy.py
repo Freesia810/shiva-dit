@@ -43,34 +43,34 @@ stage_config_dict = {
             "weights": {
                 "ratio": [0.0, 0.0, 0.0], 
                 "gate": 0.0,
-                "distill": [1.0, 0.0]
+                "distill": [0.0, 0.0]
             },
             # LR: [Base(Router), LoRA, Gate, Fuser, Policy, CtxRatio, CtxPruner]
-            "lr": [5e-4, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "lr": [5e-4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             "temp": [5.0, 10.0, 10.0, 20.0],
         },
 
-        {
-            "steps": 14000, 
-            "weights": {
-                "ratio": [5.0, 100.0, 0.0],
-                "gate": 0.0,
-                "distill": [2.0, 5.0],
-            },
-            "lr": [1e-6, 1e-4, 0.0, 0.0, 2e-5, 0.0, 0.0],
-            "temp": [10.0, 10.0, 20.0, 100.0],
-        },
+        # {
+        #     "steps": 14000, 
+        #     "weights": {
+        #         "ratio": [5.0, 100.0, 0.0],
+        #         "gate": 0.0,
+        #         "distill": [0.0, 0.0],
+        #     },
+        #     "lr": [1e-6, 1e-4, 0.0, 0.0, 2e-5, 0.0, 0.0],
+        #     "temp": [10.0, 10.0, 20.0, 100.0],
+        # },
 
-        {
-            "steps": 31500, 
-            "weights": {
-                "ratio": [1.0, 100.0, 0.0],
-                "gate": 0.0,
-                "distill": [2.0, 5.0],
-            },
-            "lr": [1e-6, 1e-4, 0.0, 0.0, 1e-6, 0.0, 0.0],
-            "temp": [10.0, 10.0, 100.0, 100.0],
-        },
+        # {
+        #     "steps": 31500, 
+        #     "weights": {
+        #         "ratio": [1.0, 100.0, 0.0],
+        #         "gate": 0.0,
+        #         "distill": [0.0, 0.0],
+        #     },
+        #     "lr": [1e-6, 1e-4, 0.0, 0.0, 1e-6, 0.0, 0.0],
+        #     "temp": [10.0, 10.0, 100.0, 100.0],
+        # },
     ],
 
     "fixed": [
@@ -79,34 +79,34 @@ stage_config_dict = {
             "weights": {
                 "ratio": [0.0, 0.0, 0.0], 
                 "gate": 0.0,
-                "distill": [1.0, 0.0]
+                "distill": [0.0, 0.0]
             },
             # LR: [Base(Router), LoRA, Gate, Fuser, Policy, CtxRatio, CtxPruner]
-            "lr": [5e-4, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "lr": [5e-4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             "temp": [5.0, 10.0, 10.0, 20.0],
         },
 
-        {
-            "steps": 14000, 
-            "weights": {
-                "ratio": [0.0, 0.0, 0.0],
-                "gate": 0.0,
-                "distill": [2.0, 5.0],
-            },
-            "lr": [1e-6, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
-            "temp": [10.0, 10.0, 20.0, 100.0],
-        },
+        # {
+        #     "steps": 14000, 
+        #     "weights": {
+        #         "ratio": [0.0, 0.0, 0.0],
+        #         "gate": 0.0,
+        #         "distill": [0.0, 0.0],
+        #     },
+        #     "lr": [1e-6, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
+        #     "temp": [10.0, 10.0, 20.0, 100.0],
+        # },
 
-        {
-            "steps": 31500, 
-            "weights": {
-                "ratio": [0.0, 0.0, 0.0],
-                "gate": 0.0,
-                "distill": [2.0, 5.0],
-            },
-            "lr": [1e-6, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
-            "temp": [10.0, 10.0, 100.0, 100.0],
-        },
+        # {
+        #     "steps": 31500, 
+        #     "weights": {
+        #         "ratio": [0.0, 0.0, 0.0],
+        #         "gate": 0.0,
+        #         "distill": [0.0, 0.0],
+        #     },
+        #     "lr": [1e-6, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
+        #     "temp": [10.0, 10.0, 100.0, 100.0],
+        # },
     ],
 }
 
@@ -121,7 +121,7 @@ trainer_config = {
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
     "caption_dropout_rate": 0.1,
-    "num_epochs": 30,
+    "num_epochs": 4,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16,
     "optimizer": "AdamW",
