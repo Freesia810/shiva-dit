@@ -34,7 +34,7 @@ plt.rcParams['mathtext.it'] = f"{custom_font_name}:italic"
 plt.rcParams['mathtext.bf'] = f"{custom_font_name}:bold"
 plt.rcParams['axes.unicode_minus'] = False
 
-mode = 'shared'
+mode = 'max'
 HOOK_CONFIG = copy.deepcopy(hook_config[mode])
 HOOK_CONFIG["fixed_image_ratio"] = 0.6
 HOOK_CONFIG["capture_mask_for_viz"] = True
@@ -43,7 +43,7 @@ HOOK_CONFIG["skip_layer_indices"] = [0]
 IMAGE_PATH = "/home/admin/workspace/aop_lab/app_source/dataset/MJHQ-30K/indoor/45de4fb1e89b0d07d76b71bdcb6e6f02fabfdbb0.jpg"
 PROMPT = "A jawdropping image of a bold red Ferrari SF90 Stradale, displayed inside a luxurious, highrise apartment in Tokyo, Japan, during a neonlit night. The cars striking design is accentuated by the citys dazzling lights, visible through the floortoceiling windows. This photograph embodies the fusion of automotive art and modern living, rendered in stunning 8K UHD resolution"
 OUTPUT_DIR = "./viz_results"
-CHECKPOINT_PATH = f"./checkpoints-{mode}/best_val_main_loss.pt"
+CHECKPOINT_PATH = f"./checkpoints-{mode}/final.pt"
 
 TIMESTEPS_TO_VIZ = [900, 700, 500, 100]  
 LAYERS_TO_VIZ = [1, 8, 15, 23]           
@@ -79,7 +79,8 @@ def plot_paper_grid(data_storage, row_labels, col_labels, save_path):
                                 height_ratios=[1.0] * rows + [0.08], 
                                 hspace=0.05, wspace=0.02)
 
-    cmap = 'viridis'
+    # cmap = 'viridis'
+    cmap = 'inferno'
     vmin, vmax = 0.0, 1.0
     images_for_cbar = []
 
@@ -167,6 +168,8 @@ def main():
 
     if os.path.exists(CHECKPOINT_PATH):
         load_weights(trainer, CHECKPOINT_PATH)
+    else:
+        print("No checkpoint found. Skipping loading weights.")
 
     dataloader = trainer.train_dataloader
     batch = next(iter(dataloader))

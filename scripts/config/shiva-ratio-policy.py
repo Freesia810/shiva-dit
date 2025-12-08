@@ -50,16 +50,16 @@ stage_config_dict = {
             "temp": [5.0, 10.0, 10.0, 20.0],
         },
 
-        # {
-        #     "steps": 14000, 
-        #     "weights": {
-        #         "ratio": [5.0, 100.0, 0.0],
-        #         "gate": 0.0,
-        #         "distill": [0.0, 0.0],
-        #     },
-        #     "lr": [1e-6, 1e-4, 0.0, 0.0, 2e-5, 0.0, 0.0],
-        #     "temp": [10.0, 10.0, 20.0, 100.0],
-        # },
+        {
+            "steps": 14000, 
+            "weights": {
+                "ratio": [0.0, 100.0, 1.0],
+                "gate": 0.0,
+                "distill": [0.0, 0.0],
+            },
+            "lr": [1e-5, 1e-4, 0.0, 0.0, 2e-4, 0.0, 0.0],
+            "temp": [10.0, 10.0, 20.0, 100.0],
+        },
 
         # {
         #     "steps": 31500, 
@@ -86,16 +86,16 @@ stage_config_dict = {
             "temp": [5.0, 10.0, 10.0, 20.0],
         },
 
-        # {
-        #     "steps": 14000, 
-        #     "weights": {
-        #         "ratio": [0.0, 0.0, 0.0],
-        #         "gate": 0.0,
-        #         "distill": [0.0, 0.0],
-        #     },
-        #     "lr": [1e-6, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
-        #     "temp": [10.0, 10.0, 20.0, 100.0],
-        # },
+        {
+            "steps": 14000, 
+            "weights": {
+                "ratio": [0.0, 100.0, 1.0],
+                "gate": 0.0,
+                "distill": [0.0, 0.0],
+            },
+            "lr": [1e-5, 1e-4, 0.0, 0.0, 2e-4, 0.0, 0.0],
+            "temp": [10.0, 10.0, 20.0, 100.0],
+        },
 
         # {
         #     "steps": 31500, 
@@ -121,7 +121,7 @@ trainer_config = {
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
     "caption_dropout_rate": 0.1,
-    "num_epochs": 4,
+    "num_epochs": 12,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16,
     "optimizer": "AdamW",
