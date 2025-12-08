@@ -167,13 +167,15 @@ class DiffusionModelTrainer:
     def _setup_scaled_steps(self):
         config = self.config
 
+        total_train_steps = num_training_steps
+
         self.processed_stage_schedule = []
         current_step_threshold = 0
         last_threshold = 0 
 
         if 'stage_schedule' not in self.config.extra_config:
             self.processed_stage_schedule.append({
-                "threshold": float('inf'),
+                "threshold": total_train_steps,
                 "start_step": 0,
                 "weights": {"ratio": 0.5, "gate": 0.1},
                 "lr": None,
@@ -182,15 +184,15 @@ class DiffusionModelTrainer:
         else:
             for i, stage in enumerate(self.config.extra_config['stage_schedule']):
                 stage_duration = stage["steps"]
-                start_step = current_step_threshold if current_step_threshold != float('inf') else 0
-                if (
-                    stage_duration < 0
-                    or i == len(self.config.extra_config["stage_schedule"]) - 1
-                ):
-                    scaled_threshold = float('inf')
+                start_step = current_step_threshold
+                is_last_stage = (i == len(schedule_list) - 1)
+                if stage_duration < 0 or is_last_stage:
+                    scaled_threshold = total_train_steps
                 else:
                     scaled_duration = self._scale_steps(stage_duration)
                     scaled_threshold = current_step_threshold + scaled_duration
+                    if scaled_threshold > total_train_steps:
+                        scaled_threshold = total_train_steps
 
                 self.processed_stage_schedule.append({
                     "threshold": scaled_threshold,
@@ -200,10 +202,9 @@ class DiffusionModelTrainer:
                     "temp": stage.get("temp", [5.0, 5.0]),
                 })
 
-                if scaled_threshold != float('inf'):
-                    current_step_threshold = scaled_threshold
-                    last_threshold = scaled_threshold
-                else:
+                current_step_threshold = scaled_threshold
+                last_threshold = scaled_threshold
+                if current_step_threshold >= total_train_steps:
                     break
 
         self.scaled_hook_only_steps = self._scale_steps(config.hook_only_steps)
