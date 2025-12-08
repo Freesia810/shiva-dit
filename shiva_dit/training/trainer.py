@@ -136,7 +136,9 @@ class DiffusionModelTrainer:
 
         self.best_metrics_state = {}
 
-        self.distill_viz_buffer = []
+        self.main_viz_buffer = []
+        self.distill_final_viz_buffer = []
+        self.distill_mid_viz_buffer = []
 
         if self.accelerator.is_main_process:
             self.evaluators = {}
@@ -1506,7 +1508,9 @@ class DiffusionModelTrainer:
                 progress_bar.set_postfix(postfix_dict)
                 self._log_router_visualization(batch=batch)
                 self._log_context_visualization(batch=batch)
-                self._log_distill_loss_distribution()
+                self._log_loss_distribution(self.main_viz_buffer, "main_loss")
+                self._log_loss_distribution(self.distill_final_viz_buffer, "distill_final_loss")
+                self._log_loss_distribution(self.distill_mid_viz_buffer, "distill_mid_loss")
 
             self.metric_manager.log_step(self.global_step)
             if hasattr(self, "step_per_layer_metrics"):
@@ -1828,11 +1832,11 @@ class DiffusionModelTrainer:
                     finally:
                         target_hook.last_context_mask = None
 
-    def _log_distill_loss_distribution(self):
+    def _log_loss_distribution(self, buffer, prefix):
         if not self.accelerator.is_main_process:
             return
         
-        if len(self.distill_viz_buffer) < 500: 
+        if len(buffer) < 1000: 
             return
 
         try:
@@ -1841,11 +1845,11 @@ class DiffusionModelTrainer:
         except ImportError:
             return
 
-        data = np.array(self.distill_viz_buffer)
+        data = np.array(buffer)
         x = data[:, 0] # Time
         y = data[:, 1] # Loss
         
-        self.distill_viz_buffer = []
+        buffer = []
 
         fig, ax = plt.subplots(figsize=(10, 6))
         sc = ax.scatter(x, y, s=5, alpha=0.6, c=y, cmap='viridis')
@@ -1861,13 +1865,13 @@ class DiffusionModelTrainer:
             pass
 
         ax.set_xlabel('Timestep (0 -> 1000)')
-        ax.set_ylabel('Distill Loss (Middle)')
-        ax.set_title(f'Distill Loss Distribution (Last {len(x)} steps)')
+        ax.set_ylabel('Loss (Middle)')
+        ax.set_title(f'Loss Distribution (Last {len(x)} steps)')
         ax.grid(True, alpha=0.3)
         ax.legend()
         plt.colorbar(sc, ax=ax, label='Loss Magnitude')
 
-        self.logger.log_figure("debug/distill_loss_vs_time", fig, self.global_step)
+        self.logger.log_figure(f"debug/{prefix}_vs_time", fig, self.global_step)
         plt.close(fig)
 
     def _log_trainable_parameters(self, description: str = ""):
@@ -2343,12 +2347,13 @@ class DiffusionModelTrainer:
 
                 if self.accelerator.is_main_process:
                     t_val = timesteps.float().mean().item()
-                    l_val = distill_loss_mid.float().item()
 
                     if self.model_type in ["flux-dev", "flux-kontext"] and t_val <= 1.0:
                         t_val *= 1000.0
-                        
-                    self.distill_viz_buffer.append((t_val, l_val))
+                    
+                    self.main_viz_buffer.append((t_val, main_loss.float().item()))
+                    self.distill_final_viz_buffer.append((t_val, distill_loss_final.float().item()))
+                    self.distill_mid_viz_buffer.append((t_val, distill_loss_mid.float().item()))
 
                 if is_update_step or is_last_step:
                     if self.accelerator.sync_gradients:

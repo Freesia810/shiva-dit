@@ -66,6 +66,78 @@ def load_weights(trainer, ckpt_path):
     trainer.model.load_state_dict(new_sd, strict=False)
     print("Weights loaded.")
 
+def plot_histogram_grid(data_storage, row_labels, col_labels, save_path):
+    """
+    绘制 Router Importance Score 分布的直方图
+    """
+    rows = len(row_labels)
+    n_layers = len(col_labels)
+    
+    # 宽度稍微窄一点，因为不需要画 Input Image
+    fig, axes = plt.subplots(nrows=rows, ncols=n_layers, 
+                             figsize=(3 * n_layers, 2.0 * rows), 
+                             constrained_layout=True)
+    
+    # 统一颜色风格
+    hist_color = '#4682B4'  # Steel Blue
+    mean_color = '#D62728'  # Muted Red
+    
+    # 如果只有一行或一列，axes 可能不是二维数组，强制转换
+    if rows == 1: axes = np.array([axes])
+    if n_layers == 1: axes = axes.reshape(-1, 1)
+    if rows == 1 and n_layers == 1: axes = np.array([[axes]])
+
+    for r, t_val in enumerate(row_labels):
+        for c, layer_idx in enumerate(col_labels):
+            ax = axes[r, c]
+            
+            mask_key = (t_val, layer_idx)
+            if mask_key in data_storage:
+                # 获取数据并展平
+                score_data = data_storage[mask_key].flatten()
+                mean_val = np.mean(score_data)
+                
+                # 绘制直方图
+                # bins=40 既能看到细节，又不会太碎
+                ax.hist(score_data, bins=40, range=(0, 1), density=True, 
+                        color=hist_color, alpha=0.8, edgecolor='none')
+                
+                # 绘制均值线
+                ax.axvline(mean_val, color=mean_color, linestyle='--', linewidth=1.5, label='Mean')
+                
+                # 在图内标注均值
+                ax.text(0.05, 0.90, f"$\mu$={mean_val:.2f}", transform=ax.transAxes, 
+                        fontsize=10, color=mean_color, fontweight='bold')
+                
+            else:
+                ax.text(0.5, 0.5, "N/A", ha='center', va='center')
+            
+            # 样式调整
+            ax.set_xlim(0, 1)
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            ax.grid(True, axis='y', linestyle=':', alpha=0.4)
+            
+            # 设置标签
+            if r == 0:
+                ax.set_title(f"Layer {layer_idx}", fontsize=14, fontweight='bold', pad=10)
+            
+            if c == 0:
+                t_display = int(t_val) if t_val > 1.0 else f"{t_val:.2f}"
+                ax.set_ylabel(f"t ≈ {t_display}\nDensity", fontsize=12, fontweight='bold')
+            else:
+                ax.set_yticklabels([]) # 隐藏非第一列的Y轴刻度，保持清爽
+            
+            if r == rows - 1:
+                ax.set_xlabel("Score", fontsize=12)
+            else:
+                ax.set_xticklabels([])
+
+    os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+    plt.savefig(save_path, format='pdf', bbox_inches='tight', dpi=300)
+    plt.close(fig)
+    print(f"✅ Histogram Visualization saved to {save_path}")
+
 def plot_paper_grid(data_storage, row_labels, col_labels, save_path):
     rows = len(row_labels)
     n_layers = len(col_labels)
@@ -272,6 +344,10 @@ def main():
     print("\n>>> Generating Final PDF...")
     save_pdf_path = os.path.join(OUTPUT_DIR, "router_viz_grid.pdf")
     plot_paper_grid(collected_maps, actual_timesteps_used, LAYERS_TO_VIZ, save_pdf_path)
+
+    save_hist_path = os.path.join(OUTPUT_DIR, "router_hist_grid.pdf")
+    print(">>> Generating Histogram PDF...")
+    plot_histogram_grid(collected_maps, actual_timesteps_used, LAYERS_TO_VIZ, save_hist_path)
 
     if os.path.exists(TEMP_META_FILE):
         os.remove(TEMP_META_FILE)
