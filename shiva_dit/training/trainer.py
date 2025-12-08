@@ -167,7 +167,7 @@ class DiffusionModelTrainer:
     def _setup_scaled_steps(self):
         config = self.config
 
-        total_train_steps = num_training_steps
+        total_train_steps = self.num_training_steps
 
         self.processed_stage_schedule = []
         current_step_threshold = 0
