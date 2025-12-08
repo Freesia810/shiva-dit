@@ -108,8 +108,14 @@ def plot_histogram_grid(data_storage, row_labels, col_labels, save_path):
                 
                 ax.axvline(mean_val, color=mean_color, linestyle='--', linewidth=1.5)
                 
-                ax.text(0.05, 0.90, f"$\mu$={mean_val:.2f}", transform=ax.transAxes, 
-                        fontsize=12, color=mean_color, fontproperties=prop_bold)
+                ax.text(0.95, 0.90, f"$\mu$={mean_val:.2f}", 
+                        transform=ax.transAxes, 
+                        fontsize=12, 
+                        color=mean_color, 
+                        fontproperties=prop_bold,
+                        ha='right', va='top',
+                        bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7)
+                        )
                 
             else:
                 ax.text(0.5, 0.5, "N/A", ha='center', va='center', fontproperties=prop_regular)
