@@ -15,7 +15,7 @@ lora_config = {
 
 hook_config_max = {
     "shiva_mode": "image",
-    "image_ratio_mode": "fixed",
+    "image_ratio_mode": "adaptive",
     "fixed_image_ratio": 0.6,
     "num_router_groups": 24,
     "bottleneck_dim": 512,
@@ -30,7 +30,7 @@ hook_config_max = {
 
 hook_config_slim = {
     "shiva_mode": "image",
-    "image_ratio_mode": "fixed",
+    "image_ratio_mode": "adaptive",
     "fixed_image_ratio": 0.6,
     "num_router_groups": 24,
     "bottleneck_dim": 64,
@@ -45,7 +45,7 @@ hook_config_slim = {
 
 hook_config_tiny = {
     "shiva_mode": "image",
-    "image_ratio_mode": "fixed",
+    "image_ratio_mode": "adaptive",
     "fixed_image_ratio": 0.6,
     "num_router_groups": 1,
     "bottleneck_dim": 64,
@@ -60,7 +60,7 @@ hook_config_tiny = {
 
 hook_config_shared = {
     "shiva_mode": "image",
-    "image_ratio_mode": "fixed",
+    "image_ratio_mode": "adaptive",
     "fixed_image_ratio": 0.6,
     "num_router_groups": 1,
     "bottleneck_dim": 256,
@@ -75,7 +75,7 @@ hook_config_shared = {
 
 hook_config_grouped = {
     "shiva_mode": "image",
-    "image_ratio_mode": "fixed",
+    "image_ratio_mode": "adaptive",
     "fixed_image_ratio": 0.6,
     "num_router_groups": 4,
     "bottleneck_dim": 128,
@@ -96,7 +96,7 @@ hook_config = {
     "grouped": hook_config_grouped,
 }
 
-prefix = 'shared'
+prefix = 'max'
 
 trainer_config = {
     "metadata_file": "../dataset/MJHQ-30K/train.jsonl",
@@ -109,7 +109,7 @@ trainer_config = {
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config[prefix]),
     "caption_dropout_rate": 0.1,
-    "num_epochs": 4,
+    "num_epochs": 6,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 16,
     "optimizer": "AdamW",
@@ -135,14 +135,14 @@ trainer_config = {
             # Stage 0: Router Warmup 
             # ------------------------------------------------------------------
             {
-                "steps": 7000, 
+                "steps": 10500, 
                 "weights": {
                     "ratio": [0.0, 0.0, 0.0], 
                     "gate": 0.0,
-                    "distill": [1.0, 0.0]
+                    "distill": [0.0, 0.0]
                 },
                 # LR: [Base(Router), LoRA, Gate, Fuser, Policy, CtxRatio, CtxPruner]
-                "lr": [5e-4, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
+                "lr": [5e-4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                 "temp": [5.0, 10.0, 10.0, 20.0],
             },
         ],
