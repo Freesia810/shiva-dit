@@ -182,7 +182,8 @@ class DiffusionModelTrainer:
                 "temp": [5.0, 5.0],
             })
         else:
-            for i, stage in enumerate(self.config.extra_config['stage_schedule']):
+            schedule_list = self.config.extra_config['stage_schedule']
+            for i, stage in enumerate(schedule_list):
                 stage_duration = stage["steps"]
                 start_step = current_step_threshold
                 is_last_stage = (i == len(schedule_list) - 1)
