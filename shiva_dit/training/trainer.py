@@ -111,8 +111,6 @@ class DiffusionModelTrainer:
             config.seed
         )
 
-        self._setup_scaled_steps()
-
         self._setup_models_and_components()
 
         self._setup_hooks()
@@ -125,6 +123,8 @@ class DiffusionModelTrainer:
             1, len(self.train_dataloader) // config.gradient_accumulation_steps
         )
         self.num_training_steps = num_update_steps_per_epoch * config.num_epochs
+
+        self._setup_scaled_steps()
 
         self._prepare_with_accelerator()
 
