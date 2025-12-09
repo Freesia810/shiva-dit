@@ -1524,6 +1524,7 @@ class DiffusionModelTrainer:
 
         try:
             import matplotlib.pyplot as plt
+            import matplotlib.gridspec as gridspec
             import numpy as np
         except ImportError:
             return
@@ -1537,19 +1538,21 @@ class DiffusionModelTrainer:
 
         steps = 50
         # Time: 0.0 (Clean) -> 1.0 (Noise)
-        t_values = torch.linspace(0, 1, steps, device=self.device) 
-        l_values = torch.arange(total_layers, device=self.device, dtype=t_values.dtype)
-        t_grid, l_grid = torch.meshgrid(t_values, l_values, indexing='ij') 
+        t_values_tensor = torch.linspace(0, 1, steps, device=self.device) 
+        l_values_tensor = torch.arange(total_layers, device=self.device, dtype=t_values_tensor.dtype)
         
+        # Grid construction
+        t_grid, l_grid = torch.meshgrid(t_values_tensor, l_values_tensor, indexing='ij') 
         t_flat = t_grid.reshape(-1) # (Steps * Layers, )
         l_flat = l_grid.reshape(-1) # (Steps * Layers, )
         
+        # Prepare Time Embedding if needed
         temb_input = None
         with torch.no_grad():
             try:
                 unwrapped_model = self.accelerator.unwrap_model(self.model)
                 if self.model_type in ["sd3", "flux-dev", "pixart-sigma", "flux-kontext"]:
-                    t_model_input = t_flat * 1000.0 # Scale to 0-1000
+                    t_model_input = t_flat * 1000.0 # Scale to 0-1000 for model
                     if self.model_type in ["flux-dev", "flux-kontext"]:
                         t_model_input = t_model_input / 1000.0
                     
@@ -1572,62 +1575,60 @@ class DiffusionModelTrainer:
                 if policy is None:
                     continue
                 
+                # --- 1. Determine Input Dimension & Format ---
                 input_dim = 1
                 if hasattr(policy, "time_proj") and len(policy.time_proj) > 0:
                     if isinstance(policy.time_proj[0], torch.nn.Linear):
                         input_dim = policy.time_proj[0].in_features
-                # elif hasattr(policy, "time_base_mlp") and len(policy.time_base_mlp) > 0:
-                #     if isinstance(policy.time_base_mlp[0], torch.nn.Linear):
-                #         input_dim = policy.time_base_mlp[0].in_features
                 elif hasattr(policy, "in_layer"):
                     input_dim = policy.in_layer.in_features - policy.layer_embedder.embedding_dim
                 
                 p_param = next(policy.parameters())
                 
                 if input_dim > 1:
-                    # Vector Input
+                    # Vector Input (Time Embedding)
                     if temb_input is None:
                         print(f"[Viz] Skipping {alias}: Requires temb vector but extraction failed.")
                         continue
                     policy_input = temb_input.to(dtype=p_param.dtype)
                 else:
+                    # Scalar Input
                     policy_input = t_flat.unsqueeze(-1).to(dtype=p_param.dtype)
 
+                # --- 2. Forward Pass ---
                 logits = policy(policy_input, l_flat.long())
 
+                # --- 3. Optional: Analyze Time Cosine Sim (Debug Info) ---
                 if hasattr(policy, "time_proj"):
                     try:
                         time_out = policy.time_proj(policy_input)
                         if time_out.shape[-1] % 2 == 0:
                             scale_flat, shift_flat = time_out.chunk(2, dim=-1)
-                            
                             scale_grid = scale_flat.reshape(steps, total_layers, -1)
                             shift_grid = shift_flat.reshape(steps, total_layers, -1)
                             
-                            vec_start_scale = scale_grid[0, 0, :] # [Dim]
-                            vec_end_scale = scale_grid[-1, 0, :]  # [Dim]
-                            
+                            # Compare t=0 vs t=1 at Layer 0
+                            vec_start_scale = scale_grid[0, 0, :] 
+                            vec_end_scale = scale_grid[-1, 0, :]
                             vec_start_shift = shift_grid[0, 0, :]
                             vec_end_shift = shift_grid[-1, 0, :]
                             
                             sim_scale = torch.nn.functional.cosine_similarity(vec_start_scale, vec_end_scale, dim=0).item()
                             sim_shift = torch.nn.functional.cosine_similarity(vec_start_shift, vec_end_shift, dim=0).item()
                             
-                            print(f"[Viz Analysis] {alias.upper()} Time Cosine Similarity (t=0 vs t=1):")
-                            print(f"  Scale Sim: {sim_scale:.4f}")
-                            print(f"  Shift Sim: {sim_shift:.4f}  (Lower = Stronger Time Differentiation)")
+                            print(f"[Viz Analysis] {alias.upper()} Cosine Sim (t=0 vs t=1): Scale={sim_scale:.3f}, Shift={sim_shift:.3f}")
                     except Exception as e:
                         pass
                 
+                # --- 4. Get Values (Ratio or Prob) ---
                 if "gater" in alias:
-                    # Gater Output: (B, 2) -> [Prune, Fuse] -> Softmax -> Index 1
                     probs = torch.softmax(logits, dim=-1)
                     values = probs[:, 1]
                 else:
-                    # Ratio Output: (B, 1) -> Sigmoid
                     values = torch.sigmoid(logits).reshape(-1)
 
-                # Reshape back to (Steps, Layers)
+                # Reshape to (Steps, Layers) for plotting
+                # Axis 0: Time (0->1), Axis 1: Layer (0->N)
                 grid_values = values.reshape(steps, total_layers).float().cpu().numpy()
 
                 print(f"\n{'='*20} Policy Visualization: {alias.upper()} ({metric_name}) {'='*20}")
@@ -1637,19 +1638,63 @@ class DiffusionModelTrainer:
                     print(grid_values)
                 print(f"{'='*60}\n")
 
-                fig, ax = plt.subplots(figsize=(10, 6))
-                cax = ax.imshow(grid_values, aspect='auto', origin='lower', 
-                                extent=[0, total_layers, 0, 1], 
-                                vmin=0, vmax=1, cmap='viridis')
+                # --- 5. Compute Marginals (Means) ---
+                # Avg over time (for each layer)
+                layer_means = grid_values.mean(axis=0) # Shape: (total_layers,)
+                # Avg over layers (for each timestep)
+                time_means = grid_values.mean(axis=1)  # Shape: (steps,)
                 
-                ax.set_xlabel('Layer Index (Input -> Output)')
-                ax.set_ylabel('Timestep (0.0=Clean -> 1.0=Noise)')
-                ax.set_title(f'Adaptive {alias.title()} - {metric_name}')
-                
-                cbar = fig.colorbar(cax, ax=ax)
-                cbar.set_label(metric_name)
+                # Numpy arrays for axis plotting
+                t_plot_axis = t_values_tensor.cpu().numpy()
+                l_plot_axis = np.arange(total_layers)
 
-                self.logger.log_figure(f"policy_viz/{alias}_landscape", fig, self.global_step)
+                print(f"[{alias.upper()}] Mean: {grid_values.mean():.4f} | Range: {grid_values.min():.4f}-{grid_values.max():.4f}")
+
+                # --- 6. Plotting with GridSpec ---
+                fig = plt.figure(figsize=(12, 10))
+                # Layout: 4x4 grid. 
+                # Top-Left (3x3): Main Heatmap. 
+                # Top (Row 0): Layer Curve. 
+                # Right (Col 3): Time Curve.
+                gs = gridspec.GridSpec(4, 4, width_ratios=[1, 1, 1, 0.5], height_ratios=[0.5, 1, 1, 1], wspace=0.1, hspace=0.1)
+
+                # A. Layer Curve (Top) - Share X with Heatmap
+                ax_layer = fig.add_subplot(gs[0, 0:3])
+                ax_layer.plot(l_plot_axis, layer_means, color='#1f77b4', linewidth=2, marker='o', markersize=3)
+                ax_layer.set_xlim(0, total_layers-1)
+                ax_layer.set_ylabel('Avg', fontsize=9)
+                ax_layer.set_title(f'{alias.title()} - Layer-wise Avg', fontsize=11)
+                ax_layer.grid(True, linestyle=':', alpha=0.6)
+                plt.setp(ax_layer.get_xticklabels(), visible=False) # Hide x labels
+
+                # B. Time Curve (Right) - Share Y with Heatmap
+                ax_time = fig.add_subplot(gs[1:4, 3])
+                # Plot Time on Y-axis to match heatmap orientation
+                ax_time.plot(time_means, t_plot_axis, color='#d62728', linewidth=2, marker='.', markersize=3)
+                ax_time.set_ylim(0, 1) # Time 0->1
+                ax_time.set_xlabel('Avg', fontsize=9)
+                ax_time.set_title(f'Time Trend', fontsize=11)
+                ax_time.grid(True, linestyle=':', alpha=0.6)
+                plt.setp(ax_time.get_yticklabels(), visible=False) # Hide y labels
+
+                # C. Main Heatmap (Center)
+                ax_heatmap = fig.add_subplot(gs[1:4, 0:3], sharex=ax_layer, sharey=ax_time)
+                # origin='lower' means index 0 (Time=0) is at bottom
+                im = ax_heatmap.imshow(grid_values, aspect='auto', origin='lower',
+                                     extent=[0, total_layers-1, 0, 1],
+                                     vmin=0, vmax=1, cmap='magma') # magma/inferno contrast better
+                
+                ax_heatmap.set_xlabel('Transformer Layers', fontsize=10)
+                ax_heatmap.set_ylabel('Timestep (0=Clean -> 1=Noise)', fontsize=10)
+                
+                # Add Colorbar (Inset or separate axis)
+                cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.2]) # [left, bottom, width, height]
+                fig.colorbar(im, cax=cbar_ax, label=metric_name)
+
+                plt.suptitle(f'{alias.title()} Policy Analysis\nGlobal Mean: {grid_values.mean():.4f}', y=0.96, fontsize=14)
+                
+                # --- 7. Log Figure ---
+                self.logger.log_figure(f"policy_viz/{alias}_combined", fig, self.global_step)
                 plt.close(fig)
 
     def _log_router_visualization(self, batch=None):

@@ -160,7 +160,7 @@ class ShivaRatioPolicy(nn.Module):
 
         with torch.no_grad():
             last_linear = self.time_proj[-1] 
-            last_linear.weight.data.normal_(0, 0.05)
+            last_linear.weight.data.normal_(0, 0.001)
             last_linear.bias.data.fill_(0)
 
         head = self.mix_mlp[-1]
@@ -183,16 +183,16 @@ class ShivaRatioPolicy(nn.Module):
         
         scale, shift = self.time_proj(temb).chunk(2, dim=-1)
 
-        # if self.training and torch.rand(1) < 0.01:
-        #     with torch.no_grad():
-        #         mag_layer = l_feat.abs().mean()
-        #         mag_time_scale = scale.abs().mean()
-        #         mag_time_shift = shift.abs().mean()
-        #         ratio_impact = (mag_time_scale + mag_time_shift) / (mag_layer + 1e-6)
+        if self.training and torch.rand(1) < 1e-3:
+            with torch.no_grad():
+                mag_layer = l_feat.abs().mean()
+                mag_time_scale = scale.abs().mean()
+                mag_time_shift = shift.abs().mean()
+                ratio_impact = (mag_time_scale + mag_time_shift) / (mag_layer + 1e-6)
                 
-        #         print(f"\n[Policy Monitor] LayerMag: {mag_layer:.4f} | "
-        #               f"TimeScale: {mag_time_scale:.4f} | TimeShift: {mag_time_shift:.4f} | "
-        #               f"Time/Layer Ratio: {ratio_impact:.4f}")
+                print(f"\n[Policy Monitor] LayerMag: {mag_layer:.4f} | "
+                      f"TimeScale: {mag_time_scale:.4f} | TimeShift: {mag_time_shift:.4f} | "
+                      f"Time/Layer Ratio: {ratio_impact:.4f}")
 
         if l_feat.shape[0] != scale.shape[0]:
              l_feat = l_feat.expand(scale.shape[0], -1)

@@ -8,3 +8,5 @@ mlruns/
 shiva_env/
 *.pt
 *.ttf
+*.pdf
+*.csv
