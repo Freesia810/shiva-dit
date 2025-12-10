@@ -491,26 +491,25 @@ def collect_policy_gradient_stats(model, hook_manager, device) -> dict:
         if policy_net is None: continue
 
         layer_grad_norm_total = torch.tensor(0.0, device=device)
-        
         time_grad_norm_total = torch.tensor(0.0, device=device)
         mlp_grad_norm_total = torch.tensor(0.0, device=device)
 
+        # --- 1. Layer Embeddings ---
         if hasattr(policy_net, 'layer_emb'):
             param = policy_net.layer_emb.weight
             if param.grad is not None:
                 grad = param.grad.detach()
                 layer_grad_norm_total = grad.norm() 
                 
-                if verbose_log:
-                    layer_norms = grad.norm(dim=1)
-                    active_mask = layer_norms > 1e-8
-                    active_layer_norms = layer_norms[active_mask]
-                    
-                    if active_layer_norms.numel() > 0:
-                        layer_mean = active_layer_norms.mean()
-                        layer_std = active_layer_norms.std()
-                        stats[f"grad/{name}/layer_proj_active_mean"] = layer_mean.item()
-                        stats[f"grad/{name}/layer_sensitivity_cv"] = (layer_std / (layer_mean + 1e-6)).item()
+                layer_norms = grad.norm(dim=1)
+                active_mask = layer_norms > 1e-8
+                active_layer_norms = layer_norms[active_mask]
+                
+                if active_layer_norms.numel() > 0:
+                    layer_mean = active_layer_norms.mean()
+                    layer_std = active_layer_norms.std()
+                    stats[f"grad/{name}/layer_proj_active_mean"] = layer_mean.item()
+                    stats[f"grad/{name}/layer_sensitivity_cv"] = (layer_std / (layer_mean + 1e-6)).item()
 
         # --- 2. Time Branch ---
         time_stats = None
@@ -526,13 +525,16 @@ def collect_policy_gradient_stats(model, hook_manager, device) -> dict:
                 grad = param.grad.detach()
                 time_grad_norm_total = grad.norm()
                 
-                if verbose_log: 
-                    out_dim = grad.shape[0]
-                    scale_grad = grad[:out_dim//2, :]
-                    shift_grad = grad[out_dim//2:, :]
-                    norm_scale = scale_grad.norm()
-                    norm_shift = shift_grad.norm()
-                    time_stats = {"scale": norm_scale, "shift": norm_shift}
+                out_dim = grad.shape[0]
+                scale_grad = grad[:out_dim//2, :]
+                shift_grad = grad[out_dim//2:, :]
+                norm_scale = scale_grad.norm()
+                norm_shift = shift_grad.norm()
+                
+                time_stats = {"scale": norm_scale, "shift": norm_shift}
+                
+                stats[f"grad/{name}/temb_scale_norm"] = norm_scale.item()
+                stats[f"grad/{name}/temb_shift_norm"] = norm_shift.item()
 
         # --- 3. MLP Branch ---
         if hasattr(policy_net, 'mix_mlp'):
@@ -541,6 +543,7 @@ def collect_policy_gradient_stats(model, hook_manager, device) -> dict:
                 mlp_grad_norm_total = torch.stack(grad_list).sum().sqrt()
                 stats[f"grad/{name}/mlp_head_norm"] = mlp_grad_norm_total.item()
 
+        # --- Printing Logic ---
         if verbose_log and (layer_grad_norm_total > 0 or time_grad_norm_total > 0):
             l_val = layer_grad_norm_total.item()
             t_val = time_grad_norm_total.item()

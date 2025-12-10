@@ -146,8 +146,8 @@ class ShivaRatioPolicy(nn.Module):
                     print(f"      Logits:  Mean={logits.mean().item():.4f} | Std={logits.std().item():.4f} | Range=[{logits.min().item():.4f}, {logits.max().item():.4f}]")
                     print(f"      Probs:   Mean={probs.mean().item():.4f}  | Std={probs.std().item():.4f}  | Range=[{probs.min().item():.4f}, {probs.max().item():.4f}]")
                     print(f"  > Weight Analysis:")
-                    print(f"      Layer Emb Mag:  {mag_layer:.4f}")
-                    print(f"      Time Scale Mag: {mag_time_scale:.4f} | Shift Mag: {mag_time_shift:.4f}")
+                    print(f"      Layer Emb Mean:  {mag_layer:.4f}")
+                    print(f"      Time Scale Mean: {mag_time_scale:.4f} | Shift Mean: {mag_time_shift:.4f}")
                     print(f"{'='*78}\n")
 
         return logits
