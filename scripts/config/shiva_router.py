@@ -63,8 +63,8 @@ hook_config_shared = {
     "image_ratio_mode": "adaptive",
     "fixed_image_ratio": 0.6,
     "num_router_groups": 1,
-    "bottleneck_dim": 256,
-    "layer_embed_dim": 64,
+    "bottleneck_dim": 512,
+    "layer_embed_dim": 128,
     "fuse_expert_ffn_mult": 2,
     "use_gater_lut": False,
     
@@ -96,7 +96,7 @@ hook_config = {
     "grouped": hook_config_grouped,
 }
 
-prefix = 'max'
+prefix = 'slim'
 
 trainer_config = {
     "metadata_file": "../dataset/MJHQ-30K/train.jsonl",
@@ -142,7 +142,7 @@ trainer_config = {
                     "distill": [0.0, 0.0]
                 },
                 # LR: [Base(Router), LoRA, Gate, Fuser, Policy, CtxRatio, CtxPruner]
-                "lr": [5e-4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                "lr": [2e-4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                 "temp": [5.0, 10.0, 10.0, 20.0],
             },
         ],
