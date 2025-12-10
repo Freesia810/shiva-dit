@@ -1,9 +1,9 @@
 import torch
 from diffusers.pipelines.flux.pipeline_flux_kontext import retrieve_latents
 
-def stratified_timestep_sampler(batch_size, num_timesteps, device):
+def stratified_timestep_sampler(batch_size, num_timesteps, device, generator=None):
     if batch_size > num_timesteps:
-        return torch.randint(0, num_timesteps, (batch_size,), device=device)
+        return torch.randint(0, num_timesteps, (batch_size,), device=device, generator=generator)
 
     boundaries = torch.linspace(0, num_timesteps, batch_size + 1, device=device).long()
     
@@ -11,11 +11,11 @@ def stratified_timestep_sampler(batch_size, num_timesteps, device):
     
     spans = boundaries[1:] - boundaries[:-1]
     
-    offsets = (torch.rand(batch_size, device=device) * spans).long()
+    offsets = (torch.rand(batch_size, device=device, generator=generator) * spans).long()
     
     indices = start_indices + offsets
 
-    indices = indices[torch.randperm(batch_size, device=device)]
+    indices = indices[torch.randperm(batch_size, device=device, generator=generator)]
     
     return indices
 
@@ -29,10 +29,14 @@ def get_stratified_indices_from_buffer(trainer, micro_batch_size):
         
         total_batch_size = max(total_batch_size, micro_batch_size)
 
+        local_seed = trainer.config.seed + trainer.accelerator.process_index
+        rng_gen = torch.Generator(device=trainer.device).manual_seed(local_seed)
+
         new_indices = stratified_timestep_sampler(
             total_batch_size,
             trainer.scheduler.config.num_train_timesteps,
-            trainer.device
+            trainer.device,
+            generator=rng_gen
         )
         
         trainer.timestep_buffer.extend(new_indices.tolist())

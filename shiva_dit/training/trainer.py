@@ -115,6 +115,12 @@ class DiffusionModelTrainer:
 
         self._setup_hooks()
 
+        self.skip_layer_indices = []
+        if self.config.trainable_hook_config:
+            _, hook_kwargs = self.config.trainable_hook_config
+            self.skip_layer_indices = hook_kwargs.get("skip_layer_indices", [])
+            print(f"[Trainer] Skip layer indices: {self.skip_layer_indices}")
+
         self.optimizer = self._setup_model_and_optimizer()
 
         self._setup_dataloaders()
@@ -543,33 +549,24 @@ class DiffusionModelTrainer:
                 "grad/img_policy/temb_proj_std",
                 "grad/img_policy/layer_proj_std",
             ],
-            "topkgrads/soft_ranks": [
-                "topkgrads/soft_ranks_mean",
-                "topkgrads/soft_ranks_min",
-                "topkgrads/soft_ranks_max",
+            "topk/status": [
+                "topk/status/active_tokens",
+                "topk/status/boundary_width",
+                "topk/status/rank_spread",
+                "topk/status/k_target"
             ],
-            "topkgrads/grad_probs": [
-                "topkgrads/grad_probs_norm",
-                "topkgrads/grad_probs_sum",
-                "topkgrads/grad_probs_std",
+            "topk/grad": [
+                "topk/grad/logits_norm",
+                "topk/grad/k_norm",
+                "topk/grad/k_mean",
             ],
-            "topkgrads/grad_k": [
-                "topkgrads/grad_k_norm",
-                "topkgrads/grad_k_std",
-                "topkgrads/grad_k_mean",
-            ],
-            "topkgrads/gap": [
-                "topkgrads/gap_mean",
-            ],
-            "topkgrads/grad_k_pos_rate": [
-                "topkgrads/grad_k_pos_rate",
-            ],
-            "topkgrads/module": [
-                "topkgrads/router_avg_norm",
-                "topkgrads/gater_policy_avg_norm",
-                "topkgrads/image_ratio_policy_avg_norm",
-                "topkgrads/context_ratio_policy_avg_norm",
-                "topkgrads/context_pruner_avg_norm",
+
+            "grad/module": [
+                "grad/router_avg_norm",
+                "grad/gater_policy_avg_norm",
+                "grad/image_ratio_policy_avg_norm",
+                "grad/context_ratio_policy_avg_norm",
+                "grad/context_pruner_avg_norm",
             ],
 
             "diffcr/stats": [
@@ -877,15 +874,13 @@ class DiffusionModelTrainer:
     def _print_setup_summary(self):
         if self.accelerator.is_main_process:
             config = self.config
-            print(f"--- Training Config ---")
-            print(f"  Mode: {config.training_mode}")
-            print(f"  Micro Batch Size: {config.train_batch_size}")
-            print(f"  Grad Acc Step: {config.gradient_accumulation_steps}")
-            print(
-                f"  Actual Batch Size: {config.train_batch_size * config.gradient_accumulation_steps}"
-            )
-            print(f"  Total training steps: {self.num_training_steps}")
-            print(f"------------------")
+            print(f"\n{'='*20} Training Config {'='*20}")
+            print(f"  Mode:                {config.training_mode}")
+            print(f"  Micro Batch Size:    {config.train_batch_size}")
+            print(f"  Grad Accum Steps:    {config.gradient_accumulation_steps}")
+            print(f"  Global Batch Size:   {config.train_batch_size * config.gradient_accumulation_steps * self.accelerator.num_processes}")
+            print(f"  Total Steps:         {self.num_training_steps}")
+            print(f"{'='*57}\n")
 
     def _prepare_model_inputs(self, batch):
         img_latents, noise, noisy_latents, timesteps, model_kwargs = (
@@ -1062,10 +1057,12 @@ class DiffusionModelTrainer:
 
         return config
 
-    def _calculate_hook_loss(self, global_step: int, timestep: torch.Tensor):
+    def _calculate_hook_loss(self, global_step: int, timestep: torch.Tensor, is_validation: bool = False):
         total_hook_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
         aggregated_metrics = {}
         self.step_per_layer_metrics = {}
+
+        current_state_buffer = self.state_buffer if not is_validation else {}
 
         if self.hook_type == "diffcr":
             loss_config = self.config.extra_config
@@ -1100,7 +1097,7 @@ class DiffusionModelTrainer:
         
         # 2. Image Ratio Loss
         img_ratio_loss, img_r_metrics, per_layer_ratios = (
-            shiva_metrics.calculate_image_ratio_loss(loss_config, self.device, self.state_buffer)
+            shiva_metrics.calculate_image_ratio_loss(loss_config, self.device, current_state_buffer)
         )
         
         # 3. Context Ratio Loss
@@ -1150,7 +1147,7 @@ class DiffusionModelTrainer:
 
         return total_hook_loss, aggregated_metrics
 
-    def _compute_loss(self, batch, global_step: int):
+    def _compute_loss(self, batch, global_step: int, is_validation: bool = False):
         img_latents, noise, noisy_latents, timesteps, model_kwargs = (
             self._prepare_model_inputs(batch)
         )
@@ -1169,7 +1166,7 @@ class DiffusionModelTrainer:
         )
 
         main_loss = self._calculate_main_loss(noise_pred, noise, img_latents)
-        hook_loss, hook_metrics = self._calculate_hook_loss(global_step, timesteps)
+        hook_loss, hook_metrics = self._calculate_hook_loss(global_step, timesteps, is_validation=is_validation)
 
         total_loss = main_loss + hook_loss + distill_loss_final + distill_loss_mid
 
@@ -1177,81 +1174,123 @@ class DiffusionModelTrainer:
 
     def _train_step(self, batch):
         total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid, hook_metrics, timesteps = (
-            self._compute_loss(batch, self.global_step)
+            self._compute_loss(batch, self.global_step, is_validation=False)
         )
 
-        # =================================================================
-        # [DEBUG START] Gradient Component Analysis (Enhanced)
-        # =================================================================
-        debug_interval = 50 
-        if self.global_step % debug_interval == 0 and self.accelerator.is_main_process:
+        if torch.rand(1) < 1e-3 and self.accelerator.is_main_process:
+            print(f"\n{'='*30} [Gradient Analysis Monitor Step {self.global_step}] {'='*30}")
             
-            # 1. 获取 Policy 参数并分类
-            policy_params = []
-            time_params = []   # 专门存放 time_proj 的参数
-            layer_params = []  # 专门存放 layer_emb 的参数
+            t_min, t_max = timesteps.min().item(), timesteps.max().item()
+            t_std = timesteps.float().std().item()
+            curr_avg_ratio = hook_metrics.get("image_ratio/avg_ratio", float('nan'))
             
-            for hook in HookManager.get_all_hooks().values():
-                if hasattr(hook, 'image_ratio_policy') and hook.image_ratio_policy is not None:
-                    policy = hook.image_ratio_policy
-                    policy_params.extend(list(policy.parameters()))
-                    
-                    # 分类抓取关键参数
-                    time_params.extend(list(policy.time_proj.parameters()))
-                    layer_params.extend(list(policy.layer_emb.parameters()))
+            print(f"  > Batch Info:")
+            print(f"    Timesteps: Min={t_min:.1f} | Max={t_max:.1f} | Std={t_std:.1f} | Sample={timesteps[:4].int().tolist()}...")
+            if not isinstance(curr_avg_ratio, float) or not (curr_avg_ratio != curr_avg_ratio): # check nan
+                print(f"    Avg Ratio: {curr_avg_ratio:.4f}")
 
-            if len(policy_params) > 0:
-                # --- 打印当前 Batch 的时间步情况 ---
-                # 验证分层采样是否让每个 micro-batch 都覆盖了高低噪
-                t_min = timesteps.min().item()
-                t_max = timesteps.max().item()
-                t_std = timesteps.float().std().item()
-                # 同时也尝试打印一下当前的平均 Ratio（从 metrics 里拿）
-                curr_avg_ratio = hook_metrics.get("image_ratio/avg_ratio", -1.0)
+            param_groups = {
+                "Router": [],
+                "Gater": [],
+                "Ratio(Time)": [],
+                "Ratio(Layer)": [],
+                "Ratio(Mix)": [],
+                "Fuser": [],
+                "Ctx(Pruner)": [],
+                "Ctx(Policy)": [],
+                "Base Model": []
+            }
+
+            for name, param in self.model.named_parameters():
+                if not param.requires_grad:
+                    continue
                 
-                print(f"\n[Gradient Component Analysis Step {self.global_step}]")
-                print(f"  > Batch Timesteps: Min={t_min}, Max={t_max}, Std={t_std:.1f} (Sample: {timesteps[:8].tolist()})")
-                if curr_avg_ratio != -1.0:
-                    print(f"  > Current Avg Ratio: {curr_avg_ratio:.4f}")
+                if "router." in name:
+                    param_groups["Router"].append(param)
+                elif "gater_policy." in name:
+                    param_groups["Gater"].append(param)
+                elif "image_ratio_policy." in name:
+                    if "time_proj" in name: param_groups["Ratio(Time)"].append(param)
+                    elif "layer_emb" in name: param_groups["Ratio(Layer)"].append(param)
+                    else: param_groups["Ratio(Mix)"].append(param)
+                elif "fuse_expert" in name or "fuser" in name:
+                    param_groups["Fuser"].append(param)
+                elif "context_pruner" in name:
+                    param_groups["Ctx(Pruner)"].append(param)
+                elif "context_ratio_policy" in name:
+                    param_groups["Ctx(Policy)"].append(param)
+                elif "_hook" not in name:
+                    param_groups["Base Model"].append(param)
 
-                # 2. 测量 Main Loss (困难链路)
+            def measure_grads(loss_tensor, desc):
+                if loss_tensor.item() == 0.0:
+                    return {k: (0.0, 0.0) for k in param_groups}
+                
                 self.optimizer.zero_grad(set_to_none=True)
-                self.accelerator.backward(main_loss, retain_graph=True)
+                self.accelerator.backward(loss_tensor, retain_graph=True)
                 
-                def get_grad_norm(params):
-                    norm = 0.0
-                    max_g = 0.0
+                stats = {}
+                for group_name, params in param_groups.items():
+                    if not params:
+                        stats[group_name] = (0.0, 0.0)
+                        continue
+                    
+                    total_norm_sq = 0.0
+                    max_val = 0.0
+                    has_grad = False
                     for p in params:
                         if p.grad is not None:
-                            val = p.grad.detach().data.norm(2).item()
-                            norm += val ** 2
-                            max_g = max(max_g, p.grad.detach().abs().max().item())
-                    return (norm ** 0.5), max_g
+                            has_grad = True
+                            g_norm = p.grad.detach().data.norm(2).item()
+                            total_norm_sq += g_norm ** 2
+                            max_val = max(max_val, p.grad.detach().abs().max().item())
+                    
+                    if has_grad:
+                        stats[group_name] = (total_norm_sq ** 0.5, max_val)
+                    else:
+                        stats[group_name] = (0.0, 0.0)
+                return stats
 
-                grad_main_total, _ = get_grad_norm(policy_params)
-                grad_main_time, _  = get_grad_norm(time_params)  # 看看时间层收到梯度了吗？
-                grad_main_layer, _ = get_grad_norm(layer_params) # 看看层索引收到梯度了吗？
+            main_stats = measure_grads(main_loss, "Main")
+            hook_stats = measure_grads(hook_loss, "Hook")
+            
+            # Header
+            print(f"\n  > Component Gradient Analysis (Norm / Max):")
+            header = f"    {'Module Name':<15} | {'Main Grad':<18} | {'Hook Grad':<18} | {'Force Ratio (H/M)':<18}"
+            print(header)
+            print(f"    {'-'*len(header)}")
 
-                # 3. 测量 Hook Loss (MSE 正则项)
-                self.optimizer.zero_grad(set_to_none=True)
-                self.accelerator.backward(hook_loss, retain_graph=True)
-                grad_hook_total, _ = get_grad_norm(policy_params)
-
-                # 4. 打印深度分析
-                ratio_force = grad_hook_total / (grad_main_total + 1e-9)
+            for name in ["Router", "Gater", "Ratio(Time)", "Ratio(Layer)", "Ratio(Mix)", "Fuser", "Ctx(Policy)", "Ctx(Pruner)"]:
+                if name not in param_groups or not param_groups[name]:
+                    continue
                 
-                print(f"  > Main Loss Grad: Total={grad_main_total:.4f}")
-                print(f"      - Time Branch Grad : {grad_main_time:.4f}  <-- 关注这里！")
-                print(f"      - Layer Branch Grad: {grad_main_layer:.4f}")
-                print(f"  > Hook Loss Grad: Total={grad_hook_total:.4f}")
-                print(f"  > Force Ratio (Hook/Main): {ratio_force:.2f}x")
-                
-                if grad_main_time < 1e-4 and grad_main_layer > 1e-2:
-                    print("  ⚠️ ALERT: Model is learning Layer bias but IGNORING Time!")
+                m_norm, m_max = main_stats[name]
+                h_norm, h_max = hook_stats[name]
 
-                # --- 恢复现场 ---
-                self.optimizer.zero_grad(set_to_none=True)
-        # =================================================================
+                if m_norm < 1e-9:
+                    if h_norm > 1e-9: ratio_str = "INF (Hook Only)"
+                    else: ratio_str = "0.00x (No Grad)"
+                else:
+                    ratio = h_norm / m_norm
+                    ratio_str = f"{ratio:.2f}x"
+
+                m_str = f"{m_norm:.4f} / {m_max:.4f}"
+                h_str = f"{h_norm:.4f} / {h_max:.4f}"
+                
+                marker = ""
+                if "Ratio" in name and m_norm < 1e-5 and h_norm > 1e-3:
+                    marker = " <!! No Main Grad" 
+                
+                print(f"    {name:<15} | {m_str:<18} | {h_str:<18} | {ratio_str:<18}{marker}")
+
+            rt_norm, _ = main_stats.get("Ratio(Time)", (0,0))
+            rl_norm, _ = main_stats.get("Ratio(Layer)", (0,0))
+            if rt_norm < 1e-5 and rl_norm > 1e-3:
+                 print(f"\n  ⚠️  [ALERT] RatioPolicy implies 'Layer Bias' learning but IGNORING 'Time' info!")
+                 print(f"      Layer Grad: {rl_norm:.5f} vs Time Grad: {rt_norm:.5f}")
+
+            self.optimizer.zero_grad(set_to_none=True)
+            print(f"{'='*86}\n")
 
         self.accelerator.backward(total_loss)
         if self.config.enable_gradient_checkpointing:
@@ -1518,11 +1557,11 @@ class DiffusionModelTrainer:
                 elif "context_ratio_policy." in name: grads_ctx_ratio.append(gn)
                 elif "context_pruner." in name: grads_ctx_pruner.append(gn)
 
-            if grads_router: shiva_grad_metrics["topkgrads/router_avg_norm"] = torch.stack(grads_router).mean()
-            if grads_gate: shiva_grad_metrics["topkgrads/gater_policy_avg_norm"] = torch.stack(grads_gate).mean()
-            if grads_img_ratio: shiva_grad_metrics["topkgrads/image_ratio_policy_avg_norm"] = torch.stack(grads_img_ratio).mean()
-            if grads_ctx_ratio: shiva_grad_metrics["topkgrads/context_ratio_policy_avg_norm"] = torch.stack(grads_ctx_ratio).mean()
-            if grads_ctx_pruner: shiva_grad_metrics["topkgrads/context_pruner_avg_norm"] = torch.stack(grads_ctx_pruner).mean()
+            if grads_router: shiva_grad_metrics["grad/router_avg_norm"] = torch.stack(grads_router).mean()
+            if grads_gate: shiva_grad_metrics["grad/gater_policy_avg_norm"] = torch.stack(grads_gate).mean()
+            if grads_img_ratio: shiva_grad_metrics["grad/image_ratio_policy_avg_norm"] = torch.stack(grads_img_ratio).mean()
+            if grads_ctx_ratio: shiva_grad_metrics["grad/context_ratio_policy_avg_norm"] = torch.stack(grads_ctx_ratio).mean()
+            if grads_ctx_pruner: shiva_grad_metrics["grad/context_pruner_avg_norm"] = torch.stack(grads_ctx_pruner).mean()
 
             metrics_to_log_tensors.update(shiva_grad_metrics)
 
@@ -1615,22 +1654,32 @@ class DiffusionModelTrainer:
         total_layers = getattr(hook, "total_layers", 1)
 
         steps = 50
-        # Time: 0.0 (Clean) -> 1.0 (Noise)
-        t_values_tensor = torch.linspace(0, 1, steps, device=self.device) 
-        l_values_tensor = torch.arange(total_layers, device=self.device, dtype=t_values_tensor.dtype)
+
+        scheduler_timesteps = self.scheduler.timesteps.to(self.device)
+        num_train_timesteps = len(scheduler_timesteps)
+        idx_tensor = torch.linspace(0, num_train_timesteps - 1, steps, device=self.device).long()
+        t_values_tensor = scheduler_timesteps[idx_tensor]
+        t_plot_axis = np.linspace(0, 1, steps)
+
+        valid_layers = [i for i in range(total_layers) if i not in self.skip_layer_indices]
+        valid_layers_tensor = torch.tensor(valid_layers, device=self.device)
+
+        if len(valid_layers) == 0:
+            return 
+
+        # Grid construction (Steps x Valid_Layers)
+        t_grid, l_grid = torch.meshgrid(t_values_tensor, valid_layers_tensor, indexing='ij') 
+        t_flat = t_grid.reshape(-1)
+        l_flat = l_grid.reshape(-1)
         
-        # Grid construction
-        t_grid, l_grid = torch.meshgrid(t_values_tensor, l_values_tensor, indexing='ij') 
-        t_flat = t_grid.reshape(-1) # (Steps * Layers, )
-        l_flat = l_grid.reshape(-1) # (Steps * Layers, )
-        
-        # Prepare Time Embedding if needed
+        # Prepare Time Embedding 
         temb_input = None
+
         with torch.no_grad():
             try:
                 unwrapped_model = self.accelerator.unwrap_model(self.model)
                 if self.model_type in ["sd3", "flux-dev", "pixart-sigma", "flux-kontext"]:
-                    t_model_input = t_flat * 1000.0 # Scale to 0-1000 for model
+                    t_model_input = t_flat
                     if self.model_type in ["flux-dev", "flux-kontext"]:
                         t_model_input = t_model_input / 1000.0
                     
@@ -1705,9 +1754,8 @@ class DiffusionModelTrainer:
                 else:
                     values = torch.sigmoid(logits).reshape(-1)
 
-                # Reshape to (Steps, Layers) for plotting
-                # Axis 0: Time (0->1), Axis 1: Layer (0->N)
-                grid_values = values.reshape(steps, total_layers).float().cpu().numpy()
+                # Reshape to (Steps, Valid_Layers)
+                grid_values = values.reshape(steps, len(valid_layers)).float().cpu().numpy()
 
                 print(f"\n{'='*20} Policy Visualization: {alias.upper()} ({metric_name}) {'='*20}")
                 print(f"Stats: Min={grid_values.min():.4f} | Max={grid_values.max():.4f} | Mean={grid_values.mean():.4f}")
@@ -1717,56 +1765,51 @@ class DiffusionModelTrainer:
                 print(f"{'='*60}\n")
 
                 # --- 5. Compute Marginals (Means) ---
-                # Avg over time (for each layer)
-                layer_means = grid_values.mean(axis=0) # Shape: (total_layers,)
-                # Avg over layers (for each timestep)
-                time_means = grid_values.mean(axis=1)  # Shape: (steps,)
+                layer_means = grid_values.mean(axis=0)
+                time_means = grid_values.mean(axis=1)
                 
                 # Numpy arrays for axis plotting
-                t_plot_axis = t_values_tensor.cpu().numpy()
-                l_plot_axis = np.arange(total_layers)
+                l_plot_axis = np.arange(valid_layers)
 
                 print(f"[{alias.upper()}] Mean: {grid_values.mean():.4f} | Range: {grid_values.min():.4f}-{grid_values.max():.4f}")
 
-                # --- 6. Plotting with GridSpec ---
+                # --- 6. Plotting ---
                 fig = plt.figure(figsize=(12, 10))
-                # Layout: 4x4 grid. 
-                # Top-Left (3x3): Main Heatmap. 
-                # Top (Row 0): Layer Curve. 
-                # Right (Col 3): Time Curve.
                 gs = gridspec.GridSpec(4, 4, width_ratios=[1, 1, 1, 0.5], height_ratios=[0.5, 1, 1, 1], wspace=0.1, hspace=0.1)
 
-                # A. Layer Curve (Top) - Share X with Heatmap
+                # A. Layer Curve
                 ax_layer = fig.add_subplot(gs[0, 0:3])
                 ax_layer.plot(l_plot_axis, layer_means, color='#1f77b4', linewidth=2, marker='o', markersize=3)
                 ax_layer.set_xlim(0, total_layers-1)
                 ax_layer.set_ylabel('Avg', fontsize=9)
                 ax_layer.set_title(f'{alias.title()} - Layer-wise Avg', fontsize=11)
                 ax_layer.grid(True, linestyle=':', alpha=0.6)
-                plt.setp(ax_layer.get_xticklabels(), visible=False) # Hide x labels
+                plt.setp(ax_layer.get_xticklabels(), visible=False)
 
-                # B. Time Curve (Right) - Share Y with Heatmap
+                # B. Time Curve
                 ax_time = fig.add_subplot(gs[1:4, 3])
-                # Plot Time on Y-axis to match heatmap orientation
                 ax_time.plot(time_means, t_plot_axis, color='#d62728', linewidth=2, marker='.', markersize=3)
-                ax_time.set_ylim(0, 1) # Time 0->1
+                ax_time.set_ylim(0, 1)
                 ax_time.set_xlabel('Avg', fontsize=9)
                 ax_time.set_title(f'Time Trend', fontsize=11)
                 ax_time.grid(True, linestyle=':', alpha=0.6)
-                plt.setp(ax_time.get_yticklabels(), visible=False) # Hide y labels
+                plt.setp(ax_time.get_yticklabels(), visible=False)
 
-                # C. Main Heatmap (Center)
+                # C. Main Heatmap
                 ax_heatmap = fig.add_subplot(gs[1:4, 0:3], sharex=ax_layer, sharey=ax_time)
-                # origin='lower' means index 0 (Time=0) is at bottom
-                im = ax_heatmap.imshow(grid_values, aspect='auto', origin='lower',
+                
+                full_grid = np.zeros((steps, total_layers))
+                full_grid[:] = np.nan
+                full_grid[:, valid_layers] = grid_values
+                
+                im = ax_heatmap.imshow(full_grid, aspect='auto', origin='lower',
                                      extent=[0, total_layers-1, 0, 1],
-                                     vmin=0, vmax=1, cmap='magma') # magma/inferno contrast better
+                                     vmin=0, vmax=1, cmap='magma')
                 
                 ax_heatmap.set_xlabel('Transformer Layers', fontsize=10)
-                ax_heatmap.set_ylabel('Timestep (0=Clean -> 1=Noise)', fontsize=10)
+                ax_heatmap.set_ylabel('Timestep (Bottom=Start -> Top=End)', fontsize=10)
                 
-                # Add Colorbar (Inset or separate axis)
-                cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.2]) # [left, bottom, width, height]
+                cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.2])
                 fig.colorbar(im, cax=cbar_ax, label=metric_name)
 
                 plt.suptitle(f'{alias.title()} Policy Analysis\nGlobal Mean: {grid_values.mean():.4f}', y=0.96, fontsize=14)
@@ -2065,7 +2108,7 @@ class DiffusionModelTrainer:
         for batch in val_progress_bar:
             try:
                 total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid, hook_metrics, _ = self._compute_loss(
-                    batch, global_step
+                    batch, global_step, is_validation=True
                 )
 
                 all_total_losses.append(total_loss)
