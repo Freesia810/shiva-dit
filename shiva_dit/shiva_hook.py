@@ -117,9 +117,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             ratios = ratios[torch.randperm(steps, device=device)]
             
             self._ratio_buffer = ratios.tolist()
-            
-            # if self.layer_idx == 0:
-            #     print(f"[RatioBuffer] Refilled: {[round(x, 2) for x in self._ratio_buffer]}")
 
         return self._ratio_buffer.pop(0)
 

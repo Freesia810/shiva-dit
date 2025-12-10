@@ -103,7 +103,9 @@ class ShivaRatioPolicy(nn.Module):
         
         nn.init.constant_(head.bias, bias_val)
 
-        print(f"[ShivaRatioPolicy] Reset: InitRatio={self.init_ratio_val}, HeadBias={bias_val:.4f}")
+        is_main_process = not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
+        if is_main_process:
+            print(f"[ShivaRatioPolicy] Reset: InitRatio={self.init_ratio_val}, HeadBias={bias_val:.4f}")
 
     def forward(self, temb, layer_idx_tensor):
         # if self.has_reset_parameters is False:

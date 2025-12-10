@@ -119,7 +119,8 @@ class DiffusionModelTrainer:
         if self.config.trainable_hook_config:
             _, hook_kwargs = self.config.trainable_hook_config
             self.skip_layer_indices = hook_kwargs.get("skip_layer_indices", [])
-            print(f"[Trainer] Skip layer indices: {self.skip_layer_indices}")
+            if self.accelerator.is_main_process:
+                print(f"[Trainer] Skip layer indices: {self.skip_layer_indices}")
 
         self.optimizer = self._setup_model_and_optimizer()
 
@@ -168,6 +169,9 @@ class DiffusionModelTrainer:
         self._print_setup_summary()
 
         self.state_buffer = {}
+        local_seed = self.config.seed + self.accelerator.process_index
+        self.local_generator = torch.Generator(device=self.device).manual_seed(local_seed)
+        print(f"[Trainer] Device [{self.device}] Set Local seed: {local_seed}")
 
     def _scale_steps(self, steps: int) -> int:
         if steps <= 0:
@@ -2437,7 +2441,8 @@ class DiffusionModelTrainer:
             steps_per_epoch = len(self.train_dataloader) // self.config.gradient_accumulation_steps
             expected_epoch = self.global_step // steps_per_epoch
             if self.epoch != expected_epoch:
-                print(f"Adjusting epoch from {self.epoch} to {expected_epoch} based on global_step.")
+                if self.accelerator.is_main_process:
+                    print(f"Adjusting epoch from {self.epoch} to {expected_epoch} based on global_step.")
                 self.epoch = expected_epoch
 
     def _initial_phase(self):

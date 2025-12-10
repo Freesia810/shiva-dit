@@ -24,13 +24,18 @@ def get_stratified_indices_from_buffer(trainer, micro_batch_size):
         trainer.timestep_buffer = []
 
     if len(trainer.timestep_buffer) < micro_batch_size:
+        current_global_step = getattr(trainer, "global_step", 0)
+        DEBUG_INTERVAL = 50 
+
+        should_debug_print = (
+            (current_global_step % DEBUG_INTERVAL == 0)
+        )
+        
         accum_steps = getattr(trainer.config, "gradient_accumulation_steps", 1)
         total_batch_size = micro_batch_size * accum_steps
-        
         total_batch_size = max(total_batch_size, micro_batch_size)
 
-        local_seed = trainer.config.seed + trainer.accelerator.process_index
-        rng_gen = torch.Generator(device=trainer.device).manual_seed(local_seed)
+        rng_gen = trainer.local_generator
 
         new_indices = stratified_timestep_sampler(
             total_batch_size,
@@ -39,6 +44,22 @@ def get_stratified_indices_from_buffer(trainer, micro_batch_size):
             generator=rng_gen
         )
         
+        if should_debug_print:
+            all_new_indices = trainer.accelerator.gather(new_indices)
+            if trainer.accelerator.is_main_process:
+                all_indices_list = all_new_indices.cpu().flatten().tolist()
+                all_indices_list.sort()
+                
+                print(f"\n{'='*20} [Global Timestep Sampling @ Step {current_global_step}] {'='*20}")
+                print(f"Total Batches Sampled: {total_batch_size * trainer.accelerator.num_processes}")
+                print(f"Sampled Indices (Sorted): {all_indices_list}")
+                
+                unique_indices = set(all_indices_list)
+                print(f"Unique Indices Count: {len(unique_indices)} / {len(all_indices_list)}")
+                print(f"{'='*65}\n")
+
+            trainer.accelerator.wait_for_everyone()
+
         trainer.timestep_buffer.extend(new_indices.tolist())
 
     current_indices_list = trainer.timestep_buffer[:micro_batch_size]
