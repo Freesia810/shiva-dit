@@ -3,6 +3,8 @@ import torch.nn as nn
 import math
 from shiva_dit.utils import global_context
 
+RATIO_STAGE = 1
+
 class ShivaGaterPolicy(nn.Module):
     def __init__(self, time_embed_dim, layer_embed_dim, bottleneck_dim, num_layers):
         super().__init__()
@@ -123,7 +125,7 @@ class ShivaRatioPolicy(nn.Module):
         if self.training and torch.rand(1) < 1e-3:
             is_main_process = not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
             
-            if is_main_process:
+            if is_main_process and global_context.current_stage_idx >= RATIO_STAGE:
                 with torch.no_grad():
                     current_t = global_context.current_timestep
                     probs = torch.sigmoid(logits)

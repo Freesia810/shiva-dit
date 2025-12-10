@@ -102,7 +102,7 @@ class ShivaTopkFunc(torch.autograd.Function):
             grad_logits, grad_k = grads[0], grads[1]
 
 
-        if torch.rand(1) < 0.05:
+        if torch.rand(1) < 1e-3:
             with torch.no_grad():
                 g_logits_norm = grad_logits.norm().item()
                 g_k_norm = grad_k.norm().item() if grad_k is not None else 0.0

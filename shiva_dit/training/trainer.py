@@ -1177,117 +1177,90 @@ class DiffusionModelTrainer:
             self._compute_loss(batch, self.global_step, is_validation=False)
         )
 
-        if torch.rand(1) < 1e-3 and self.accelerator.is_main_process:
+        debug_interval = 50 
+        if self.global_step % debug_interval == 0 and self.accelerator.is_main_process:
             print(f"\n{'='*30} [Gradient Analysis Monitor Step {self.global_step}] {'='*30}")
             
             t_min, t_max = timesteps.min().item(), timesteps.max().item()
             t_std = timesteps.float().std().item()
             curr_avg_ratio = hook_metrics.get("image_ratio/avg_ratio", float('nan'))
-            
             print(f"  > Batch Info:")
             print(f"    Timesteps: Min={t_min:.1f} | Max={t_max:.1f} | Std={t_std:.1f} | Sample={timesteps[:4].int().tolist()}...")
-            if not isinstance(curr_avg_ratio, float) or not (curr_avg_ratio != curr_avg_ratio): # check nan
-                print(f"    Avg Ratio: {curr_avg_ratio:.4f}")
+            if not isinstance(curr_avg_ratio, float) or not (curr_avg_ratio != curr_avg_ratio):
+                 print(f"    Avg Ratio: {curr_avg_ratio:.4f}")
 
             param_groups = {
-                "Router": [],
-                "Gater": [],
-                "Ratio(Time)": [],
-                "Ratio(Layer)": [],
-                "Ratio(Mix)": [],
-                "Fuser": [],
-                "Ctx(Pruner)": [],
-                "Ctx(Policy)": [],
-                "Base Model": []
+                "Router": [], "Gater": [], "Ratio(Time)": [], "Ratio(Layer)": [],
+                "Ratio(Mix)": [], "Fuser": [], "Ctx(Pruner)": [], "Ctx(Policy)": [], "Base Model": []
             }
-
             for name, param in self.model.named_parameters():
-                if not param.requires_grad:
-                    continue
-                
-                if "router." in name:
-                    param_groups["Router"].append(param)
-                elif "gater_policy." in name:
-                    param_groups["Gater"].append(param)
-                elif "image_ratio_policy." in name:
-                    if "time_proj" in name: param_groups["Ratio(Time)"].append(param)
-                    elif "layer_emb" in name: param_groups["Ratio(Layer)"].append(param)
-                    else: param_groups["Ratio(Mix)"].append(param)
-                elif "fuse_expert" in name or "fuser" in name:
-                    param_groups["Fuser"].append(param)
-                elif "context_pruner" in name:
-                    param_groups["Ctx(Pruner)"].append(param)
-                elif "context_ratio_policy" in name:
-                    param_groups["Ctx(Policy)"].append(param)
-                elif "_hook" not in name:
-                    param_groups["Base Model"].append(param)
+                if param.requires_grad:
+                    if "router." in name: param_groups["Router"].append(param)
+                    elif "gater_policy." in name: param_groups["Gater"].append(param)
+                    elif "image_ratio_policy." in name:
+                        if "time_proj" in name: param_groups["Ratio(Time)"].append(param)
+                        elif "layer_emb" in name: param_groups["Ratio(Layer)"].append(param)
+                        else: param_groups["Ratio(Mix)"].append(param)
+                    elif "fuse_expert" in name or "fuser" in name: param_groups["Fuser"].append(param)
+                    elif "context_pruner" in name: param_groups["Ctx(Pruner)"].append(param)
+                    elif "context_ratio_policy" in name: param_groups["Ctx(Policy)"].append(param)
+                    elif "_hook" not in name: param_groups["Base Model"].append(param)
 
-            def measure_grads(loss_tensor, desc):
-                if loss_tensor.item() == 0.0:
-                    return {k: (0.0, 0.0) for k in param_groups}
+            with self.accelerator.no_sync(self.model):
                 
-                self.optimizer.zero_grad(set_to_none=True)
-                self.accelerator.backward(loss_tensor, retain_graph=True)
-                
-                stats = {}
-                for group_name, params in param_groups.items():
-                    if not params:
-                        stats[group_name] = (0.0, 0.0)
-                        continue
+                def measure_grads(loss_tensor, desc):
+                    if loss_tensor.item() == 0.0:
+                        return {k: (0.0, 0.0) for k in param_groups}
                     
-                    total_norm_sq = 0.0
-                    max_val = 0.0
-                    has_grad = False
-                    for p in params:
-                        if p.grad is not None:
-                            has_grad = True
-                            g_norm = p.grad.detach().data.norm(2).item()
-                            total_norm_sq += g_norm ** 2
-                            max_val = max(max_val, p.grad.detach().abs().max().item())
+                    self.optimizer.zero_grad(set_to_none=True)
+                    self.accelerator.backward(loss_tensor, retain_graph=True)
                     
-                    if has_grad:
-                        stats[group_name] = (total_norm_sq ** 0.5, max_val)
-                    else:
-                        stats[group_name] = (0.0, 0.0)
-                return stats
+                    stats = {}
+                    for group_name, params in param_groups.items():
+                        if not params:
+                            stats[group_name] = (0.0, 0.0)
+                            continue
+                        
+                        total_norm_sq = 0.0
+                        max_val = 0.0
+                        has_grad = False
+                        for p in params:
+                            if p.grad is not None:
+                                has_grad = True
+                                g_norm = p.grad.detach().data.norm(2).item()
+                                total_norm_sq += g_norm ** 2
+                                max_val = max(max_val, p.grad.detach().abs().max().item())
+                        
+                        if has_grad:
+                            stats[group_name] = (total_norm_sq ** 0.5, max_val)
+                        else:
+                            stats[group_name] = (0.0, 0.0)
+                    return stats
 
-            main_stats = measure_grads(main_loss, "Main")
-            hook_stats = measure_grads(hook_loss, "Hook")
+                main_stats = measure_grads(main_loss, "Main")
+                hook_stats = measure_grads(hook_loss, "Hook")
             
-            # Header
             print(f"\n  > Component Gradient Analysis (Norm / Max):")
             header = f"    {'Module Name':<15} | {'Main Grad':<18} | {'Hook Grad':<18} | {'Force Ratio (H/M)':<18}"
-            print(header)
-            print(f"    {'-'*len(header)}")
+            print(header); print(f"    {'-'*len(header)}")
 
             for name in ["Router", "Gater", "Ratio(Time)", "Ratio(Layer)", "Ratio(Mix)", "Fuser", "Ctx(Policy)", "Ctx(Pruner)"]:
-                if name not in param_groups or not param_groups[name]:
-                    continue
-                
+                if name not in param_groups or not param_groups[name]: continue
                 m_norm, m_max = main_stats[name]
                 h_norm, h_max = hook_stats[name]
 
                 if m_norm < 1e-9:
-                    if h_norm > 1e-9: ratio_str = "INF (Hook Only)"
-                    else: ratio_str = "0.00x (No Grad)"
+                    ratio_str = "INF (Hook Only)" if h_norm > 1e-9 else "0.00x (No Grad)"
                 else:
-                    ratio = h_norm / m_norm
-                    ratio_str = f"{ratio:.2f}x"
-
-                m_str = f"{m_norm:.4f} / {m_max:.4f}"
-                h_str = f"{h_norm:.4f} / {h_max:.4f}"
+                    ratio_str = f"{h_norm / m_norm:.2f}x"
                 
-                marker = ""
-                if "Ratio" in name and m_norm < 1e-5 and h_norm > 1e-3:
-                    marker = " <!! No Main Grad" 
-                
-                print(f"    {name:<15} | {m_str:<18} | {h_str:<18} | {ratio_str:<18}{marker}")
+                marker = " <!! No Main Grad" if ("Ratio" in name and m_norm < 1e-5 and h_norm > 1e-3) else ""
+                print(f"    {name:<15} | {m_norm:.4f} / {m_max:<9.4f} | {h_norm:.4f} / {h_max:<9.4f} | {ratio_str:<18}{marker}")
 
             rt_norm, _ = main_stats.get("Ratio(Time)", (0,0))
             rl_norm, _ = main_stats.get("Ratio(Layer)", (0,0))
             if rt_norm < 1e-5 and rl_norm > 1e-3:
                  print(f"\n  ⚠️  [ALERT] RatioPolicy implies 'Layer Bias' learning but IGNORING 'Time' info!")
-                 print(f"      Layer Grad: {rl_norm:.5f} vs Time Grad: {rt_norm:.5f}")
 
             self.optimizer.zero_grad(set_to_none=True)
             print(f"{'='*86}\n")
@@ -1565,7 +1538,21 @@ class DiffusionModelTrainer:
 
             metrics_to_log_tensors.update(shiva_grad_metrics)
 
-        self.metric_manager.update(metrics_to_log_tensors, gather=True)
+        metrics_local_only = {}
+        metrics_to_sync = {}
+
+        for key, value in metrics_to_log_tensors.items():
+            if key.startswith("topk/"):
+                metrics_local_only[key] = value
+
+            else:
+                metrics_to_sync[key] = value
+
+        if metrics_local_only:
+            self.metric_manager.update(metrics_local_only, gather=False)
+
+        if metrics_to_sync:
+            self.metric_manager.update(metrics_to_sync, gather=False)
 
         if self.accelerator.is_main_process:
             stateful_metrics_to_log = {}

@@ -183,9 +183,6 @@ def _calc_ratio_loss_stratified(
     state_buffer, 
     prefix="adaptive_ratio"
 ):
-    if all_ratios.numel() == 0:
-        return torch.tensor(0.0, device=device), {}
-
     w_config = config.get("ratio_loss_weight", 1.0)
     w_budget_mse = 0.0
     if isinstance(w_config, list):
@@ -196,47 +193,69 @@ def _calc_ratio_loss_stratified(
     target_val = config.get("target_ratio", 0.8)
     accum_steps = config.get("gradient_accumulation_steps", 16)
 
-    current_ratio = torch.mean(all_ratios)
-    ratio_std = torch.std(all_ratios)
+    if all_ratios.numel() > 0:
+        current_ratio = torch.mean(all_ratios)
+        ratio_std = torch.std(all_ratios)
+        has_data = True
+    else:
+        current_ratio = torch.tensor(target_val, device=device)
+        ratio_std = torch.tensor(0.0, device=device)
+        has_data = False
 
     if "history_ratios" not in state_buffer:
         state_buffer["history_ratios"] = []
+    if "history_counts" not in state_buffer:
+        state_buffer["history_counts"] = []
+        
     if "last_cycle_mean" not in state_buffer:
         state_buffer["last_cycle_mean"] = target_val
         is_main_process = (not dist.is_initialized()) or (dist.get_rank() == 0)
         if is_main_process:
             print(f"[{prefix}] Stratified Buffer Initialized. Target={target_val}")
 
-    state_buffer["history_ratios"].append(current_ratio.item())
+    if has_data:
+        state_buffer["history_ratios"].append(current_ratio.item())
+        state_buffer["history_counts"].append(1.0)
+    else:
+        state_buffer["history_ratios"].append(0.0)
+        state_buffer["history_counts"].append(0.0)
 
     if len(state_buffer["history_ratios"]) >= accum_steps:
         local_sum = sum(state_buffer["history_ratios"])
-        local_count = len(state_buffer["history_ratios"])
+        local_valid_count = sum(state_buffer["history_counts"])
         
-        sum_tensor = torch.tensor([local_sum], device=device, dtype=torch.float32)
+        reduce_tensor = torch.tensor([local_sum, local_valid_count], device=device, dtype=torch.float32)
         
+        # DDP AllReduce
         if dist.is_initialized():
-            dist.all_reduce(sum_tensor, op=dist.ReduceOp.SUM)
-            world_size = dist.get_world_size()
-            total_count = local_count * world_size
-            cycle_mean = sum_tensor.item() / total_count
-        else:
-            cycle_mean = local_sum / local_count
+            dist.all_reduce(reduce_tensor, op=dist.ReduceOp.SUM)
+        
+        global_sum = reduce_tensor[0].item()
+        global_count = reduce_tensor[1].item()
+        
+        if global_count == 0:
+            raise RuntimeError(f"[{prefix}] Error: All ranks reported NO data during accumulation cycle. Cannot compute average.")
+            
+        cycle_mean = global_sum / global_count
             
         state_buffer["last_cycle_mean"] = cycle_mean
         state_buffer["history_ratios"] = []
+        state_buffer["history_counts"] = []
         
         is_main_process = (not dist.is_initialized()) or (dist.get_rank() == 0)
         if is_main_process:
-            print(f"[{prefix}] Cycle Update: Global Mean Est = {cycle_mean:.4f}")
+            print(f"[{prefix}] Cycle Update: Global Mean Est = {cycle_mean:.4f} (Valid Count: {global_count})")
 
     global_mean_est = state_buffer["last_cycle_mean"]
     global_diff = global_mean_est - target_val
     grad_scale = 2.0 * global_diff 
     
-    # Linear Loss trick
-    loss = w_budget_mse * (current_ratio * grad_scale)
-    display_mse = (current_ratio.detach() - target_val) ** 2
+    if has_data:
+        loss = w_budget_mse * (current_ratio * grad_scale)
+        display_mse = (current_ratio.detach() - target_val) ** 2
+    else:
+        loss = torch.tensor(0.0, device=device, requires_grad=True)
+        display_mse = torch.tensor(0.0, device=device)
 
     metrics = {
         f"{prefix}/avg_ratio": current_ratio.detach(),
@@ -268,10 +287,10 @@ def calculate_image_ratio_loss(
         if hasattr(hook, "image_ratio_accumulator"):
             hook.image_ratio_accumulator.clear()
 
-    if not all_ratios_flat:
-        return torch.tensor(0.0, device=device), {}, {}
-
-    ratios_concat = torch.cat(all_ratios_flat).flatten()
+    if all_ratios_flat:
+        ratios_concat = torch.cat(all_ratios_flat).flatten()
+    else:
+        ratios_concat = torch.tensor([], device=device)
 
     if "image_ratio_buffer" not in trainer_state:
         trainer_state["image_ratio_buffer"] = {}
@@ -462,49 +481,39 @@ def collect_policy_gradient_stats(model, hook_manager, device) -> dict:
 
     policies = {
         "img_policy": target_hook.image_ratio_policy,
-        # "ctx_policy": getattr(target_hook, 'context_ratio_policy', None) 
     }
+
+    verbose_log = False 
+    if torch.rand(1).item() < 0.1: 
+        verbose_log = True
 
     for name, policy_net in policies.items():
         if policy_net is None: continue
 
-        layer_grad_norm_total = 0.0
-        active_layer_stats = None
-        skipped_indices = []
+        layer_grad_norm_total = torch.tensor(0.0, device=device)
         
+        time_grad_norm_total = torch.tensor(0.0, device=device)
+        mlp_grad_norm_total = torch.tensor(0.0, device=device)
+
         if hasattr(policy_net, 'layer_emb'):
-            param = policy_net.layer_emb.weight # [Total_Layers, Dim]
+            param = policy_net.layer_emb.weight
             if param.grad is not None:
                 grad = param.grad.detach()
-                layer_norms = grad.norm(dim=1) # [Total_Layers]
+                layer_grad_norm_total = grad.norm() 
                 
-                active_mask = layer_norms > 1e-8
-                active_layer_norms = layer_norms[active_mask]
-                skipped_indices = torch.where(~active_mask)[0].cpu().tolist()
-                
-                num_skipped = len(skipped_indices)
-                stats[f"grad/{name}/num_skipped_layers"] = num_skipped
-
-                if active_layer_norms.numel() > 0:
-                    layer_mean = active_layer_norms.mean()
-                    layer_std = active_layer_norms.std()
+                if verbose_log:
+                    layer_norms = grad.norm(dim=1)
+                    active_mask = layer_norms > 1e-8
+                    active_layer_norms = layer_norms[active_mask]
                     
-                    stats[f"grad/{name}/layer_proj_active_mean"] = layer_mean
-                    stats[f"grad/{name}/layer_sensitivity_cv"] = layer_std / (layer_mean + 1e-6)
-                    stats[f"grad/{name}/layer_max_min_ratio"] = active_layer_norms.max() / (active_layer_norms.min() + 1e-6)
-                    
-                    active_layer_stats = {
-                        "norms": layer_norms.cpu().numpy(),
-                        "active_indices": torch.where(active_mask)[0].cpu().numpy(),
-                        "active_vals": active_layer_norms.cpu().numpy(),
-                        "mean": layer_mean.item()
-                    }
-                
-                layer_grad_norm_total = grad.norm().item()
+                    if active_layer_norms.numel() > 0:
+                        layer_mean = active_layer_norms.mean()
+                        layer_std = active_layer_norms.std()
+                        stats[f"grad/{name}/layer_proj_active_mean"] = layer_mean.item()
+                        stats[f"grad/{name}/layer_sensitivity_cv"] = (layer_std / (layer_mean + 1e-6)).item()
 
-        time_grad_norm_total = 0.0
+        # --- 2. Time Branch ---
         time_stats = None
-        
         if hasattr(policy_net, 'time_proj'):
             if isinstance(policy_net.time_proj, torch.nn.Sequential):
                 param = policy_net.time_proj[-1].weight
@@ -515,87 +524,47 @@ def collect_policy_gradient_stats(model, hook_manager, device) -> dict:
 
             if param is not None and param.grad is not None:
                 grad = param.grad.detach()
-                time_grad_norm_total = grad.norm().item()
+                time_grad_norm_total = grad.norm()
                 
-                out_dim = grad.shape[0]
-                scale_grad = grad[:out_dim//2, :]
-                shift_grad = grad[out_dim//2:, :]
-                
-                norm_scale = scale_grad.norm().item()
-                norm_shift = shift_grad.norm().item()
-                
-                stats[f"grad/{name}/temb_norm_total"] = time_grad_norm_total
-                stats[f"grad/{name}/temb_scale_norm"] = norm_scale
-                stats[f"grad/{name}/temb_shift_norm"] = norm_shift
-                stats[f"grad/{name}/temb_scale_shift_ratio"] = norm_scale / (norm_shift + 1e-6)
-                
-                time_stats = {"scale": norm_scale, "shift": norm_shift}
+                if verbose_log: 
+                    out_dim = grad.shape[0]
+                    scale_grad = grad[:out_dim//2, :]
+                    shift_grad = grad[out_dim//2:, :]
+                    norm_scale = scale_grad.norm()
+                    norm_shift = shift_grad.norm()
+                    time_stats = {"scale": norm_scale, "shift": norm_shift}
 
-        mlp_grad_norm_total = 0.0
+        # --- 3. MLP Branch ---
         if hasattr(policy_net, 'mix_mlp'):
-            for p in policy_net.mix_mlp.parameters():
-                if p.grad is not None:
-                    mlp_grad_norm_total += p.grad.detach().norm().item()
-            stats[f"grad/{name}/mlp_head_norm"] = mlp_grad_norm_total
+            grad_list = [p.grad.detach().norm().square() for p in policy_net.mix_mlp.parameters() if p.grad is not None]
+            if grad_list:
+                mlp_grad_norm_total = torch.stack(grad_list).sum().sqrt()
+                stats[f"grad/{name}/mlp_head_norm"] = mlp_grad_norm_total.item()
 
-        if layer_grad_norm_total > 0 and time_grad_norm_total > 0:
-            balance_ratio = layer_grad_norm_total / (time_grad_norm_total + 1e-9)
-            stats[f"grad/{name}/balance_layer_vs_time"] = balance_ratio
+        if verbose_log and (layer_grad_norm_total > 0 or time_grad_norm_total > 0):
+            l_val = layer_grad_norm_total.item()
+            t_val = time_grad_norm_total.item()
+            m_val = mlp_grad_norm_total.item()
 
-        if (layer_grad_norm_total > 0 or time_grad_norm_total > 0) and torch.rand(1) < 0.1:
             print(f"\n{'-'*30} Policy Gradient Diagnosis: {name.upper()} {'-'*30}")
             
-            # 1. Component Balance Bar
-            total_energy = layer_grad_norm_total + time_grad_norm_total + mlp_grad_norm_total + 1e-9
-            l_pct = layer_grad_norm_total / total_energy
-            t_pct = time_grad_norm_total / total_energy
-            m_pct = mlp_grad_norm_total / total_energy
+            total_energy = l_val + t_val + m_val + 1e-9
+            l_pct = l_val / total_energy
+            t_pct = t_val / total_energy
+            m_pct = m_val / total_energy
             
             def draw_bar(val, length=20):
                 fill = int(val * length)
                 return f"|{'#'*fill}{'-'*(length-fill)}|"
 
             print(f"  > Component Impact Distribution:")
-            print(f"    Layer Emb : {draw_bar(l_pct)} {l_pct*100:5.1f}% (Norm: {layer_grad_norm_total:.4f})")
-            print(f"    Time Proj : {draw_bar(t_pct)} {t_pct*100:5.1f}% (Norm: {time_grad_norm_total:.4f})")
-            print(f"    Mix MLP   : {draw_bar(m_pct)} {m_pct*100:5.1f}% (Norm: {mlp_grad_norm_total:.4f})")
+            print(f"    Layer Emb : {draw_bar(l_pct)} {l_pct*100:5.1f}% (Norm: {l_val:.4f})")
+            print(f"    Time Proj : {draw_bar(t_pct)} {t_pct*100:5.1f}% (Norm: {t_val:.4f})")
             
-            if time_grad_norm_total > 1e-9:
-                ratio_lt = layer_grad_norm_total / time_grad_norm_total
-                dom = "LAYER" if ratio_lt > 1.0 else "TIME"
-                print(f"    Force Ratio (Layer/Time): {ratio_lt:.3f}x --> Dominant: [{dom}]")
-
-            # 2. Time Branch Details
             if time_stats:
-                s_ratio = time_stats['scale'] / (time_stats['scale'] + time_stats['shift'] + 1e-9)
-                print(f"  > Time Branch Detail:")
-                print(f"    Scale vs Shift: {time_stats['scale']:.4f} vs {time_stats['shift']:.4f} (Scale share: {s_ratio*100:.1f}%)")
-
-            # 3. Active Layer Details
-            if active_layer_stats:
-                vals = active_layer_stats['active_vals']
-                idxs = active_layer_stats['active_indices']
-                
-                # Sort to find outliers
-                sorted_args = np.argsort(vals)
-                top_k = sorted_args[::-1][:5] # Top 5
-                bot_k = sorted_args[:5]       # Bottom 5
-                
-                print(f"  > Layer Branch Detail (Active: {len(idxs)}, Skipped: {len(skipped_indices)}):")
-                
-                # Format Lists
-                top_str = ", ".join([f"L{idxs[i]}({vals[i]:.4f})" for i in top_k])
-                bot_str = ", ".join([f"L{idxs[i]}({vals[i]:.4f})" for i in bot_k])
-                
-                print(f"    Top-5 Gradients : {top_str}")
-                print(f"    Bot-5 Gradients : {bot_str}")
-                
-                # Check for uneven training
-                cv = vals.std() / (vals.mean() + 1e-9)
-                if cv > 1.0:
-                    print(f"    ⚠️  High Variance (CV={cv:.2f}): Some layers are learning much faster than others!")
-            else:
-                print(f"  > Layer Branch Detail: No active gradients found (All skipped?).")
+                ts_scale = time_stats['scale'].item()
+                ts_shift = time_stats['shift'].item()
+                print(f"    Scale vs Shift: {ts_scale:.4f} vs {ts_shift:.4f}")
 
             print(f"{'-'*90}")
 
