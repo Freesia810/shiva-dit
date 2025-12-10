@@ -175,7 +175,7 @@ class HookManager:
                 for name, module in m.named_modules():
                     if isinstance(module, cls.get_block_type(model_type)):
                         hook_cls, kwargs = cls._resolve_hook_config(name)
-                        hook = hook_cls(**deepcopy(kwargs))  # 关键: deepcopy
+                        hook = hook_cls(**deepcopy(kwargs))
                         hook_name = f"{model_attr}.{name}"
 
                         hook.register_name(model_type, hook_name)
