@@ -161,6 +161,8 @@ class DiffusionModelTrainer:
 
         self._print_setup_summary()
 
+        self.state_buffer = {}
+
     def _scale_steps(self, steps: int) -> int:
         if steps <= 0:
             return steps
@@ -514,6 +516,7 @@ class DiffusionModelTrainer:
             "ratio_policy/image_ratio": [
                 "image_ratio/target_ratio",
                 "image_ratio/avg_ratio",
+                "image_ratio/cycle_mean_est",
             ],
             "ratio_policy/distribution": [
                 "image_ratio/std_ratio",
@@ -1055,6 +1058,8 @@ class DiffusionModelTrainer:
         config["distill_middle_weight"] = distill_weights[1] if len(distill_weights) > 1 else 0.0
         config["target_ratio"] = self.config.extra_config['target_ratio']
 
+        config["gradient_accumulation_steps"] = self.config.gradient_accumulation_steps
+
         return config
 
     def _calculate_hook_loss(self, global_step: int, timestep: torch.Tensor):
@@ -1095,7 +1100,7 @@ class DiffusionModelTrainer:
         
         # 2. Image Ratio Loss
         img_ratio_loss, img_r_metrics, per_layer_ratios = (
-            shiva_metrics.calculate_image_ratio_loss(loss_config, self.device)
+            shiva_metrics.calculate_image_ratio_loss(loss_config, self.device, self.state_buffer)
         )
         
         # 3. Context Ratio Loss
@@ -1174,6 +1179,79 @@ class DiffusionModelTrainer:
         total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid, hook_metrics, timesteps = (
             self._compute_loss(batch, self.global_step)
         )
+
+        # =================================================================
+        # [DEBUG START] Gradient Component Analysis (Enhanced)
+        # =================================================================
+        debug_interval = 50 
+        if self.global_step % debug_interval == 0 and self.accelerator.is_main_process:
+            
+            # 1. 获取 Policy 参数并分类
+            policy_params = []
+            time_params = []   # 专门存放 time_proj 的参数
+            layer_params = []  # 专门存放 layer_emb 的参数
+            
+            for hook in HookManager.get_all_hooks().values():
+                if hasattr(hook, 'image_ratio_policy') and hook.image_ratio_policy is not None:
+                    policy = hook.image_ratio_policy
+                    policy_params.extend(list(policy.parameters()))
+                    
+                    # 分类抓取关键参数
+                    time_params.extend(list(policy.time_proj.parameters()))
+                    layer_params.extend(list(policy.layer_emb.parameters()))
+
+            if len(policy_params) > 0:
+                # --- 打印当前 Batch 的时间步情况 ---
+                # 验证分层采样是否让每个 micro-batch 都覆盖了高低噪
+                t_min = timesteps.min().item()
+                t_max = timesteps.max().item()
+                t_std = timesteps.float().std().item()
+                # 同时也尝试打印一下当前的平均 Ratio（从 metrics 里拿）
+                curr_avg_ratio = hook_metrics.get("image_ratio/avg_ratio", -1.0)
+                
+                print(f"\n[Gradient Component Analysis Step {self.global_step}]")
+                print(f"  > Batch Timesteps: Min={t_min}, Max={t_max}, Std={t_std:.1f} (Sample: {timesteps[:8].tolist()})")
+                if curr_avg_ratio != -1.0:
+                    print(f"  > Current Avg Ratio: {curr_avg_ratio:.4f}")
+
+                # 2. 测量 Main Loss (困难链路)
+                self.optimizer.zero_grad(set_to_none=True)
+                self.accelerator.backward(main_loss, retain_graph=True)
+                
+                def get_grad_norm(params):
+                    norm = 0.0
+                    max_g = 0.0
+                    for p in params:
+                        if p.grad is not None:
+                            val = p.grad.detach().data.norm(2).item()
+                            norm += val ** 2
+                            max_g = max(max_g, p.grad.detach().abs().max().item())
+                    return (norm ** 0.5), max_g
+
+                grad_main_total, _ = get_grad_norm(policy_params)
+                grad_main_time, _  = get_grad_norm(time_params)  # 看看时间层收到梯度了吗？
+                grad_main_layer, _ = get_grad_norm(layer_params) # 看看层索引收到梯度了吗？
+
+                # 3. 测量 Hook Loss (MSE 正则项)
+                self.optimizer.zero_grad(set_to_none=True)
+                self.accelerator.backward(hook_loss, retain_graph=True)
+                grad_hook_total, _ = get_grad_norm(policy_params)
+
+                # 4. 打印深度分析
+                ratio_force = grad_hook_total / (grad_main_total + 1e-9)
+                
+                print(f"  > Main Loss Grad: Total={grad_main_total:.4f}")
+                print(f"      - Time Branch Grad : {grad_main_time:.4f}  <-- 关注这里！")
+                print(f"      - Layer Branch Grad: {grad_main_layer:.4f}")
+                print(f"  > Hook Loss Grad: Total={grad_hook_total:.4f}")
+                print(f"  > Force Ratio (Hook/Main): {ratio_force:.2f}x")
+                
+                if grad_main_time < 1e-4 and grad_main_layer > 1e-2:
+                    print("  ⚠️ ALERT: Model is learning Layer bias but IGNORING Time!")
+
+                # --- 恢复现场 ---
+                self.optimizer.zero_grad(set_to_none=True)
+        # =================================================================
 
         self.accelerator.backward(total_loss)
         if self.config.enable_gradient_checkpointing:
