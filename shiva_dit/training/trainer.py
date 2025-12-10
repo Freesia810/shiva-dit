@@ -1177,7 +1177,7 @@ class DiffusionModelTrainer:
             self._compute_loss(batch, self.global_step, is_validation=False)
         )
 
-        debug_interval = 50 
+        debug_interval = 50
         if self.global_step % debug_interval == 0 and self.accelerator.is_main_process:
             print(f"\n{'='*30} [Gradient Analysis Monitor Step {self.global_step}] {'='*30}")
             
@@ -1649,7 +1649,7 @@ class DiffusionModelTrainer:
         t_plot_axis = np.linspace(0, 1, steps)
 
         valid_layers = [i for i in range(total_layers) if i not in self.skip_layer_indices]
-        valid_layers_tensor = torch.tensor(valid_layers, device=self.device)
+        valid_layers_tensor = torch.tensor(valid_layers, device=self.device).to(dtype=t_values_tensor.dtype)
 
         if len(valid_layers) == 0:
             return 
@@ -1756,7 +1756,7 @@ class DiffusionModelTrainer:
                 time_means = grid_values.mean(axis=1)
                 
                 # Numpy arrays for axis plotting
-                l_plot_axis = np.arange(valid_layers)
+                l_plot_axis = np.array(valid_layers)
 
                 print(f"[{alias.upper()}] Mean: {grid_values.mean():.4f} | Range: {grid_values.min():.4f}-{grid_values.max():.4f}")
 

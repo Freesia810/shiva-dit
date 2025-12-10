@@ -209,9 +209,9 @@ def _calc_ratio_loss_stratified(
         
     if "last_cycle_mean" not in state_buffer:
         state_buffer["last_cycle_mean"] = target_val
-        is_main_process = (not dist.is_initialized()) or (dist.get_rank() == 0)
-        if is_main_process:
-            print(f"[{prefix}] Stratified Buffer Initialized. Target={target_val}")
+        # is_main_process = (not dist.is_initialized()) or (dist.get_rank() == 0)
+        # if is_main_process:
+        #     print(f"[{prefix}] Stratified Buffer Initialized. Target={target_val}")
 
     if has_data:
         state_buffer["history_ratios"].append(current_ratio.item())
@@ -242,9 +242,9 @@ def _calc_ratio_loss_stratified(
         state_buffer["history_ratios"] = []
         state_buffer["history_counts"] = []
         
-        is_main_process = (not dist.is_initialized()) or (dist.get_rank() == 0)
-        if is_main_process:
-            print(f"[{prefix}] Cycle Update: Global Mean Est = {cycle_mean:.4f} (Valid Count: {global_count})")
+        # is_main_process = (not dist.is_initialized()) or (dist.get_rank() == 0)
+        # if is_main_process:
+        #     print(f"[{prefix}] Cycle Update: Global Mean Est = {cycle_mean:.4f} (Valid Count: {global_count})")
 
     global_mean_est = state_buffer["last_cycle_mean"]
     global_diff = global_mean_est - target_val
