@@ -51,24 +51,24 @@ stage_config_dict = {
         },
 
         {
-            "steps": 14000, 
+            "steps": 14000,
             "weights": {
-                "ratio": [0.0, 10.0, 0.8],
+                "ratio": [0.0, 10.0, 2.5],
                 "gate": 0.0,
                 "distill": [0.0, 0.0],
             },
-            "lr": [1e-6, 1e-4, 0.0, 0.0, 2e-5, 0.0, 0.0],
+            "lr": [1e-6, 5e-7, 0.0, 0.0, 2e-5, 0.0, 0.0],
             "temp": [15.0, 15.0, 20.0, 50.0],
         },
 
         {
-            "steps": 31500, 
+            "steps": -1,
             "weights": {
                 "ratio": [0.0, 10.0, 0.5],
                 "gate": 0.0,
                 "distill": [0.0, 0.0],
             },
-            "lr": [1e-6, 1e-4, 0.0, 0.0, 1e-6, 0.0, 0.0],
+            "lr": [1e-6, 5e-7, 0.0, 0.0, 1e-6, 0.0, 0.0],
             "temp": [15.0, 15.0, 50.0, 100.0],
         },
     ],
@@ -93,19 +93,19 @@ stage_config_dict = {
                 "gate": 0.0,
                 "distill": [0.0, 0.0],
             },
-            "lr": [1e-6, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
-            "temp": [10.0, 10.0, 20.0, 100.0],
+            "lr": [0.0, 5e-7, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "temp": [10.0, 10.0, 20.0, 50.0],
         },
 
         {
-            "steps": 31500, 
+            "steps": -1, 
             "weights": {
                 "ratio": [0.0, 0.0, 0.0],
                 "gate": 0.0,
                 "distill": [0.0, 0.0],
             },
-            "lr": [1e-6, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
-            "temp": [10.0, 10.0, 100.0, 100.0],
+            "lr": [0.0, 5e-7, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "temp": [10.0, 10.0, 50.0, 100.0],
         },
     ],
 }
@@ -126,7 +126,7 @@ trainer_config = {
     "gradient_accumulation_steps": 16,
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
-    "distillation_final_weight": 0.0,
+    "distillation_final_weight": 1.0,
     "distillation_middle_weight": 0.0,
     "seed": 42,
     "logging_steps": 40,

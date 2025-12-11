@@ -73,20 +73,42 @@ class ShivaRatioPolicy(nn.Module):
             nn.Linear(ratio_bottleneck_dim, 1)
         )
 
-        self.layer_emb.weight.register_hook(lambda grad: grad * 0.1)
-        
-        # self.has_reset_parameters = False
+        self.has_reset_parameters = False
         self.reset_parameters()
 
     def reset_parameters(self):
+        # -------------------------------------------------------------------
+        # MODIFICATION 1: 抑制 Time Proj 最终输出层的幅度
+        # -------------------------------------------------------------------
+        # Problem: Xavier init on the final head causes scale/shift magnitude (~5.6) to be too high.
+        # Action: We initialize all layers first (as original), then override the final head.
+        
         for m in self.time_proj.modules():
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-        nn.init.normal_(self.layer_emb.weight, mean=0.0, std=0.01)
+        # >>> KEY CHANGE 1: OVERRIDE TIME PROJ HEAD SCALING <<<
+        time_proj_head = self.time_proj[-1] 
+        # 将其权重 std 大幅降低（例如 0.005），以将 scale/shift 的输出幅度从 5.x 降到 1.0 以下。
+        nn.init.normal_(time_proj_head.weight, mean=0.0, std=0.005) # <-- 降低调制器的强度
+        
+        
+        # -------------------------------------------------------------------
+        # MODIFICATION 2: 增强 Layer Emb 的信号强度
+        # -------------------------------------------------------------------
+        # Problem: layer_emb 的 std=0.01 太小 (~0.77)，容易被 time proj 淹没。
+        # Action: 增加 std 到 0.1，使其信号更强，能够有效被 scale 调制。
+        
+        # >>> KEY CHANGE 2: INCREASE LAYER EMB SCALING <<<
+        # 增大 std 从 0.01 到 0.1
+        nn.init.normal_(self.layer_emb.weight, mean=0.0, std=0.1) # <-- 增强被调制信号的强度
 
+        
+        # -------------------------------------------------------------------
+        # MIX MLP (保持不变)
+        # -------------------------------------------------------------------
         for m in self.mix_mlp.modules():
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
@@ -108,9 +130,9 @@ class ShivaRatioPolicy(nn.Module):
             print(f"[ShivaRatioPolicy] Reset: InitRatio={self.init_ratio_val}, HeadBias={bias_val:.4f}")
 
     def forward(self, temb, layer_idx_tensor):
-        # if self.has_reset_parameters is False:
-        #     self.has_reset_parameters = True
-        #     self.reset_parameters()
+        if self.has_reset_parameters is False:
+            self.has_reset_parameters = True
+            self.reset_parameters()
 
         l_feat = self.layer_emb(layer_idx_tensor) # [B, dim]
         l_feat = self.layer_norm(l_feat)

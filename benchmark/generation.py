@@ -221,6 +221,10 @@ def main(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float16
 
+    if args.force_fixed_ratio > 0:
+        if "fixed" not in args.output_dir:
+            args.output_dir = f"{args.output_dir}_fixed_{args.force_fixed_ratio}"
+    
     save_dir = args.output_dir
     os.makedirs(save_dir, exist_ok=True)
     print(f"Output Directory: {save_dir}")
@@ -243,9 +247,34 @@ def main(args):
         merge_lora=args.merge_lora,
     )
 
+    # ==========================================================
+    # [HACK] Force Fixed Ratio Logic
+    # ==========================================================
+    if args.force_fixed_ratio > 0:
+        print(f"[INFO] Disabling Policy Network...")
+        print(f"[INFO] Forcing Fixed Ratio: {args.force_fixed_ratio}")
+        from shiva_dit.hook import HookManager
+        
+        hooks_modified = 0
+
+        for hook in HookManager.get_all_hooks().values():
+            if hook.__class__.__name__ == "ShivaDitBlockHook":
+                hook.image_ratio_policy = None
+                hook.fixed_image_ratio = args.force_fixed_ratio
+                hooks_modified += 1
+        
+        if hooks_modified == 0:
+            raise Exception("[Error] Could not find 'shiva_hook' on pipeline. Please check hook registration.")
+        else:
+            print(f"[SUCCESS] Modified {hooks_modified} hook(s) for Fixed Baseline.")
+    else:
+        print(f"\n[INFO] Inference Mode: Adaptive (Policy Enabled)")
+    # ==========================================================
+
     total_samples = len(data_items) * args.samples_per_prompt
     print("-" * 50)
     print(f"Starting Benchmark: {args.model_type}")
+    print(f"Mode: {'FIXED ' + str(args.force_fixed_ratio) if args.force_fixed_ratio > 0 else 'ADAPTIVE'}")
     print(f"Prompts: {len(data_items)}")
     print(f"Samples per Prompt: {args.samples_per_prompt}")
     print(f"Total Target Samples: {total_samples}")
@@ -267,10 +296,8 @@ def main(args):
 
         for j in range(args.samples_per_prompt):
             # i = Prompt Index, j = Sample Index
-            # Stride = 100
             current_seed = args.seed + (i * 100) + j
 
-            # p{prompt_idx}_s{sample_idx}.png
             file_name = f"p{i:04d}_s{j:02d}.png"
             file_path = os.path.join(save_dir, file_name)
 
@@ -279,7 +306,6 @@ def main(args):
             if os.path.exists(file_path):
                 try:
                     gen_image = Image.open(file_path).convert("RGB")
-                    # print(f"Skipping generation for {file_name} (Loaded from disk)")
                 except Exception as e:
                     print(f"Error loading {file_name}, will regenerate: {e}")
                     gen_image = None
@@ -305,11 +331,17 @@ def main(args):
 
     pbar.close()
 
+    print("\n--- FID Sample Count ---")
+    print(f"Real Samples Collected: {evaluator.fid.real_features_num_samples}")
+    print(f"Fake Samples Collected: {evaluator.fid.fake_features_num_samples}")
+    print("------------------------")
+
     print(f"\nComputing final metrics on {total_samples} samples...")
     metrics = evaluator.compute()
 
     print("\n" + "=" * 20 + " Benchmark Report " + "=" * 20)
     print(f"Model: {args.ckpt_path or args.model_type}")
+    print(f"Config: {'FIXED ' + str(args.force_fixed_ratio) if args.force_fixed_ratio > 0 else 'ADAPTIVE'}")
     print(f"Total Samples: {total_samples}")
     print("-" * 30)
     for k, v in metrics.items():
@@ -364,6 +396,13 @@ if __name__ == "__main__":
     )
     parser.add_argument("--merge_lora", action="store_true", default=True)
     parser.add_argument("--no_merge_lora", action="store_false", dest="merge_lora")
+    
+    parser.add_argument(
+        "--force_fixed_ratio", 
+        type=float, 
+        default=-1.0, 
+        help="If > 0, disables Policy and forces a fixed ratio. (e.g. 0.64)"
+    )
 
     args = parser.parse_args()
 

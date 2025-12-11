@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import torch.distributed as dist
+import random
 from typing import Any
 
 from shiva_dit.hook import HookManager
@@ -192,6 +193,9 @@ def _calc_ratio_loss_stratified(
 
     target_val = config.get("target_ratio", 0.8)
     accum_steps = config.get("gradient_accumulation_steps", 16)
+    
+    DEBUG_PRINT_PROB = 0.01
+    is_main_process = (not dist.is_initialized()) or (dist.get_rank() == 0)
 
     if all_ratios.numel() > 0:
         current_ratio = torch.mean(all_ratios)
@@ -209,9 +213,6 @@ def _calc_ratio_loss_stratified(
         
     if "last_cycle_mean" not in state_buffer:
         state_buffer["last_cycle_mean"] = target_val
-        # is_main_process = (not dist.is_initialized()) or (dist.get_rank() == 0)
-        # if is_main_process:
-        #     print(f"[{prefix}] Stratified Buffer Initialized. Target={target_val}")
 
     if has_data:
         state_buffer["history_ratios"].append(current_ratio.item())
@@ -221,6 +222,9 @@ def _calc_ratio_loss_stratified(
         state_buffer["history_counts"].append(0.0)
 
     if len(state_buffer["history_ratios"]) >= accum_steps:
+        if dist.is_initialized():
+            dist.barrier() 
+
         local_sum = sum(state_buffer["history_ratios"])
         local_valid_count = sum(state_buffer["history_counts"])
         
@@ -242,20 +246,31 @@ def _calc_ratio_loss_stratified(
         state_buffer["history_ratios"] = []
         state_buffer["history_counts"] = []
         
-        # is_main_process = (not dist.is_initialized()) or (dist.get_rank() == 0)
-        # if is_main_process:
-        #     print(f"[{prefix}] Cycle Update: Global Mean Est = {cycle_mean:.4f} (Valid Count: {global_count})")
-
     global_mean_est = state_buffer["last_cycle_mean"]
     global_diff = global_mean_est - target_val
     grad_scale = 2.0 * global_diff 
     
     if has_data:
+        # Policy Loss: current_ratio * grad_scale
         loss = w_budget_mse * (current_ratio * grad_scale)
         display_mse = (current_ratio.detach() - target_val) ** 2
     else:
         loss = torch.tensor(0.0, device=device, requires_grad=True)
         display_mse = torch.tensor(0.0, device=device)
+
+    if is_main_process and random.random() < DEBUG_PRINT_PROB:
+        log_cycle_mean = global_mean_est if 'cycle_mean' not in locals() else cycle_mean
+        log_est_mean = global_mean_est
+        log_status = "CYCLE_UPDATE" if 'cycle_mean' in locals() else "ACCUMULATING"
+        
+        print("-" * 60)
+        print(f"[{prefix.upper()} DEBUG LOG] Status: {log_status}")
+        print(f"  > Target: {target_val:.4f} | W_MSE: {w_budget_mse:.4f}")
+        print(f"  > Current Ratio (Micro): {current_ratio.item():.4f}")
+        print(f"  > Estimated Cycle Mean: {log_est_mean:.4f}")
+        print(f"  > Global Diff: {global_diff:.4f} | Grad Scale: {grad_scale:.4f}")
+        print(f"  > Loss Component: {loss.item():.6f}")
+        print("-" * 60)
 
     metrics = {
         f"{prefix}/avg_ratio": current_ratio.detach(),
@@ -484,7 +499,7 @@ def collect_policy_gradient_stats(model, hook_manager, device) -> dict:
     }
 
     verbose_log = False 
-    if torch.rand(1).item() < 0.1: 
+    if torch.rand(1).item() < 0.5: 
         verbose_log = True
 
     for name, policy_net in policies.items():
@@ -567,7 +582,7 @@ def collect_policy_gradient_stats(model, hook_manager, device) -> dict:
             if time_stats:
                 ts_scale = time_stats['scale'].item()
                 ts_shift = time_stats['shift'].item()
-                print(f"    Scale vs Shift: {ts_scale:.4f} vs {ts_shift:.4f}")
+                print(f"    Grad Norm -- Scale vs Shift: {ts_scale:.4f} vs {ts_shift:.4f}")
 
             print(f"{'-'*90}")
 

@@ -3,95 +3,144 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import seaborn as sns
+import os
+from matplotlib import font_manager
+
+# ============================================================
+# 1. Font Configuration
+# ============================================================
+font_path = 'Times New Roman.ttf'
+if os.path.exists(font_path):
+    font_manager.fontManager.addfont(font_path)
+    prop = font_manager.FontProperties(fname=font_path)
+    plt.rcParams['font.family'] = prop.get_name()
+    plt.rcParams['font.serif'] = [prop.get_name()]
+else:
+    plt.rcParams['font.family'] = 'serif'
+    plt.rcParams['font.serif'] = ['Times New Roman']
+
+plt.rcParams['axes.unicode_minus'] = False
+plt.rcParams['mathtext.fontset'] = 'stix'
 
 
-def analyze_and_plot_zoomed(csv_path):
-    # 1. 读取数据 (假设没有表头，如果有请改为 header=0)
-    try:
-        df = pd.read_csv(csv_path, header=None)
-    except Exception as e:
-        print(f"读取失败: {e}")
+# ============================================================
+# 2. Main Function
+# ============================================================
+def analyze_and_plot_advanced(csv_path, output_name="ratio_analysis_advanced"):
+
+    if not os.path.exists(csv_path):
+        print(f"Error: {csv_path} not found.")
         return
+    
+    df = pd.read_csv(csv_path, header=None)
 
-    # 计算均值
+    # Layer Means
     layer_means = df.mean(axis=0)
-    timestep_means = df.mean(axis=1)
+    idx_core = layer_means.idxmax()
+    idx_detail = 0  
 
-    # --- 关键修改点 1: 获取数据的动态范围 ---
-    # 我们不再假设范围是 0~1，而是看数据到底在哪
-    # 为了防止贴边，稍微加一点 padding (例如上下各留 10% 的余量)
-    
-    # 全局数据的极值 (用于热力图)
-    g_min, g_max = df.values.min(), df.values.max()
-    
-    # Layer均值的极值 (用于上方折线图)
-    l_min, l_max = layer_means.min(), layer_means.max()
-    l_span = l_max - l_min
-    l_ylim = (l_min - l_span * 0.2, l_max + l_span * 0.2) # 上下扩充20%
-    
-    # Timestep均值的极值 (用于右侧折线图)
-    t_min, t_max = timestep_means.min(), timestep_means.max()
-    t_span = t_max - t_min
-    t_xlim = (t_min - t_span * 0.2, t_max + t_span * 0.2)
+    # Temporal deviation
+    df_deviation = df - df.mean(axis=0)
 
-    print(f"检测到数据范围: {g_min:.4f} ~ {g_max:.4f}")
-    print(f"正在进行动态缩放可视化...")
+    # Lines for C panel
+    line_core = df_deviation.iloc[:, idx_core]
+    line_detail = df_deviation.iloc[:, idx_detail]
+    line_mean = df.mean(axis=1) - df.mean(axis=1).mean()
 
-    # 2. 绘图
-    fig = plt.figure(figsize=(12, 10))
-    gs = gridspec.GridSpec(4, 4, wspace=0.08, hspace=0.08)
+    # ============================================================
+    # 3. Figure Canvas
+    # ============================================================
+    fig = plt.figure(figsize=(12, 5.5), constrained_layout=True)
 
-    # --- A. 中间热力图 (Zoomed Color) ---
-    ax_heatmap = fig.add_subplot(gs[1:4, 0:3])
-    
-    # 关键修改：vmin 和 vmax 不再是 0 和 1
-    # 而是紧贴数据的真实范围，这样哪怕只有 0.01 的差别，颜色也会从“最黑”变成“最亮”
-    sns.heatmap(df, cmap='magma', 
-                vmin=g_min, vmax=g_max,  # <--- 核心改动
-                ax=ax_heatmap, cbar=False,
-                xticklabels=5, yticklabels=10)
-    
-    ax_heatmap.set_xlabel('Transformer Layers', fontsize=12)
-    ax_heatmap.set_ylabel('Timesteps', fontsize=12)
+    # 调整 a 和 b 的相对高度
+    gs = gridspec.GridSpec(
+        2, 2, figure=fig,
+        width_ratios=[3.4, 1.3],
+        height_ratios=[2.0, 2.0]   # 🔥 a 更大, b 更小
+    )
 
-    # --- B. 顶部 Layer 均值 (Zoomed Y-Axis) ---
-    ax_layer = fig.add_subplot(gs[0, 0:3], sharex=ax_heatmap)
-    ax_layer.plot(layer_means.index, layer_means.values, color='#1f77b4', linewidth=2, marker='o', markersize=3)
-    
-    # 关键修改：取消 set_ylim(0, 1)，使用动态范围
-    ax_layer.set_ylim(l_ylim) 
-    ax_layer.set_ylabel('Avg Ratio', fontsize=10)
-    ax_layer.set_title(f'Layer-wise Avg (Range: {l_min:.3f}-{l_max:.3f})', fontsize=12) # 标题显示范围
-    plt.setp(ax_layer.get_xticklabels(), visible=False)
-    ax_layer.grid(True, linestyle=':', alpha=0.6)
+    # ------------------------------------------------------------
+    # (a) Structural Baseline
+    # ------------------------------------------------------------
+    ax_bar = fig.add_subplot(gs[0, 0])
 
-    # --- C. 右侧 Timestep 均值 (Zoomed X-Axis) ---
-    ax_time = fig.add_subplot(gs[1:4, 3], sharey=ax_heatmap)
-    ax_time.plot(timestep_means.values, timestep_means.index, color='#d62728', linewidth=2, marker='.', markersize=2)
-    
-    # 关键修改：取消 set_xlim(0, 1)，使用动态范围
-    ax_time.set_xlim(t_xlim)
-    ax_time.set_xlabel('Avg Ratio', fontsize=10)
-    # 在标题显示变化幅度，证明“虽然小，但是有趋势”
-    ax_time.set_title(f'Time Trend\n(Δ={t_max-t_min:.3f})', fontsize=10) 
-    
-    plt.setp(ax_time.get_yticklabels(), visible=False)
-    ax_time.grid(True, linestyle=':', alpha=0.6)
+    norm = plt.Normalize(0, 1)
+    colors = plt.cm.magma(norm(layer_means.values))
 
-    # --- Colorbar ---
-    # 这里的 Colorbar 会显示真实的数值范围（例如 0.61 - 0.63）
-    cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.25])
-    norm = plt.Normalize(g_min, g_max)
-    sm = plt.cm.ScalarMappable(cmap='magma', norm=norm)
-    sm.set_array([])
-    fig.colorbar(sm, cax=cbar_ax, label='Keep Ratio (Zoomed)')
+    ax_bar.bar(layer_means.index + 0.5, layer_means.values,
+               color=colors, edgecolor='none', width=0.8)
 
-    plt.suptitle('Adaptive Ratio Analysis (Auto-Scaled View)', fontsize=16, y=0.95)
-    
-    save_path = 'ratio_analysis_zoomed.pdf'
-    plt.savefig(save_path, bbox_inches='tight', dpi=300)
-    print(f"图表已保存至: {save_path}")
+    ax_bar.set_xlim(0, df.shape[1])
+    ax_bar.set_ylim(0, 1.05)
+    ax_bar.set_ylabel('Avg Ratio', fontsize=10)
+    ax_bar.set_title('(a) Structural Baseline (Layer Importance)', fontsize=11, fontweight='bold', loc='left')
+    ax_bar.grid(axis='y', linestyle=':', alpha=0.4)
+    plt.setp(ax_bar.get_xticklabels(), visible=False)
+
+    # ------------------------------------------------------------
+    # (b) Heatmap – High Contrast “Seismic”
+    # ------------------------------------------------------------
+    ax_heat = fig.add_subplot(gs[1, 0], sharex=ax_bar)
+
+    limit = max(abs(df_deviation.min().min()), abs(df_deviation.max().max()))
+
+    sns.heatmap(
+        df_deviation, cmap='seismic', center=0,
+        vmin=-limit, vmax=limit,
+        ax=ax_heat,
+        cbar_kws={'label': 'Deviation from Mean ($\\Delta$ Ratio)', 'orientation': 'horizontal', 'pad': 0.18}
+    )
+
+    ax_heat.set_xlabel('Transformer Layer Depth', fontsize=11)
+    ax_heat.set_ylabel('Timestep $t$', fontsize=11)
+
+    ax_heat.set_xticks(np.arange(0, df.shape[1], 2) + 0.5)
+    ax_heat.set_xticklabels(np.arange(1, df.shape[1] + 1, 2), fontsize=9)
+
+    yticks = [0.5, 24.5, 49.5]
+    ax_heat.set_yticks(yticks)
+    ax_heat.set_yticklabels(['Image ($t=0$)', 'Transition', 'Noise ($t=1$)'], fontsize=9)
+
+    ax_heat.set_title('(b) Temporal Deviation Map (Blue → Drop, Red → Rise)', fontsize=11, fontweight='bold', loc='left')
+
+    # ------------------------------------------------------------
+    # (c) Dynamics Line Plot
+    # ------------------------------------------------------------
+    ax_line = fig.add_subplot(gs[:, 1], sharey=ax_heat)
+
+    y_axis = np.arange(df.shape[0]) + 0.5
+
+    ax_line.plot(line_mean, y_axis, 'k--', linewidth=1.5, alpha=0.6, label='Global')
+    ax_line.plot(line_core, y_axis, color='#d73027', linewidth=2.5, label=f'Layer {idx_core}')
+    ax_line.plot(line_detail, y_axis, color='#4575b4', linewidth=2.5, label=f'Layer {idx_detail}')
+
+    ax_line.axvline(0, color='gray', linestyle='-', linewidth=0.6, alpha=0.3)
+
+    ax_line.set_title('(c) Dynamics Profile', fontsize=11, fontweight='bold', loc='left')
+    ax_line.set_xlabel('$\\Delta$ Ratio (Deviation)', fontsize=10)
+
+    x_limit = max(abs(line_core).max(), abs(line_detail).max()) * 1.25
+    ax_line.set_xlim(-x_limit, x_limit)
+
+    # 右上角 legend
+    ax_line.legend(loc='upper right', fontsize=8, frameon=True)
+
+    # 注释更明显
+    ax_line.text(x_limit * 0.55, df.shape[0] * 0.70,
+                 'Structure Layer\n(Rising Trend)',
+                 color='#d73027', fontsize=9, fontweight='bold')
+
+    ax_line.text(-x_limit * 0.55, df.shape[0] * 0.30,
+                 'Detail Layer\n(Falling Trend)',
+                 color='#4575b4', fontsize=9, ha='right', fontweight='bold')
+
+    # 保存
+    plt.savefig(f"{output_name}.pdf", dpi=300)
+    plt.savefig(f"{output_name}.png", dpi=300)
+    print(f"Saved: {output_name}.pdf / .png")
+
     plt.show()
 
 
-analyze_and_plot_zoomed('adaptiva_ratio.csv')
+if __name__ == "__main__":
+    analyze_and_plot_advanced("adaptiva_ratio.csv")

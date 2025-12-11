@@ -240,7 +240,7 @@ class DiffusionModelTrainer:
         )
 
     @staticmethod
-    def _get_dtype(self, mixed_precision: str):
+    def _get_dtype(mixed_precision: str):
         if mixed_precision == "bf16":
             dtype = torch.bfloat16
         elif mixed_precision == "fp16":
@@ -255,7 +255,7 @@ class DiffusionModelTrainer:
         self.pipe, self.model_attrs = get_pipeline(
             self.model_type,
             model_path=config.model_path,
-            dtype=DiffusionModelTrainer._get_dtype(self, config.mixed_precision),
+            dtype=DiffusionModelTrainer._get_dtype(config.mixed_precision),
         )
 
         self.image_processor = self.pipe.image_processor
@@ -276,7 +276,7 @@ class DiffusionModelTrainer:
             teacher_pipe, teacher_attrs = get_pipeline(
                 self.model_type,
                 model_path=config.model_path,
-                dtype=DiffusionModelTrainer._get_dtype(self, config.mixed_precision),
+                dtype=DiffusionModelTrainer._get_dtype(config.mixed_precision),
             )
             self.teacher_model = getattr(teacher_pipe, teacher_attrs[0])
             assert len(teacher_attrs) == 1, "Currently only single DiT model is supported."
@@ -411,15 +411,15 @@ class DiffusionModelTrainer:
             self.train_dataloader,
         ]
 
-        if self.teacher_model is not None:
-            prepare_list.insert(1, self.teacher_model)
+        # if self.teacher_model is not None:
+        #     prepare_list.insert(1, self.teacher_model)
 
         prepared = self.accelerator.prepare(*prepare_list)
 
         idx = 0
         self.model = prepared[idx]; idx += 1
-        if self.teacher_model is not None:
-            self.teacher_model = prepared[idx]; idx += 1
+        # if self.teacher_model is not None:
+        #     self.teacher_model = prepared[idx]; idx += 1
         self.optimizer = prepared[idx]; idx += 1
         self.train_dataloader = prepared[idx]; idx += 1
         if self.val_dataloader is not None:
@@ -966,7 +966,7 @@ class DiffusionModelTrainer:
                 model_kwargs["output_hidden_states"] = True
                 model_kwargs["output_hidden_states_step"] = 1
             
-            with torch.no_grad():
+            with torch.autocast(device_type=self.device.type, dtype=DiffusionModelTrainer._get_dtype(self.config.mixed_precision)), torch.no_grad():
                 teacher_output = self.teacher_model(
                     hidden_states=noisy_latents,
                     timestep=timesteps,
@@ -1181,7 +1181,7 @@ class DiffusionModelTrainer:
             self._compute_loss(batch, self.global_step, is_validation=False)
         )
 
-        debug_interval = 50
+        debug_interval = 20
         if self.global_step % debug_interval == 0 and self.accelerator.is_main_process:
             print(f"\n{'='*30} [Gradient Analysis Monitor Step {self.global_step}] {'='*30}")
             
@@ -1242,24 +1242,34 @@ class DiffusionModelTrainer:
                     return stats
 
                 main_stats = measure_grads(main_loss, "Main")
+                distill_final_stats = measure_grads(distill_loss_final, "DistillFinal")
+                distill_mid_stats = measure_grads(distill_loss_mid, "DistillMid")
                 hook_stats = measure_grads(hook_loss, "Hook")
             
             print(f"\n  > Component Gradient Analysis (Norm / Max):")
-            header = f"    {'Module Name':<15} | {'Main Grad':<18} | {'Hook Grad':<18} | {'Force Ratio (H/M)':<18}"
+            header = f"    {'Module Name':<15} | {'Main Grad':<12} | {'Ratio MSE (H)':<12} | {'Distill Final':<15} | {'Distill Mid':<15} | {'Total Aux / Main':<18}"
             print(header); print(f"    {'-'*len(header)}")
 
             for name in ["Router", "Gater", "Ratio(Time)", "Ratio(Layer)", "Ratio(Mix)", "Fuser", "Ctx(Policy)", "Ctx(Pruner)"]:
                 if name not in param_groups or not param_groups[name]: continue
                 m_norm, m_max = main_stats[name]
-                h_norm, h_max = hook_stats[name]
+                dist_final_norm, dist_final_max = distill_final_stats[name]
+                dist_mid_norm, dist_mid_max = distill_mid_stats[name]
+                h_norm, h_max = hook_stats[name] 
 
+                total_aux_norm = h_norm
+                total_main_norm = m_norm + dist_final_norm + dist_mid_norm
                 if m_norm < 1e-9:
-                    ratio_str = "INF (Hook Only)" if h_norm > 1e-9 else "0.00x (No Grad)"
+                    ratio_str = "INF" if total_aux_norm > 1e-9 else "0.00x"
                 else:
-                    ratio_str = f"{h_norm / m_norm:.2f}x"
+                    ratio_str = f"{total_aux_norm / total_main_norm:.2f}x"
                 
-                marker = " <!! No Main Grad" if ("Ratio" in name and m_norm < 1e-5 and h_norm > 1e-3) else ""
-                print(f"    {name:<15} | {m_norm:.4f} / {m_max:<9.4f} | {h_norm:.4f} / {h_max:<9.4f} | {ratio_str:<18}{marker}")
+                main_grad_str = f"{m_norm:.4f}/{m_max:<5.4f}"
+                dist_final_grad_str = f"{dist_final_norm:.4f}/{dist_final_max:<5.4f}"
+                dist_mid_grad_str = f"{dist_mid_norm:.4f}/{dist_mid_max:<5.4f}"
+                h_grad_str = f"{h_norm:.4f}/{h_max:<5.4f}"
+                
+                print(f"    {name:<15} | {main_grad_str:<12} | {h_grad_str:<12} | {dist_final_grad_str:<15} | {dist_mid_grad_str:<15} | {ratio_str:<18}")
 
             rt_norm, _ = main_stats.get("Ratio(Time)", (0,0))
             rl_norm, _ = main_stats.get("Ratio(Layer)", (0,0))
@@ -1267,7 +1277,7 @@ class DiffusionModelTrainer:
                  print(f"\n  ⚠️  [ALERT] RatioPolicy implies 'Layer Bias' learning but IGNORING 'Time' info!")
 
             self.optimizer.zero_grad(set_to_none=True)
-            print(f"{'='*86}\n")
+            print(f"{'='*90}\n")
 
         self.accelerator.backward(total_loss)
         if self.config.enable_gradient_checkpointing:
