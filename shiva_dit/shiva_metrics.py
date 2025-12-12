@@ -486,6 +486,7 @@ def generate_router_heatmap(token_scores, sel_idx, height, width):
 def collect_policy_gradient_stats(model, hook_manager, device) -> dict:
     stats = {}
     target_hook = None
+
     for hook in hook_manager.get_all_hooks().values():
         if hasattr(hook, 'image_ratio_policy') and hook.image_ratio_policy is not None:
             target_hook = hook
@@ -505,17 +506,28 @@ def collect_policy_gradient_stats(model, hook_manager, device) -> dict:
     for name, policy_net in policies.items():
         if policy_net is None: continue
 
-        layer_grad_norm_total = torch.tensor(0.0, device=device)
-        time_grad_norm_total = torch.tensor(0.0, device=device)
-        mlp_grad_norm_total = torch.tensor(0.0, device=device)
+        # Layer Path
+        grad_l_emb = torch.tensor(0.0, device=device)
+        grad_l_mlp = torch.tensor(0.0, device=device)
+        
+        # Time Path
+        grad_t_mlp = torch.tensor(0.0, device=device)
+        
+        # Bias
+        grad_bias = torch.tensor(0.0, device=device)
 
-        # --- 1. Layer Embeddings ---
+        # ============================================================
+        # 1. Layer Branch Analysis (拟合空间差异的主力)
+        # ============================================================
+        
+        # 1.1 Layer Embedding
         if hasattr(policy_net, 'layer_emb'):
             param = policy_net.layer_emb.weight
             if param.grad is not None:
                 grad = param.grad.detach()
-                layer_grad_norm_total = grad.norm() 
+                grad_l_emb = grad.norm()
                 
+                # 统计活跃层的梯度分布 (检查是否只有部分层在更新)
                 layer_norms = grad.norm(dim=1)
                 active_mask = layer_norms > 1e-8
                 active_layer_norms = layer_norms[active_mask]
@@ -523,67 +535,65 @@ def collect_policy_gradient_stats(model, hook_manager, device) -> dict:
                 if active_layer_norms.numel() > 0:
                     layer_mean = active_layer_norms.mean()
                     layer_std = active_layer_norms.std()
-                    stats[f"grad/{name}/layer_proj_active_mean"] = layer_mean.item()
-                    stats[f"grad/{name}/layer_sensitivity_cv"] = (layer_std / (layer_mean + 1e-6)).item()
+                    stats[f"grad/{name}/layer_emb_mean"] = layer_mean.item()
+                    stats[f"grad/{name}/layer_emb_cv"] = (layer_std / (layer_mean + 1e-6)).item()
 
-        # --- 2. Time Branch ---
-        time_stats = None
-        if hasattr(policy_net, 'time_proj'):
-            if isinstance(policy_net.time_proj, torch.nn.Sequential):
-                param = policy_net.time_proj[-1].weight
-            elif isinstance(policy_net.time_proj, torch.nn.Linear):
-                param = policy_net.time_proj.weight
-            else:
-                param = None
-
-            if param is not None and param.grad is not None:
-                grad = param.grad.detach()
-                time_grad_norm_total = grad.norm()
-                
-                out_dim = grad.shape[0]
-                scale_grad = grad[:out_dim//2, :]
-                shift_grad = grad[out_dim//2:, :]
-                norm_scale = scale_grad.norm()
-                norm_shift = shift_grad.norm()
-                
-                time_stats = {"scale": norm_scale, "shift": norm_shift}
-                
-                stats[f"grad/{name}/temb_scale_norm"] = norm_scale.item()
-                stats[f"grad/{name}/temb_shift_norm"] = norm_shift.item()
-
-        # --- 3. MLP Branch ---
-        if hasattr(policy_net, 'mix_mlp'):
-            grad_list = [p.grad.detach().norm().square() for p in policy_net.mix_mlp.parameters() if p.grad is not None]
+        # 1.2 Layer MLP
+        if hasattr(policy_net, 'layer_mlp'):
+            grad_list = [p.grad.detach().norm().square() for p in policy_net.layer_mlp.parameters() if p.grad is not None]
             if grad_list:
-                mlp_grad_norm_total = torch.stack(grad_list).sum().sqrt()
-                stats[f"grad/{name}/mlp_head_norm"] = mlp_grad_norm_total.item()
+                grad_l_mlp = torch.stack(grad_list).sum().sqrt()
+                stats[f"grad/{name}/layer_mlp_norm"] = grad_l_mlp.item()
 
-        # --- Printing Logic ---
-        if verbose_log and (layer_grad_norm_total > 0 or time_grad_norm_total > 0):
-            l_val = layer_grad_norm_total.item()
-            t_val = time_grad_norm_total.item()
-            m_val = mlp_grad_norm_total.item()
+        # ============================================================
+        # 2. Time Branch Analysis (应该保持安静的辅助分支)
+        # ============================================================
+        if hasattr(policy_net, 'time_mlp'):
+            grad_list = [p.grad.detach().norm().square() for p in policy_net.time_mlp.parameters() if p.grad is not None]
+            if grad_list:
+                grad_t_mlp = torch.stack(grad_list).sum().sqrt()
+                stats[f"grad/{name}/time_mlp_norm"] = grad_t_mlp.item()
 
-            print(f"\n{'-'*30} Policy Gradient Diagnosis: {name.upper()} {'-'*30}")
-            
-            total_energy = l_val + t_val + m_val + 1e-9
-            l_pct = l_val / total_energy
-            t_pct = t_val / total_energy
-            m_pct = m_val / total_energy
-            
-            def draw_bar(val, length=20):
+        # ============================================================
+        # 3. Global Bias Analysis (全局锚点)
+        # ============================================================
+        if hasattr(policy_net, 'global_bias') and policy_net.global_bias.grad is not None:
+            grad_bias = policy_net.global_bias.grad.detach().norm()
+            stats[f"grad/{name}/global_bias_norm"] = grad_bias.item()
+
+        # ============================================================
+        # 4. Visualization & Logging
+        # ============================================================
+        
+        total_l_energy = grad_l_emb + grad_l_mlp
+        total_t_energy = grad_t_mlp
+        total_energy = total_l_energy + total_t_energy + grad_bias + 1e-9
+        
+        l_pct = total_l_energy / total_energy
+        t_pct = total_t_energy / total_energy
+        b_pct = grad_bias / total_energy
+
+        if verbose_log and total_energy > 1e-8:
+            def draw_bar(val, length=25):
                 fill = int(val * length)
                 return f"|{'#'*fill}{'-'*(length-fill)}|"
 
-            print(f"  > Component Impact Distribution:")
-            print(f"    Layer Emb : {draw_bar(l_pct)} {l_pct*100:5.1f}% (Norm: {l_val:.4f})")
-            print(f"    Time Proj : {draw_bar(t_pct)} {t_pct*100:5.1f}% (Norm: {t_val:.4f})")
+            print(f"\n{'-'*30} [Policy Gradient Health: {name.upper()}] {'-'*30}")
+            print(f"  > Gradient Energy Distribution (Target: L >> T):")
+            print(f"    [L] Layer Branch : {draw_bar(l_pct)} {l_pct*100:5.1f}% (Norm: {total_l_energy:.4f})")
+            print(f"    [T] Time Branch  : {draw_bar(t_pct)} {t_pct*100:5.1f}% (Norm: {total_t_energy:.4f})")
+            print(f"    [B] Global Bias  : {draw_bar(b_pct)} {b_pct*100:5.1f}% (Norm: {grad_bias:.4f})")
             
-            if time_stats:
-                ts_scale = time_stats['scale'].item()
-                ts_shift = time_stats['shift'].item()
-                print(f"    Grad Norm -- Scale vs Shift: {ts_scale:.4f} vs {ts_shift:.4f}")
-
-            print(f"{'-'*90}")
+            print(f"\n  > Detailed Components:")
+            print(f"    Layer Emb Norm : {grad_l_emb:.4f} (CV: {stats.get(f'grad/{name}/layer_emb_cv', 0):.2f})")
+            print(f"    Layer MLP Norm : {grad_l_mlp:.4f}")
+            print(f"    Time MLP Norm  : {grad_t_mlp:.4f} {'(Healthy: Low)' if grad_t_mlp < grad_l_mlp else '(Warning: High)'}")
+            
+            if t_pct > l_pct:
+                print(f"    ⚠️  ALARM: Time branch is dominating gradients! Check initialization (should be zero).")
+            elif l_pct > 0.9:
+                print(f"    ✅  HEALTHY: Spatial adaptivity is driving the learning.")
+                
+            print(f"{'-'*92}")
 
     return stats

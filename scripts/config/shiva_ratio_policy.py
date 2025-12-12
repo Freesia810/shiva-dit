@@ -53,11 +53,11 @@ stage_config_dict = {
         {
             "steps": 14000,
             "weights": {
-                "ratio": [0.0, 10.0, 2.5],
+                "ratio": [0.0, 10.0, 5.0],
                 "gate": 0.0,
                 "distill": [0.0, 0.0],
             },
-            "lr": [1e-6, 1e-5, 0.0, 0.0, 2e-5, 0.0, 0.0],
+            "lr": [1e-6, 1e-5, 0.0, 0.0, 2e-6, 0.0, 0.0],
             "temp": [15.0, 15.0, 20.0, 50.0],
         },
 
@@ -68,7 +68,7 @@ stage_config_dict = {
                 "gate": 0.0,
                 "distill": [0.0, 0.0],
             },
-            "lr": [1e-6, 1e-5, 0.0, 0.0, 1e-6, 0.0, 0.0],
+            "lr": [1e-6, 1e-5, 0.0, 0.0, 1e-7, 0.0, 0.0],
             "temp": [15.0, 15.0, 50.0, 100.0],
         },
     ],
@@ -152,10 +152,11 @@ trainer_config = {
     "log_with_tensorboard": True,
 }
 
-print(hook_config)
-print(lora_config)
-print(trainer_config)
+if __name__ == "__main__":
+    print(hook_config)
+    print(lora_config)
+    print(trainer_config)
 
-config = TrainerConfig(**trainer_config)
-trainer = DiffusionModelTrainer(config=config)
-trainer.train()
+    config = TrainerConfig(**trainer_config)
+    trainer = DiffusionModelTrainer(config=config)
+    trainer.train()
