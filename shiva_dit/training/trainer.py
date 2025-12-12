@@ -1838,7 +1838,7 @@ class DiffusionModelTrainer:
             t_label = "Timestep (0 -> 1000)"
 
         # Prepare Grid Tensors
-        valid_layers_tensor = torch.tensor(valid_layers, device=self.device, dtype=torch.long)
+        valid_layers_tensor = torch.tensor(valid_layers, device=self.device, dtype=self.dtype)
         
         # Meshgrid: (Steps, Layers)
         t_grid, l_grid = torch.meshgrid(t_model_input, valid_layers_tensor, indexing='ij')
