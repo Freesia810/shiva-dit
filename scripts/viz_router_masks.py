@@ -8,7 +8,6 @@ import matplotlib.gridspec as gridspec
 import numpy as np
 from shiva_dit.training.config import TrainerConfig, LoraConfig
 from shiva_dit.training.trainer import DiffusionModelTrainer
-
 from shiva_dit.hook import HookManager
 from shiva_dit.shiva_hook import ShivaDitBlockHook
 from shiva_dit.utils import global_context
@@ -25,7 +24,7 @@ if os.path.exists(FONT_PATH):
     custom_font_name = prop.get_name()
     print(f"Using font: {custom_font_name}")
 else:
-    print(f"Custom font not found at {FONT_PATH}. Using system serif.")
+    print(f"Custom font not found. Using system serif.")
     plt.rcParams['font.serif'] = ['Times New Roman', 'Times', 'DejaVu Serif', 'serif']
 
 plt.rcParams['font.family'] = custom_font_name
@@ -38,34 +37,30 @@ plt.rcParams['axes.unicode_minus'] = False
 mode = 'max'
 HOOK_CONFIG = copy.deepcopy(hook_config[mode])
 HOOK_CONFIG["fixed_image_ratio"] = 0.6
+HOOK_CONFIG["ratio_bottleneck_dim"] = 256
 HOOK_CONFIG["capture_mask_for_viz"] = True
 HOOK_CONFIG["skip_layer_indices"] = [0]
 
+# --- Input Image & Prompt ---
 IMAGE_PATH = "/home/admin/workspace/aop_lab/app_source/dataset/MJHQ-30K/indoor/45de4fb1e89b0d07d76b71bdcb6e6f02fabfdbb0.jpg"
 PROMPT = "A jawdropping image of a bold red Ferrari SF90 Stradale, displayed inside a luxurious, highrise apartment in Tokyo, Japan, during a neonlit night. The cars striking design is accentuated by the citys dazzling lights, visible through the floortoceiling windows. This photograph embodies the fusion of automotive art and modern living, rendered in stunning 8K UHD resolution"
+
 OUTPUT_DIR = "./viz_results"
-CHECKPOINT_PATH = f"./checkpoints-{mode}/final.pt"
+CHECKPOINT_PATH = "checkpoints_adaptive/best_val_main_loss.pt"
 
 TIMESTEPS_TO_VIZ = [900, 700, 500, 100]  
 LAYERS_TO_VIZ = [1, 8, 15, 23]           
 TEMP_META_FILE = "./viz_temp_meta.jsonl"
 
 def create_temp_metadata():
+    if not os.path.exists(IMAGE_PATH):
+        raise FileNotFoundError(f"Image not found: {IMAGE_PATH}")
     abs_image_path = os.path.abspath(IMAGE_PATH)
     image_dir = os.path.dirname(abs_image_path)
     data = {"file_name": os.path.basename(abs_image_path), "text": PROMPT}
     with open(TEMP_META_FILE, "w") as f:
         f.write(json.dumps(data) + "\n")
     return image_dir
-
-def load_weights(trainer, ckpt_path):
-    print(f"Loading weights from {ckpt_path}...")
-    state_dict = torch.load(ckpt_path, map_location=trainer.device)
-    if "model" in state_dict:
-        state_dict = state_dict["model"]
-    new_sd = {k.replace("module.", ""): v for k, v in state_dict.items()}
-    trainer.model.load_state_dict(new_sd, strict=False)
-    print("Weights loaded.")
 
 def plot_histogram_grid(data_storage, row_labels, col_labels, save_path):
     plt.rcParams['mathtext.fontset'] = 'stix'  
@@ -76,7 +71,6 @@ def plot_histogram_grid(data_storage, row_labels, col_labels, save_path):
         prop_regular = fm.FontProperties(fname=font_path)
         prop_bold = fm.FontProperties(fname=font_path, weight='bold')
     else:
-        print("Warning: Times New Roman.ttf not found. Using system serif.")
         prop_regular = fm.FontProperties(family='serif')
         prop_bold = fm.FontProperties(family='serif', weight='bold')
 
@@ -116,7 +110,6 @@ def plot_histogram_grid(data_storage, row_labels, col_labels, save_path):
                         ha='right', va='top',
                         bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="none", alpha=0.7)
                         )
-                
             else:
                 ax.text(0.5, 0.5, "N/A", ha='center', va='center', fontproperties=prop_regular)
             
@@ -153,22 +146,18 @@ def plot_paper_grid(data_storage, row_labels, col_labels, save_path):
     n_layers = len(col_labels)
     
     fig = plt.figure(figsize=(11, 2.3 * rows + 1), constrained_layout=True)
-    
     width_ratios = [1, 0.15] + [1] * n_layers
-    
     gs_main = gridspec.GridSpec(rows + 1, 2 + n_layers, figure=fig, 
                                 width_ratios=width_ratios,
                                 height_ratios=[1.0] * rows + [0.08], 
                                 hspace=0.05, wspace=0.02)
 
-    # cmap = 'viridis'
     cmap = 'inferno'
     vmin, vmax = 0.0, 1.0
     images_for_cbar = []
 
     for row_idx, t_val in enumerate(row_labels):
         ax_img = fig.add_subplot(gs_main[row_idx, 0])
-        
         img_key = (t_val, 'input')
         if img_key in data_storage:
             img_data = data_storage[img_key]
@@ -176,10 +165,7 @@ def plot_paper_grid(data_storage, row_labels, col_labels, save_path):
         else:
             ax_img.text(0.5, 0.5, "N/A", ha='center', va='center')
         
-        ax_img.set_xticks([])
-        ax_img.set_yticks([])
-        # ax_img.axis('off')
-        
+        ax_img.set_xticks([]); ax_img.set_yticks([])
         t_display = int(t_val) if t_val > 1.0 else f"{t_val:.2f}"
         ax_img.text(-0.1, 0.5, f"t ≈ {t_display}", fontsize=16, fontweight='bold', 
                     rotation=90, ha='right', va='center', transform=ax_img.transAxes)
@@ -198,26 +184,17 @@ def plot_paper_grid(data_storage, row_labels, col_labels, save_path):
                                     interpolation='nearest', aspect='equal')
                 if row_idx == 0 and i == 0: images_for_cbar.append(im)
             else:
-                ax_mask.text(0.5, 0.5, "N/A", ha='center', va='center')
-                ax_mask.axis('off')
-                continue
+                ax_mask.axis('off'); continue
             
-            ax_mask.set_xticks([])
-            ax_mask.set_yticks([])
-            # ax_mask.axis('off')
-            
+            ax_mask.set_xticks([]); ax_mask.set_yticks([])
             if row_idx == 0:
                 ax_mask.set_title(f"Layer {layer_idx}", fontsize=16, fontweight='bold', pad=10)
 
     cbar_ax = fig.add_subplot(gs_main[rows, :])
-
     cbar = fig.colorbar(images_for_cbar[0], cax=cbar_ax, orientation='horizontal', fraction=0.5)
-    
-    cbar.ax.xaxis.set_ticks_position('bottom')
     cbar.set_label('Router Importance Score', fontsize=14, fontweight='bold', labelpad=5)
     cbar.ax.tick_params(labelsize=12)
     cbar.outline.set_visible(False)
-    
     cbar_ax.set_aspect(0.03) 
 
     os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
@@ -249,17 +226,17 @@ def main():
     trainer = DiffusionModelTrainer(config)
 
     if os.path.exists(CHECKPOINT_PATH):
-        load_weights(trainer, CHECKPOINT_PATH)
+        print(f">>> Loading checkpoint from {CHECKPOINT_PATH}...")
+        trainer.load_from_checkpoint(CHECKPOINT_PATH)
     else:
-        print("No checkpoint found. Skipping loading weights.")
+        print(f"Warning: Checkpoint not found at {CHECKPOINT_PATH}. Using random init.")
 
     dataloader = trainer.train_dataloader
     batch = next(iter(dataloader))
-
-    print(">>> Preparing Model Inputs...")
+    
     with torch.no_grad():
-        img_latents, noise, _, _, model_kwargs = trainer._prepare_model_inputs(batch)
-
+        img_latents, _, _, _, _ = trainer.prepare_model_inputs(batch, timestep_index=0)
+    
     if config.model_type == "sd3":
         H, W = img_latents.shape[-2], img_latents.shape[-1]
         grid_h, grid_w = H // 2, W // 2
@@ -282,53 +259,35 @@ def main():
         
         diffs = torch.abs(all_scheduler_timesteps - desired_t)
         nearest_idx = torch.argmin(diffs)
-        actual_t_tensor = all_scheduler_timesteps[nearest_idx] 
-        actual_t_val = actual_t_tensor.item()
+        
+        actual_t_val = all_scheduler_timesteps[nearest_idx].item()
         actual_timesteps_used.append(actual_t_val)
         
-        print(f"  Target: {desired_t} -> Nearest: {actual_t_val:.4f}")
+        print(f"  Target: {desired_t} -> Nearest: {actual_t_val:.4f} (Index: {nearest_idx})")
 
-        target_t = actual_t_tensor.unsqueeze(0).repeat(B)
+        t_idx_tensor = torch.tensor([nearest_idx], device=trainer.device).repeat(B)
 
-        if config.model_type in ["flux-dev", "sd3", "qwen-image-edit"]:
-            noisy_latents_input = trainer.scheduler.scale_noise(
-                sample=img_latents,
-                timestep=target_t,
-                noise=noise,
-            )
-        else:
-            noisy_latents_input = trainer.scheduler.add_noise(
-                original_samples=img_latents,
-                noise=noise,
-                timesteps=target_t,
+        with torch.no_grad():
+            _, _, noisy_latents, model_timesteps, model_kwargs = trainer.prepare_model_inputs(
+                batch, timestep_index=t_idx_tensor
             )
 
         with torch.no_grad():
-            # SD3: (x - shift) * scale -> x / scale + shift
             if config.model_type == "sd3":
-                latents_for_viz = (noisy_latents_input / trainer.vae.config.scaling_factor) + trainer.vae.config.shift_factor
+                latents_for_viz = (noisy_latents / trainer.vae.config.scaling_factor) + trainer.vae.config.shift_factor
             else:
-                latents_for_viz = noisy_latents_input / trainer.vae.config.scaling_factor
+                latents_for_viz = noisy_latents / trainer.vae.config.scaling_factor
 
-            # VAE Decode
             decoded_img = trainer.vae.decode(latents_for_viz, return_dict=False)[0]
             decoded_img = (decoded_img / 2 + 0.5).clamp(0, 1)
             img_np = decoded_img[0].permute(1, 2, 0).cpu().float().numpy()
             
             collected_maps[(actual_t_val, 'input')] = img_np
 
-        # 3. Model Forward
-        if config.model_type in ["flux-dev", "qwen-image-edit"]:
-            global_context.update(current_timestep=target_t)
-            model_t_input = target_t / 1000.0
-        else:
-            global_context.update(current_timestep=target_t)
-            model_t_input = target_t
-
         with torch.no_grad():
             trainer.model(
-                hidden_states=noisy_latents_input,
-                timestep=model_t_input,
+                hidden_states=noisy_latents,
+                timestep=model_timesteps,
                 **model_kwargs,
             )
 

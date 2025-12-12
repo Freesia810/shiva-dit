@@ -50,7 +50,7 @@ class ShivaRatioPolicy(nn.Module):
         self, 
         total_layers: int,
         time_embed_dim: int,
-        ratio_bottleneck_dim: int,
+        ratio_bottleneck_dim: int, 
         init_ratio: float,
         **kwargs
     ):
@@ -58,118 +58,97 @@ class ShivaRatioPolicy(nn.Module):
         self.init_ratio_val = init_ratio
         
         self.layer_emb = nn.Embedding(total_layers, ratio_bottleneck_dim)
-        self.time_proj = nn.Sequential(
-            nn.Linear(time_embed_dim, ratio_bottleneck_dim),
-            nn.SiLU(),
-            nn.Linear(ratio_bottleneck_dim, ratio_bottleneck_dim * 2)
-        )
-
-        in_dim = ratio_bottleneck_dim 
-        self.layer_norm = nn.LayerNorm(ratio_bottleneck_dim)
-        
-        self.mix_mlp = nn.Sequential(
-            nn.Linear(in_dim, ratio_bottleneck_dim),
+        self.layer_mlp = nn.Sequential(
+            nn.Linear(ratio_bottleneck_dim, ratio_bottleneck_dim),
             nn.SiLU(),
             nn.Linear(ratio_bottleneck_dim, 1)
         )
 
-        self.has_reset_parameters = False
+        self.time_mlp = nn.Sequential(
+            nn.Linear(time_embed_dim, ratio_bottleneck_dim),
+            nn.SiLU(),
+            nn.Linear(ratio_bottleneck_dim, 1)
+        )
+
+        self.global_bias = nn.Parameter(torch.zeros(1))
+
         self.reset_parameters()
 
     def reset_parameters(self):
-        # -------------------------------------------------------------------
-        # MODIFICATION 1: 抑制 Time Proj 最终输出层的幅度
-        # -------------------------------------------------------------------
-        # Problem: Xavier init on the final head causes scale/shift magnitude (~5.6) to be too high.
-        # Action: We initialize all layers first (as original), then override the final head.
-        
-        for m in self.time_proj.modules():
+        nn.init.normal_(self.layer_emb.weight, std=0.02)
+        for m in self.layer_mlp.modules():
             if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-
-        # >>> KEY CHANGE 1: OVERRIDE TIME PROJ HEAD SCALING <<<
-        time_proj_head = self.time_proj[-1] 
-        # 将其权重 std 大幅降低（例如 0.005），以将 scale/shift 的输出幅度从 5.x 降到 1.0 以下。
-        nn.init.normal_(time_proj_head.weight, mean=0.0, std=0.005) # <-- 降低调制器的强度
+                nn.init.kaiming_normal_(m.weight, a=0.2)
+                nn.init.zeros_(m.bias)
         
-        
-        # -------------------------------------------------------------------
-        # MODIFICATION 2: 增强 Layer Emb 的信号强度
-        # -------------------------------------------------------------------
-        # Problem: layer_emb 的 std=0.01 太小 (~0.77)，容易被 time proj 淹没。
-        # Action: 增加 std 到 0.1，使其信号更强，能够有效被 scale 调制。
-        
-        # >>> KEY CHANGE 2: INCREASE LAYER EMB SCALING <<<
-        # 增大 std 从 0.01 到 0.1
-        nn.init.normal_(self.layer_emb.weight, mean=0.0, std=0.1) # <-- 增强被调制信号的强度
-
-        
-        # -------------------------------------------------------------------
-        # MIX MLP (保持不变)
-        # -------------------------------------------------------------------
-        for m in self.mix_mlp.modules():
+        for m in self.time_mlp.modules():
             if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-
-        head = self.mix_mlp[-1]
-        nn.init.normal_(head.weight, mean=0.0, std=0.01)
+                nn.init.kaiming_normal_(m.weight, a=0.2)
+                nn.init.zeros_(m.bias)
         
-        # Sigmoid^-1(x) = ln(x / (1-x))
+        nn.init.zeros_(self.time_mlp[-1].weight)
+        nn.init.zeros_(self.time_mlp[-1].bias)
+
         eps = 1e-6
         safe_ratio = max(eps, min(self.init_ratio_val, 1.0 - eps))
         bias_val = math.log(safe_ratio / (1.0 - safe_ratio))
+        nn.init.constant_(self.global_bias, bias_val)
         
-        nn.init.constant_(head.bias, bias_val)
-
-        is_main_process = not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
-        if is_main_process:
-            print(f"[ShivaRatioPolicy] Reset: InitRatio={self.init_ratio_val}, HeadBias={bias_val:.4f}")
+        if not dist.is_initialized() or dist.get_rank() == 0:
+            print(f"[ShivaRatioPolicy] Initialized (Additive). Bias={bias_val:.4f} (Target={self.init_ratio_val})")
 
     def forward(self, temb, layer_idx_tensor):
-        if self.has_reset_parameters is False:
-            self.has_reset_parameters = True
-            self.reset_parameters()
+        l_feat = self.layer_emb(layer_idx_tensor)
+        logits_l = self.layer_mlp(l_feat)
 
-        l_feat = self.layer_emb(layer_idx_tensor) # [B, dim]
-        l_feat = self.layer_norm(l_feat)
+        if temb.dim() == 3:
+            temb = temb.squeeze(1)
+        logits_t = self.time_mlp(temb)
+
+        # Logits = L + T + Bias
+        final_logits = logits_l + logits_t + self.global_bias
         
-        scale, shift = self.time_proj(temb).chunk(2, dim=-1)
-
-        if l_feat.shape[0] != scale.shape[0]:
-             l_feat = l_feat.expand(scale.shape[0], -1)
-
-        combined = l_feat * (1 + scale) + shift 
-        
-        logits = self.mix_mlp(combined) # [B, 1]
-
-        if self.training and torch.rand(1) < 1e-3:
-            is_main_process = not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
-            
-            if is_main_process and global_context.current_stage_idx >= RATIO_STAGE:
-                with torch.no_grad():
+        if self.training and torch.rand(1).item() < 1e-3:
+            with torch.no_grad():
+                is_main_process = not dist.is_initialized() or dist.get_rank() == 0
+                if is_main_process:
+                    probs = torch.sigmoid(final_logits)
                     current_t = global_context.current_timestep
-                    probs = torch.sigmoid(logits)
                     
-                    l_idx_flat = layer_idx_tensor.detach().flatten()
-                    l_idx_str = str(l_idx_flat.cpu().tolist()[0])
+                    l_mean, l_std = logits_l.mean().item(), logits_l.std().item()
+                    t_mean, t_std = logits_t.mean().item(), logits_t.std().item()
+                    bias_val = self.global_bias.item()
+                    
+                    final_mean = final_logits.mean().item()
+                    prob_mean = probs.mean().item()
+                    prob_std = probs.std().item()
+                    prob_min, prob_max = probs.min().item(), probs.max().item()
+                    
+                    unique_layers = layer_idx_tensor.unique().tolist()
+                    unique_layers.sort()
+                    if len(unique_layers) > 5:
+                        layers_str = f"[{min(unique_layers)} ... {max(unique_layers)}] (Count: {len(unique_layers)})"
+                    else:
+                        layers_str = str(unique_layers)
 
-                    mag_layer = l_feat.abs().mean().item()
-                    mag_time_scale = scale.abs().mean().item()
-                    mag_time_shift = shift.abs().mean().item()
+                    print(f"\n{'='*35} [Policy Monitor: Additive] {'='*35}")
+                    print(f"  > Context:")
+                    print(f"      Timestep (Global): {current_t}")
+                    print(f"      Layers in Batch:   {layers_str}")
+                    
+                    print(f"  > Components (Logits):")
+                    print(f"      [L] Layer Branch:  Mean={l_mean:+.4f} | Std={l_std:.4f}")
+                    print(f"      [T] Time Branch:   Mean={t_mean:+.4f} | Std={t_std:.4f}")
+                    print(f"      [B] Global Bias:   Val ={bias_val:+.4f} (Base Ratio ≈ {torch.sigmoid(self.global_bias).item():.3f})")
+                    
+                    print(f"  > Output Analysis:")
+                    print(f"      Final Logits:      Mean={final_mean:+.4f}")
+                    print(f"      Final Probs:       Mean={prob_mean:.4f} | Std={prob_std:.4f}")
+                    print(f"      Probs Range:       [{prob_min:.4f}, {prob_max:.4f}]")
+                    
+                    if prob_mean < 0.05 or prob_mean > 0.95:
+                        print(f"      ⚠️  WARNING: Ratio Saturation! (Too low/high)")
+                    
+                    print(f"{'='*96}\n")
 
-                    print(f"\n{'='*30} [Policy Forward Monitor] {'='*30}")
-                    print(f"  > Current Timestep: {current_t}")
-                    print(f"  > Layer Indices:    {l_idx_str}")
-                    print(f"  > Outputs Stats:")
-                    print(f"      Logits:  Mean={logits.mean().item():.4f} | Std={logits.std().item():.4f} | Range=[{logits.min().item():.4f}, {logits.max().item():.4f}]")
-                    print(f"      Probs:   Mean={probs.mean().item():.4f}  | Std={probs.std().item():.4f}  | Range=[{probs.min().item():.4f}, {probs.max().item():.4f}]")
-                    print(f"  > Weight Analysis:")
-                    print(f"      Layer Emb Mean:  {mag_layer:.4f}")
-                    print(f"      Time Scale Mean: {mag_time_scale:.4f} | Shift Mean: {mag_time_shift:.4f}")
-                    print(f"{'='*78}\n")
-
-        return logits
+        return final_logits

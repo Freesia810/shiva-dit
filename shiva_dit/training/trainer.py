@@ -86,10 +86,14 @@ from shiva_dit.training.logging import NoOpLogger
 from shiva_dit.training.metric_manager import MetricManager
 from shiva_dit.utils import global_context
 import shiva_dit.shiva_metrics as shiva_metrics
+try:
+    from safetensors.torch import load_file as load_safetensors
+except ImportError:
+    load_safetensors = None
 
 
 class DiffusionModelTrainer:
-    def __init__(self, config: TrainerConfig):
+    def __init__(self, config: TrainerConfig, load_evaluators: bool = True):
         self.config = config
         self.model_type = config.model_type
         self.current_stage_idx = -1
@@ -143,11 +147,7 @@ class DiffusionModelTrainer:
 
         self.best_metrics_state = {}
 
-        self.main_viz_buffer = []
-        self.distill_final_viz_buffer = []
-        self.distill_mid_viz_buffer = []
-
-        if self.accelerator.is_main_process:
+        if self.accelerator.is_main_process and load_evaluators:
             self.evaluators = {}
             if CLIPScore:
                 print("Loading CLIP Score model...")
@@ -168,10 +168,17 @@ class DiffusionModelTrainer:
 
         self._print_setup_summary()
 
+        self.main_viz_buffer = []
+        self.distill_final_viz_buffer = []
+        self.distill_mid_viz_buffer = []
+
         self.state_buffer = {}
         local_seed = self.config.seed + self.accelerator.process_index
         self.local_generator = torch.Generator(device=self.device).manual_seed(local_seed)
         print(f"[Trainer] Device [{self.device}] Set Local seed: {local_seed}")
+
+        self.timestep_buffer = []
+        self.schedule_timesteps_gpu = self.scheduler.timesteps.to(self.device)
 
     def _scale_steps(self, steps: int) -> int:
         if steps <= 0:
@@ -886,9 +893,84 @@ class DiffusionModelTrainer:
             print(f"  Total Steps:         {self.num_training_steps}")
             print(f"{'='*57}\n")
 
-    def _prepare_model_inputs(self, batch):
+    @staticmethod
+    def stratified_timestep_sampler(batch_size, num_timesteps, device, generator=None):
+        if batch_size > num_timesteps:
+            return torch.randint(0, num_timesteps, (batch_size,), device=device, generator=generator)
+
+        boundaries = torch.linspace(0, num_timesteps, batch_size + 1, device=device).long()
+        
+        start_indices = boundaries[:-1]
+        
+        spans = boundaries[1:] - boundaries[:-1]
+        
+        offsets = (torch.rand(batch_size, device=device, generator=generator) * spans).long()
+        
+        indices = start_indices + offsets
+
+        indices = indices[torch.randperm(batch_size, device=device, generator=generator)]
+        
+        return indices
+
+    def _sample_stratified_indices(self, micro_batch_size):
+        if len(self.timestep_buffer) < micro_batch_size:
+            current_global_step = self.global_step
+            DEBUG_INTERVAL = 50 
+
+            should_debug_print = (
+                (current_global_step % DEBUG_INTERVAL == 0)
+            )
+            
+            accum_steps = self.config.gradient_accumulation_steps
+            total_batch_size = micro_batch_size * accum_steps
+            total_batch_size = max(total_batch_size, micro_batch_size)
+
+            rng_gen = self.local_generator
+
+            new_indices = DiffusionModelTrainer.stratified_timestep_sampler(
+                total_batch_size,
+                self.scheduler.config.num_train_timesteps,
+                self.device,
+                generator=rng_gen
+            )
+            
+            if should_debug_print:
+                all_new_indices = self.accelerator.gather(new_indices)
+                if self.accelerator.is_main_process:
+                    all_indices_list = all_new_indices.cpu().flatten().tolist()
+                    all_indices_list.sort()
+                    
+                    print(f"\n{'='*20} [Global Timestep Sampling @ Step {current_global_step}] {'='*20}")
+                    print(f"Total Batches Sampled: {total_batch_size * self.accelerator.num_processes}")
+                    print(f"Sampled Indices (Sorted): {all_indices_list}")
+                    
+                    unique_indices = set(all_indices_list)
+                    print(f"Unique Indices Count: {len(unique_indices)} / {len(all_indices_list)}")
+                    print(f"{'='*65}\n")
+
+                self.accelerator.wait_for_everyone()
+
+            self.timestep_buffer.extend(new_indices.tolist())
+
+        current_indices_list = self.timestep_buffer[:micro_batch_size]
+        
+        self.timestep_buffer = self.timestep_buffer[micro_batch_size:]
+
+        return torch.tensor(current_indices_list, device=self.device, dtype=torch.long)
+
+    def prepare_model_inputs(self, batch, timesteps=None, timestep_index=None, generator=None):
+        if timesteps is None:
+            if timestep_index is None:
+                batch_size = batch["pixel_values"].shape[0]
+                timestep_index = self._sample_stratified_indices(batch_size)
+            elif not isinstance(timestep_index, torch.Tensor):
+                timestep_index = torch.tensor(timestep_index, device=self.device, dtype=torch.long)
+            if indices.dim() == 0:
+                timestep_index = indices.unsqueeze(0)
+            timesteps = self.schedule_timesteps_gpu[timestep_index]
+
         img_latents, noise, noisy_latents, timesteps, model_kwargs = (
-            self.input_preparer_fn(self, batch)
+            self.input_preparer_fn(self, batch, timesteps, generator)
         )
 
         # update global context
@@ -944,6 +1026,11 @@ class DiffusionModelTrainer:
             timesteps = timesteps / 1000
 
             noisy_latents = torch.cat([noisy_latents, cond_latents], dim=1)
+
+        if self.model_type in ["flux-dev", "qwen-image-edit"]:
+            global_context.update(current_timestep=(timesteps * 1000).to(self.device))
+        else:
+            global_context.update(current_timestep=timesteps.to(self.device))
 
         return img_latents, noise, noisy_latents, timesteps, model_kwargs
 
@@ -1153,13 +1240,8 @@ class DiffusionModelTrainer:
 
     def _compute_loss(self, batch, global_step: int, is_validation: bool = False):
         img_latents, noise, noisy_latents, timesteps, model_kwargs = (
-            self._prepare_model_inputs(batch)
+            self.prepare_model_inputs(batch)
         )
-
-        if self.model_type in ["flux-dev", "qwen-image-edit"]:
-            global_context.update(current_timestep=(timesteps * 1000).to(self.device))
-        else:
-            global_context.update(current_timestep=timesteps.to(self.device))
 
         noisy_latents = noisy_latents.to(self.dtype).detach()
 
@@ -1176,108 +1258,191 @@ class DiffusionModelTrainer:
 
         return total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid, hook_metrics, timesteps
 
+    def _monitor_gradient_analysis(
+        self, 
+        global_step: int, 
+        timesteps: torch.Tensor, 
+        hook_metrics: dict,
+        main_loss: torch.Tensor, 
+        distill_loss_final: torch.Tensor, 
+        distill_loss_mid: torch.Tensor, 
+        hook_loss: torch.Tensor
+    ):
+        debug_interval = 20
+        if global_step % debug_interval != 0 or not self.accelerator.is_main_process:
+            return
+
+        print(f"\n{'='*35} [Gradient Analysis Monitor Step {global_step}] {'='*35}")
+        
+        # --- 1. Batch Statistics ---
+        t_min, t_max = timesteps.min().item(), timesteps.max().item()
+        t_std = timesteps.float().std().item()
+        curr_avg_ratio = hook_metrics.get("image_ratio/avg_ratio", float('nan'))
+        
+        print(f"  > Batch Info:")
+        print(f"    Timesteps: Min={t_min:.1f} | Max={t_max:.1f} | Std={t_std:.1f} | Sample={timesteps[:4].int().tolist()}...")
+        if not isinstance(curr_avg_ratio, float) or not (curr_avg_ratio != curr_avg_ratio): # Check NaN
+             print(f"    Avg Ratio: {curr_avg_ratio:.4f}")
+
+        # --- 2. Parameter Grouping (Adapted for Additive Policy) ---
+        param_groups = {
+            "Router": [], 
+            "Gater": [], 
+            "Ratio(Time)": [],   # Time Branch (time_mlp)
+            "Ratio(Layer)": [],  # Layer Branch (layer_emb + layer_mlp)
+            "Ratio(Bias)": [],   # Global Bias (Anchor)
+            "Fuser": [], 
+            "Ctx(Pruner)": [], 
+            "Ctx(Policy)": [], 
+            "Base Model": []
+        }
+        
+        for name, param in self.model.named_parameters():
+            if not param.requires_grad: continue
+            
+            if "router." in name: 
+                param_groups["Router"].append(param)
+            elif "gater_policy." in name: 
+                param_groups["Gater"].append(param)
+            elif "image_ratio_policy." in name:
+                # Additive Policy Specifics
+                if "layer_emb" in name or "layer_mlp" in name: 
+                    param_groups["Ratio(Layer)"].append(param)
+                elif "time_mlp" in name:
+                    param_groups["Ratio(Time)"].append(param)
+                elif "global_bias" in name:
+                    param_groups["Ratio(Bias)"].append(param)
+                else:
+                    # Fallback for older names or unknown params
+                    if "time" in name: param_groups["Ratio(Time)"].append(param)
+                    else: param_groups["Ratio(Layer)"].append(param)
+            elif "fuse_expert" in name or "fuser" in name: 
+                param_groups["Fuser"].append(param)
+            elif "context_pruner" in name: 
+                param_groups["Ctx(Pruner)"].append(param)
+            elif "context_ratio_policy" in name: 
+                param_groups["Ctx(Policy)"].append(param)
+            elif "_hook" not in name: 
+                param_groups["Base Model"].append(param)
+
+        # --- 3. Measure Gradients (Dry Run) ---
+        # Use no_sync to avoid DDP communication overhead during this debug pass
+        context_manager = self.accelerator.no_sync(self.model) if hasattr(self.accelerator, "no_sync") else torch.autograd.set_detect_anomaly(False)
+        
+        with context_manager:
+            def measure_grads(loss_tensor, desc):
+                # Handle zero/unused loss
+                if loss_tensor is None or (isinstance(loss_tensor, torch.Tensor) and loss_tensor.item() == 0.0):
+                    return {k: (0.0, 0.0) for k in param_groups}
+                
+                # Crucial: Zero grad before specific backward to isolate contribution
+                self.optimizer.zero_grad(set_to_none=True)
+                
+                # Retain graph needed because we will call backward multiple times (for Main, Hook, Distill...)
+                # and finally the real backward outside this function.
+                self.accelerator.backward(loss_tensor, retain_graph=True)
+                
+                stats = {}
+                for group_name, params in param_groups.items():
+                    if not params:
+                        stats[group_name] = (0.0, 0.0)
+                        continue
+                    
+                    total_norm_sq = 0.0
+                    max_val = 0.0
+                    has_grad = False
+                    for p in params:
+                        if p.grad is not None:
+                            has_grad = True
+                            g_norm = p.grad.detach().data.norm(2).item()
+                            total_norm_sq += g_norm ** 2
+                            max_val = max(max_val, p.grad.detach().abs().max().item())
+                    
+                    if has_grad:
+                        stats[group_name] = (total_norm_sq ** 0.5, max_val)
+                    else:
+                        stats[group_name] = (0.0, 0.0)
+                return stats
+
+            # Measure contributions
+            main_stats = measure_grads(main_loss, "Main")
+            distill_final_stats = measure_grads(distill_loss_final, "DistillFinal")
+            distill_mid_stats = measure_grads(distill_loss_mid, "DistillMid")
+            hook_stats = measure_grads(hook_loss, "Hook (Ratio)")
+        
+        # --- 4. Print Analysis Table ---
+        print(f"\n  > Component Gradient Analysis (Norm / Max):")
+        # Header formatting
+        h_name, h_main, h_hook, h_df, h_dm, h_ratio = "Module Name", "Main Grad", "Ratio(H)", "Distill(F)", "Distill(M)", "Aux/Main"
+        print(f"    {h_name:<15} | {h_main:<13} | {h_hook:<13} | {h_df:<13} | {h_dm:<13} | {h_ratio:<10}")
+        print(f"    {'-'*90}")
+
+        display_order = ["Router", "Ratio(Time)", "Ratio(Layer)", "Ratio(Bias)", "Gater", "Fuser", "Ctx(Pruner)"]
+        
+        for name in display_order:
+            if name not in param_groups or not param_groups[name]: continue
+            
+            m_norm, m_max = main_stats[name]
+            h_norm, h_max = hook_stats[name]
+            df_norm, df_max = distill_final_stats[name]
+            dm_norm, dm_max = distill_mid_stats[name]
+
+            total_aux_norm = h_norm
+            total_main_norm = m_norm + df_norm + dm_norm + 1e-9
+            
+            ratio_val = total_aux_norm / total_main_norm
+            if m_norm < 1e-9 and total_aux_norm > 1e-9:
+                ratio_str = "INF"
+            else:
+                ratio_str = f"{ratio_val:.2f}x"
+            
+            # Formatter
+            def fmt(val, mx): return f"{val:.4f}/{mx:.4f}" if val > 1e-6 else "0.0"
+
+            print(f"    {name:<15} | {fmt(m_norm, m_max):<13} | {fmt(h_norm, h_max):<13} | {fmt(df_norm, df_max):<13} | {fmt(dm_norm, dm_max):<13} | {ratio_str:<10}")
+
+        # --- 5. Health Checks & Alerts (Based on Additive Policy Logic) ---
+        rt_norm, _ = hook_stats.get("Ratio(Time)", (0,0)) # Hook loss usually drives Policy
+        rl_norm, _ = hook_stats.get("Ratio(Layer)", (0,0))
+        rb_norm, _ = hook_stats.get("Ratio(Bias)", (0,0))
+        
+        if rl_norm == 0:
+             rt_norm, _ = main_stats.get("Ratio(Time)", (0,0))
+             rl_norm, _ = main_stats.get("Ratio(Layer)", (0,0))
+
+        print(f"\n  > Policy Diagnostics:")
+        if rl_norm > 0:
+            tl_ratio = rt_norm / rl_norm
+            print(f"    T/L Energy Ratio: {tl_ratio:.4f} (Time / Layer)")
+            
+            if tl_ratio < 0.1:
+                print(f"    ✅ [HEALTHY] Layer branch dominating ({rl_norm:.4f} vs {rt_norm:.4f}). Additive structure working.")
+            elif tl_ratio > 1.0:
+                print(f"    ⚠️  [ALERT] Time branch gradient is larger than Layer! ({rt_norm:.4f} > {rl_norm:.4f}). Check initialization or lr.")
+            else:
+                print(f"    ℹ️  [INFO] Time branch active but subordinate. (Healthy if converging)")
+        
+        if rb_norm > 0.1:
+             print(f"    ℹ️  [INFO] Large Bias adjustment ({rb_norm:.4f}). Global target ratio is shifting.")
+
+        # --- 6. Clean up ---
+        self.optimizer.zero_grad(set_to_none=True)
+        print(f"{'='*96}\n")
+
     def _train_step(self, batch):
         total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid, hook_metrics, timesteps = (
             self._compute_loss(batch, self.global_step, is_validation=False)
         )
 
-        debug_interval = 20
-        if self.global_step % debug_interval == 0 and self.accelerator.is_main_process:
-            print(f"\n{'='*30} [Gradient Analysis Monitor Step {self.global_step}] {'='*30}")
-            
-            t_min, t_max = timesteps.min().item(), timesteps.max().item()
-            t_std = timesteps.float().std().item()
-            curr_avg_ratio = hook_metrics.get("image_ratio/avg_ratio", float('nan'))
-            print(f"  > Batch Info:")
-            print(f"    Timesteps: Min={t_min:.1f} | Max={t_max:.1f} | Std={t_std:.1f} | Sample={timesteps[:4].int().tolist()}...")
-            if not isinstance(curr_avg_ratio, float) or not (curr_avg_ratio != curr_avg_ratio):
-                 print(f"    Avg Ratio: {curr_avg_ratio:.4f}")
-
-            param_groups = {
-                "Router": [], "Gater": [], "Ratio(Time)": [], "Ratio(Layer)": [],
-                "Ratio(Mix)": [], "Fuser": [], "Ctx(Pruner)": [], "Ctx(Policy)": [], "Base Model": []
-            }
-            for name, param in self.model.named_parameters():
-                if param.requires_grad:
-                    if "router." in name: param_groups["Router"].append(param)
-                    elif "gater_policy." in name: param_groups["Gater"].append(param)
-                    elif "image_ratio_policy." in name:
-                        if "time_proj" in name: param_groups["Ratio(Time)"].append(param)
-                        elif "layer_emb" in name: param_groups["Ratio(Layer)"].append(param)
-                        else: param_groups["Ratio(Mix)"].append(param)
-                    elif "fuse_expert" in name or "fuser" in name: param_groups["Fuser"].append(param)
-                    elif "context_pruner" in name: param_groups["Ctx(Pruner)"].append(param)
-                    elif "context_ratio_policy" in name: param_groups["Ctx(Policy)"].append(param)
-                    elif "_hook" not in name: param_groups["Base Model"].append(param)
-
-            with self.accelerator.no_sync(self.model):
-                
-                def measure_grads(loss_tensor, desc):
-                    if loss_tensor.item() == 0.0:
-                        return {k: (0.0, 0.0) for k in param_groups}
-                    
-                    self.optimizer.zero_grad(set_to_none=True)
-                    self.accelerator.backward(loss_tensor, retain_graph=True)
-                    
-                    stats = {}
-                    for group_name, params in param_groups.items():
-                        if not params:
-                            stats[group_name] = (0.0, 0.0)
-                            continue
-                        
-                        total_norm_sq = 0.0
-                        max_val = 0.0
-                        has_grad = False
-                        for p in params:
-                            if p.grad is not None:
-                                has_grad = True
-                                g_norm = p.grad.detach().data.norm(2).item()
-                                total_norm_sq += g_norm ** 2
-                                max_val = max(max_val, p.grad.detach().abs().max().item())
-                        
-                        if has_grad:
-                            stats[group_name] = (total_norm_sq ** 0.5, max_val)
-                        else:
-                            stats[group_name] = (0.0, 0.0)
-                    return stats
-
-                main_stats = measure_grads(main_loss, "Main")
-                distill_final_stats = measure_grads(distill_loss_final, "DistillFinal")
-                distill_mid_stats = measure_grads(distill_loss_mid, "DistillMid")
-                hook_stats = measure_grads(hook_loss, "Hook")
-            
-            print(f"\n  > Component Gradient Analysis (Norm / Max):")
-            header = f"    {'Module Name':<15} | {'Main Grad':<12} | {'Ratio MSE (H)':<12} | {'Distill Final':<15} | {'Distill Mid':<15} | {'Total Aux / Main':<18}"
-            print(header); print(f"    {'-'*len(header)}")
-
-            for name in ["Router", "Gater", "Ratio(Time)", "Ratio(Layer)", "Ratio(Mix)", "Fuser", "Ctx(Policy)", "Ctx(Pruner)"]:
-                if name not in param_groups or not param_groups[name]: continue
-                m_norm, m_max = main_stats[name]
-                dist_final_norm, dist_final_max = distill_final_stats[name]
-                dist_mid_norm, dist_mid_max = distill_mid_stats[name]
-                h_norm, h_max = hook_stats[name] 
-
-                total_aux_norm = h_norm
-                total_main_norm = m_norm + dist_final_norm + dist_mid_norm
-                if m_norm < 1e-9:
-                    ratio_str = "INF" if total_aux_norm > 1e-9 else "0.00x"
-                else:
-                    ratio_str = f"{total_aux_norm / total_main_norm:.2f}x"
-                
-                main_grad_str = f"{m_norm:.4f}/{m_max:<5.4f}"
-                dist_final_grad_str = f"{dist_final_norm:.4f}/{dist_final_max:<5.4f}"
-                dist_mid_grad_str = f"{dist_mid_norm:.4f}/{dist_mid_max:<5.4f}"
-                h_grad_str = f"{h_norm:.4f}/{h_max:<5.4f}"
-                
-                print(f"    {name:<15} | {main_grad_str:<12} | {h_grad_str:<12} | {dist_final_grad_str:<15} | {dist_mid_grad_str:<15} | {ratio_str:<18}")
-
-            rt_norm, _ = main_stats.get("Ratio(Time)", (0,0))
-            rl_norm, _ = main_stats.get("Ratio(Layer)", (0,0))
-            if rt_norm < 1e-5 and rl_norm > 1e-3:
-                 print(f"\n  ⚠️  [ALERT] RatioPolicy implies 'Layer Bias' learning but IGNORING 'Time' info!")
-
-            self.optimizer.zero_grad(set_to_none=True)
-            print(f"{'='*90}\n")
+        self._monitor_gradient_analysis(
+            global_step=self.global_step,
+            timesteps=timesteps,
+            hook_metrics=hook_metrics,
+            main_loss=main_loss,
+            distill_loss_final=distill_loss_final,
+            distill_loss_mid=distill_loss_mid,
+            hook_loss=hook_loss
+        )
 
         self.accelerator.backward(total_loss)
         if self.config.enable_gradient_checkpointing:
@@ -1652,172 +1817,179 @@ class DiffusionModelTrainer:
         if not hooks:
             return
         hook = hooks[0]
-        total_layers = getattr(hook, "total_layers", 1)
-
-        steps = 50
-
-        scheduler_timesteps = self.scheduler.timesteps.to(self.device)
-        num_train_timesteps = len(scheduler_timesteps)
-        idx_tensor = torch.linspace(0, num_train_timesteps - 1, steps, device=self.device).long()
-        t_values_tensor = scheduler_timesteps[idx_tensor]
-        t_plot_axis = np.linspace(0, 1, steps)
-
+        total_layers = getattr(hook, "total_layers", 28)
+        
         valid_layers = [i for i in range(total_layers) if i not in self.skip_layer_indices]
-        valid_layers_tensor = torch.tensor(valid_layers, device=self.device).to(dtype=t_values_tensor.dtype)
+        if len(valid_layers) == 0: return
+        
+        steps = 50 # Resolution for Time axis
+        
+        # Crucial: Match the input domain of the model (0-1 vs 0-1000)
+        if self.config.model_type in ["flux-dev", "qwen-image", "qwen-image-edit", "flux-kontext"]:
+            # Flow Matching: 0.0 -> 1.0
+            t_model_input = torch.linspace(0, 1, steps, device=self.device, dtype=self.dtype)
+            t_display_axis = np.linspace(0, 1, steps)
+            t_label = "Time (0.0=Start -> 1.0=End)"
+        else:
+            # Standard DiT / SD3: 0 -> 1000 (usually)
+            # Some SD3 implementations involve 0-1, but Diffusers standard is often 0-1000 for embeddings
+            t_model_input = torch.linspace(0, 1000, steps, device=self.device, dtype=self.dtype)
+            t_display_axis = np.linspace(0, 1000, steps)
+            t_label = "Timestep (0 -> 1000)"
 
-        if len(valid_layers) == 0:
-            return 
-
-        # Grid construction (Steps x Valid_Layers)
-        t_grid, l_grid = torch.meshgrid(t_values_tensor, valid_layers_tensor, indexing='ij') 
+        # Prepare Grid Tensors
+        valid_layers_tensor = torch.tensor(valid_layers, device=self.device, dtype=torch.long)
+        
+        # Meshgrid: (Steps, Layers)
+        t_grid, l_grid = torch.meshgrid(t_model_input, valid_layers_tensor, indexing='ij')
         t_flat = t_grid.reshape(-1)
         l_flat = l_grid.reshape(-1)
-        
-        # Prepare Time Embedding 
-        temb_input = None
 
-        with torch.no_grad():
-            try:
+        temb_input = None
+        try:
+            with torch.no_grad():
                 unwrapped_model = self.accelerator.unwrap_model(self.model)
-                if self.model_type in ["sd3", "flux-dev", "pixart-sigma", "flux-kontext"]:
-                    t_model_input = t_flat
-                    if self.model_type in ["flux-dev", "flux-kontext"]:
-                        t_model_input = t_model_input / 1000.0
-                    
-                    if hasattr(unwrapped_model, "time_text_embed"):
-                        timesteps_proj = unwrapped_model.time_text_embed.time_proj(t_model_input)
-                        timesteps_emb = unwrapped_model.time_text_embed.timestep_embedder(timesteps_proj.to(dtype=self.dtype))
-                        temb_input = timesteps_emb
-            except Exception as e:
-                print(f"[Viz] Warning: Failed to generate temb input: {e}")
+                
+                # Logic to find the time embedder
+                time_embedder = None
+                
+                # Case A: Flux / SD3 (time_text_embed)
+                if hasattr(unwrapped_model, "time_text_embed"):
+                    # Flux usually projects scalar t -> vector
+                    # Note: We manually invoke the submodule to avoid full forward pass
+                    emb_module = unwrapped_model.time_text_embed
+                    if hasattr(emb_module, "time_proj") and hasattr(emb_module, "timestep_embedder"):
+                        t_proj = emb_module.time_proj(t_flat)
+                        temb_input = emb_module.timestep_embedder(t_proj.to(dtype=self.dtype))
+                    elif hasattr(emb_module, "forward"):
+                        # Try calling it directly if it accepts just timestep
+                        # Flux time_text_embed usually takes (timestep, pooled_text, text_seq_len)
+                        # This might be tricky without text. 
+                        # Fallback: Assume we have a helper or specific projection available
+                        pass
+
+        except Exception as e:
+            print(f"[Viz] ⚠️ Warning: Failed to extract Time Embedding: {e}")
+            # If Policy is Additive and Zero-Inited, maybe we don't strictly need temb for visualization 
+            # if we just want to see the Layer component. But normally we do.
 
         policies_to_viz = [
-            ("image_ratio", "image_ratio_policy", "Keep Ratio"),
-            ("context_ratio", "context_ratio_policy", "Keep Ratio"),
-            ("gater", "gater_policy", "Fuse Probability"),
+            ("image_ratio", "image_ratio_policy", "Keep Ratio (Sigmoid)"),
+            # ("context_ratio", "context_ratio_policy", "Keep Ratio (Sigmoid)"),
+            # ("gater", "gater_policy", "Fuse Probability"),
         ]
 
-        with torch.no_grad():
-            for alias, attr_name, metric_name in policies_to_viz:
-                policy = getattr(hook, attr_name, None)
-                if policy is None:
+        print(f"\n{'='*30} [Policy Visualization Report] {'='*30}")
+        
+        for alias, attr_name, metric_name in policies_to_viz:
+            policy = getattr(hook, attr_name, None)
+            if policy is None: continue
+
+            # Determine Input
+            p_param = next(policy.parameters())
+            policy_input = None
+            
+            need_vector = False
+            if hasattr(policy, "time_mlp") and isinstance(policy.time_mlp[0], torch.nn.Linear):
+                if policy.time_mlp[0].in_features > 1:
+                    need_vector = True
+            
+            if need_vector:
+                if temb_input is None:
+                    print(f"  [Skip] {alias}: Time embedding vector missing.")
                     continue
-                
-                # --- 1. Determine Input Dimension & Format ---
-                input_dim = 1
-                if hasattr(policy, "time_proj") and len(policy.time_proj) > 0:
-                    if isinstance(policy.time_proj[0], torch.nn.Linear):
-                        input_dim = policy.time_proj[0].in_features
-                elif hasattr(policy, "in_layer"):
-                    input_dim = policy.in_layer.in_features - policy.layer_embedder.embedding_dim
-                
-                p_param = next(policy.parameters())
-                
-                if input_dim > 1:
-                    # Vector Input (Time Embedding)
-                    if temb_input is None:
-                        print(f"[Viz] Skipping {alias}: Requires temb vector but extraction failed.")
-                        continue
-                    policy_input = temb_input.to(dtype=p_param.dtype)
-                else:
-                    # Scalar Input
-                    policy_input = t_flat.unsqueeze(-1).to(dtype=p_param.dtype)
+                policy_input = temb_input.to(dtype=p_param.dtype)
+            else:
+                # Fallback to scalar input if architecture allows (e.g. simple lookup)
+                policy_input = t_flat.unsqueeze(-1).to(dtype=p_param.dtype)
 
-                # --- 2. Forward Pass ---
+            # --- Forward ---
+            with torch.no_grad():
                 logits = policy(policy_input, l_flat.long())
-
-                # --- 3. Optional: Analyze Time Cosine Sim (Debug Info) ---
-                if hasattr(policy, "time_proj"):
-                    try:
-                        time_out = policy.time_proj(policy_input)
-                        if time_out.shape[-1] % 2 == 0:
-                            scale_flat, shift_flat = time_out.chunk(2, dim=-1)
-                            scale_grid = scale_flat.reshape(steps, total_layers, -1)
-                            shift_grid = shift_flat.reshape(steps, total_layers, -1)
-                            
-                            # Compare t=0 vs t=1 at Layer 0
-                            vec_start_scale = scale_grid[0, 0, :] 
-                            vec_end_scale = scale_grid[-1, 0, :]
-                            vec_start_shift = shift_grid[0, 0, :]
-                            vec_end_shift = shift_grid[-1, 0, :]
-                            
-                            sim_scale = torch.nn.functional.cosine_similarity(vec_start_scale, vec_end_scale, dim=0).item()
-                            sim_shift = torch.nn.functional.cosine_similarity(vec_start_shift, vec_end_shift, dim=0).item()
-                            
-                            print(f"[Viz Analysis] {alias.upper()} Cosine Sim (t=0 vs t=1): Scale={sim_scale:.3f}, Shift={sim_shift:.3f}")
-                    except Exception as e:
-                        pass
                 
-                # --- 4. Get Values (Ratio or Prob) ---
                 if "gater" in alias:
                     probs = torch.softmax(logits, dim=-1)
-                    values = probs[:, 1]
+                    values = probs[:, 1] # Fuse prob
                 else:
                     values = torch.sigmoid(logits).reshape(-1)
 
-                # Reshape to (Steps, Valid_Layers)
-                grid_values = values.reshape(steps, len(valid_layers)).float().cpu().numpy()
+            # --- Data Processing ---
+            # Shape: (Steps, Valid_Layers)
+            grid_values = values.reshape(steps, len(valid_layers)).float().cpu().numpy()
+            
+            # Stats
+            g_mean = grid_values.mean()
+            g_min, g_max = grid_values.min(), grid_values.max()
+            
+            # Marginal Stats
+            layer_profile = grid_values.mean(axis=0) # Avg over time
+            time_profile = grid_values.mean(axis=1)  # Avg over layers
+            
+            layer_var = layer_profile.std()
+            time_var = time_profile.std()
 
-                print(f"\n{'='*20} Policy Visualization: {alias.upper()} ({metric_name}) {'='*20}")
-                print(f"Stats: Min={grid_values.min():.4f} | Max={grid_values.max():.4f} | Mean={grid_values.mean():.4f}")
-                print("Values Matrix (Rows: Time 0.0->1.0, Cols: Layer 0->N):")
-                with np.printoptions(precision=3, suppress=True, linewidth=200, edgeitems=10, threshold=10000):
-                    print(grid_values)
-                print(f"{'='*60}\n")
+            # --- Detailed Console Log ---
+            print(f"\n  > Target: {alias.upper()}")
+            print(f"    Global Stats : Mean={g_mean:.4f} | Range=[{g_min:.4f}, {g_max:.4f}]")
+            print(f"    Variance     : Spatial(Layer)={layer_var:.4f} vs Temporal(Time)={time_var:.4f}")
+            
+            if time_var < 0.01:
+                print(f"    Observation  : 📉 Temporal dimension is FLAT (Stable).")
+            else:
+                print(f"    Observation  : 📈 Temporal dimension shows variation.")
 
-                # --- 5. Compute Marginals (Means) ---
-                layer_means = grid_values.mean(axis=0)
-                time_means = grid_values.mean(axis=1)
-                
-                # Numpy arrays for axis plotting
-                l_plot_axis = np.array(valid_layers)
+            # Print ASCII Sparklines (Simplified)
+            print(f"    Layer Profile (Avg over T):")
+            print(f"      {np.array2string(layer_profile, precision=3, suppress_small=True)}")
+            print(f"    Time Profile (Avg over L, sampled):")
+            # Downsample time profile for printing
+            t_sample_indices = np.linspace(0, steps-1, 10).astype(int)
+            print(f"      {np.array2string(time_profile[t_sample_indices], precision=3)}")
 
-                print(f"[{alias.upper()}] Mean: {grid_values.mean():.4f} | Range: {grid_values.min():.4f}-{grid_values.max():.4f}")
+            # --- Plotting ---
+            fig = plt.figure(figsize=(12, 9))
+            gs = gridspec.GridSpec(2, 2, width_ratios=[3, 1], height_ratios=[1, 3], wspace=0.05, hspace=0.05)
 
-                # --- 6. Plotting ---
-                fig = plt.figure(figsize=(12, 10))
-                gs = gridspec.GridSpec(4, 4, width_ratios=[1, 1, 1, 0.5], height_ratios=[0.5, 1, 1, 1], wspace=0.1, hspace=0.1)
+            # 1. Main Heatmap (Bottom-Left)
+            ax_main = fig.add_subplot(gs[1, 0])
+            im = ax_main.imshow(grid_values, aspect='auto', origin='lower',
+                                extent=[0, len(valid_layers)-1, 0, 1],
+                                vmin=0, vmax=1, cmap='viridis')
+            ax_main.set_xlabel('Transformer Layer Index (Mapped)', fontsize=10)
+            ax_main.set_ylabel(t_label, fontsize=10)
+            ax_main.set_title(f"Policy Landscape", fontsize=10)
 
-                # A. Layer Curve
-                ax_layer = fig.add_subplot(gs[0, 0:3])
-                ax_layer.plot(l_plot_axis, layer_means, color='#1f77b4', linewidth=2, marker='o', markersize=3)
-                ax_layer.set_xlim(0, total_layers-1)
-                ax_layer.set_ylabel('Avg', fontsize=9)
-                ax_layer.set_title(f'{alias.title()} - Layer-wise Avg', fontsize=11)
-                ax_layer.grid(True, linestyle=':', alpha=0.6)
-                plt.setp(ax_layer.get_xticklabels(), visible=False)
+            # 2. Top: Layer Profile (Top-Left)
+            ax_top = fig.add_subplot(gs[0, 0], sharex=ax_main)
+            ax_top.plot(np.arange(len(valid_layers)), layer_profile, marker='o', markersize=3, linestyle='-', color='blue')
+            ax_top.set_ylim(0, 1)
+            ax_top.grid(True, alpha=0.3)
+            ax_top.set_ylabel("Avg Ratio")
+            ax_top.set_title("Spatial Distribution (Layer)", fontsize=10)
+            plt.setp(ax_top.get_xticklabels(), visible=False)
 
-                # B. Time Curve
-                ax_time = fig.add_subplot(gs[1:4, 3])
-                ax_time.plot(time_means, t_plot_axis, color='#d62728', linewidth=2, marker='.', markersize=3)
-                ax_time.set_ylim(0, 1)
-                ax_time.set_xlabel('Avg', fontsize=9)
-                ax_time.set_title(f'Time Trend', fontsize=11)
-                ax_time.grid(True, linestyle=':', alpha=0.6)
-                plt.setp(ax_time.get_yticklabels(), visible=False)
+            # 3. Right: Time Profile (Bottom-Right)
+            ax_right = fig.add_subplot(gs[1, 1], sharey=ax_main)
+            # Plot y against x to match heatmap orientation
+            ax_right.plot(time_profile, np.linspace(0, 1, steps), marker='o', markersize=3, linestyle='-', color='red')
+            ax_right.set_xlim(0, 1)
+            ax_right.grid(True, alpha=0.3)
+            ax_right.set_xlabel("Avg Ratio")
+            ax_right.set_title("Temporal Distribution", fontsize=10)
+            plt.setp(ax_right.get_yticklabels(), visible=False)
 
-                # C. Main Heatmap
-                ax_heatmap = fig.add_subplot(gs[1:4, 0:3], sharex=ax_layer, sharey=ax_time)
-                
-                full_grid = np.zeros((steps, total_layers))
-                full_grid[:] = np.nan
-                full_grid[:, valid_layers] = grid_values
-                
-                im = ax_heatmap.imshow(full_grid, aspect='auto', origin='lower',
-                                     extent=[0, total_layers-1, 0, 1],
-                                     vmin=0, vmax=1, cmap='magma')
-                
-                ax_heatmap.set_xlabel('Transformer Layers', fontsize=10)
-                ax_heatmap.set_ylabel('Timestep (Bottom=Start -> Top=End)', fontsize=10)
-                
-                cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.2])
-                fig.colorbar(im, cax=cbar_ax, label=metric_name)
+            # Colorbar
+            cbar_ax = fig.add_axes([0.92, 0.15, 0.02, 0.7])
+            fig.colorbar(im, cax=cbar_ax, label=metric_name)
 
-                plt.suptitle(f'{alias.title()} Policy Analysis\nGlobal Mean: {grid_values.mean():.4f}', y=0.96, fontsize=14)
-                
-                # --- 7. Log Figure ---
-                self.logger.log_figure(f"policy_viz/{alias}_combined", fig, self.global_step)
-                plt.close(fig)
+            plt.suptitle(f'Shiva Policy Analysis: {alias.upper()}\nSpatial Var: {layer_var:.4f} | Temporal Var: {time_var:.4f}', fontsize=14)
+            
+            # Log
+            self.logger.log_figure(f"policy/{alias}_heatmap", fig, self.global_step)
+            plt.close(fig)
+            print(f"    -> Plot saved to Tensorboard.")
+
+        print(f"{'='*90}\n")
 
     def _log_router_visualization(self, batch=None):
         if not self.accelerator.is_main_process:
@@ -2663,3 +2835,106 @@ class DiffusionModelTrainer:
         self.accelerator.wait_for_everyone()
         if self.accelerator.is_main_process:
             print(f"Saved accelerator state to {save_path_dir} (step {self.global_step})")
+
+    def load_from_checkpoint(self, ckpt_path, model_only=True):
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+
+        print(f">>> Loading checkpoint from {ckpt_path} (model_only={model_only})...")
+        if os.path.isfile(ckpt_path):
+            print(f"    -> Detected file input. Loading custom weights...")
+            if ckpt_path.endswith(".safetensors"):
+                if load_safetensors is None:
+                    raise ImportError("Please install safetensors.")
+                state_dict = load_safetensors(ckpt_path, device=str(self.device))
+            else:
+                state_dict = torch.load(ckpt_path, map_location=self.device)
+
+            if "model" in state_dict:
+                state_dict = state_dict["model"]
+
+            model_to_load = self.accelerator.unwrap_model(self.model)
+            missing, unexpected = model_to_load.load_state_dict(state_dict, strict=False)
+            print(f"    -> Weights loaded. Missing: {len(missing)}, Unexpected: {len(unexpected)}")
+            return
+
+        if os.path.isdir(ckpt_path):
+            if not model_only:
+                print(f"    -> Detected directory with model_only=False. Resuming full trainer state...")
+                self.accelerator.load_state(ckpt_path)
+                _resume_custom_trainer_state(self, ckpt_path)
+                return
+
+            else:
+                print(f"    -> Detected directory with model_only=True. Extracting weights only...")
+                potential_files = [
+                    "model.safetensors",
+                    "pytorch_model.bin",
+                    "diffusion_pytorch_model.safetensors"
+                ]
+                weights_path = None
+                for f in potential_files:
+                    p = os.path.join(ckpt_path, f)
+                    if os.path.exists(p):
+                        weights_path = p
+                        break
+                
+                if weights_path is None:
+                    raise FileNotFoundError(f"No model weights found in {ckpt_path}. Searched for: {potential_files}")
+                
+                print(f"    -> Found weights file: {weights_path}")
+
+                if weights_path.endswith(".safetensors"):
+                    if load_safetensors is None:
+                        raise ImportError("Please install safetensors.")
+                    state_dict = load_safetensors(weights_path, device=str(self.device))
+                else:
+                    state_dict = torch.load(weights_path, map_location=self.device)
+
+                model_to_load = self.accelerator.unwrap_model(self.model)
+                missing, unexpected = model_to_load.load_state_dict(state_dict, strict=False)
+                
+                print(f"    -> Accelerator weights loaded. Missing: {len(missing)}, Unexpected: {len(unexpected)}")
+                return
+
+    def _resume_custom_trainer_state(self, ckpt_dir):
+        state_path = os.path.join(ckpt_dir, "trainer_state.json")
+        if not os.path.exists(state_path):
+            print(f"    [Warning] 'trainer_state.json' not found in {ckpt_dir}. Skipping custom state restore.")
+            return
+
+        with open(state_path, "r") as f:
+            custom_state = json.load(f)
+
+        self.global_step = custom_state.get("global_step", 0)
+        self.epoch = custom_state.get("epoch", 0)
+        self.best_metrics_state = custom_state.get("best_metrics_state", {})
+
+        saved_Ts = custom_state.get("shiva_Ts", None)
+        saved_Tk = custom_state.get("shiva_Tk", None)
+
+        if saved_Ts is not None and saved_Tk is not None:
+            print(f"    -> Restoring adaptive pruner state (Ts={saved_Ts}, Tk={saved_Tk})...")
+            t_val_Ts = torch.tensor(saved_Ts, device=self.device, dtype=self.dtype)
+            t_val_Tk = torch.tensor(saved_Tk, device=self.device, dtype=self.dtype)
+            
+            for hook in HookManager.get_all_hooks().values():
+                # Image Pruner
+                if hasattr(hook, "prune_expert") and hook.prune_expert:
+                    hook.prune_expert.Ts.copy_(t_val_Ts)
+                    hook.prune_expert.Tk.copy_(t_val_Tk)
+                
+                # Context Pruner
+                if hasattr(hook, "context_pruner") and hook.context_pruner:
+                    if hasattr(hook.context_pruner, "Ts"): 
+                        hook.context_pruner.Ts.copy_(t_val_Ts.float())
+                    if hasattr(hook.context_pruner, "Tk"): 
+                        hook.context_pruner.Tk.copy_(t_val_Tk.float())
+        
+        if hasattr(self, "train_dataloader") and self.train_dataloader is not None:
+            steps_per_epoch = len(self.train_dataloader) // self.config.gradient_accumulation_steps
+            if steps_per_epoch > 0:
+                expected_epoch = self.global_step // steps_per_epoch
+                if self.epoch != expected_epoch:
+                    print(f"    -> Adjusting epoch from {self.epoch} to {expected_epoch} based on global_step.")
+                    trainer.epoch = expected_epoch
