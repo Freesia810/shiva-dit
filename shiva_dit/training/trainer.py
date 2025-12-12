@@ -965,8 +965,8 @@ class DiffusionModelTrainer:
                 timestep_index = self._sample_stratified_indices(batch_size)
             elif not isinstance(timestep_index, torch.Tensor):
                 timestep_index = torch.tensor(timestep_index, device=self.device, dtype=torch.long)
-            if indices.dim() == 0:
-                timestep_index = indices.unsqueeze(0)
+            if timestep_index.dim() == 0:
+                timestep_index = timestep_index.unsqueeze(0)
             timesteps = self.schedule_timesteps_gpu[timestep_index]
 
         img_latents, noise, noisy_latents, timesteps, model_kwargs = (
