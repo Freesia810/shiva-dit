@@ -47,6 +47,9 @@ def main():
     dataloader = trainer.train_dataloader 
     
     hooks = HookManager.get_all_hooks()
+    for h in hooks.values():
+        h.image_ratio_policy = None
+        h.fixed_image_ratio = 1.0
     layer_indices = sorted([h.layer_idx for h in hooks.values()])
     num_layers = max(layer_indices) + 1 if layer_indices else 28
     print(f">>> Detected Layers: {layer_indices}")
