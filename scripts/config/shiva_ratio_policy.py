@@ -5,8 +5,8 @@ HookType = ShivaDitBlockHook
 
 lora_config = {
     "enable": True,
-    "rank": 32,
-    "lora_alpha": 32,
+    "rank": 128,
+    "lora_alpha": 128,
     "target_modules": [
         "to_q", "to_k", "to_v", "to_out.0",
         "linear", "proj_mlp", "proj_out", 
@@ -14,8 +14,8 @@ lora_config = {
     ],
 }
 
-# mode = "fixed"
-mode = "adaptive"
+mode = "fixed"
+# mode = "adaptive"
 
 hook_config = {
     # --- Mode Selection ---
@@ -93,7 +93,7 @@ stage_config_dict = {
                 "gate": 0.0,
                 "distill": [0.0, 0.0],
             },
-            "lr": [0.0, 1e-5, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "lr": [0.0, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
             "temp": [10.0, 10.0, 20.0, 50.0],
         },
 
@@ -104,7 +104,7 @@ stage_config_dict = {
                 "gate": 0.0,
                 "distill": [0.0, 0.0],
             },
-            "lr": [0.0, 1e-5, 0.0, 0.0, 0.0, 0.0, 0.0],
+            "lr": [0.0, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
             "temp": [10.0, 10.0, 50.0, 100.0],
         },
     ],

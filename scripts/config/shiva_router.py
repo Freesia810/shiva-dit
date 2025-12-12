@@ -96,7 +96,7 @@ hook_config = {
     "grouped": hook_config_grouped,
 }
 
-prefix = 'slim'
+prefix = 'shared'
 
 trainer_config = {
     "metadata_file": "../dataset/MJHQ-30K/train.jsonl",
@@ -114,7 +114,7 @@ trainer_config = {
     "gradient_accumulation_steps": 16,
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
-    "distillation_final_weight": 1.0,
+    "distillation_final_weight": 0.0,
     "distillation_middle_weight": 0.0,
     "seed": 42,
     "logging_steps": 40,

@@ -483,6 +483,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             gater_logits = self.current_gate_logits_for_loss
             decision = torch.argmax(gater_logits[0], dim=-1).item()
 
+        decision = 0
         if decision == 0:
             final_topk_states = x_sel
         else:
@@ -660,5 +661,3 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             )
         if self.shiva_mode in ["context", "both"]:
             self.context_ratio_accumulator.append(self.current_context_ratio_for_loss)
-
-        
