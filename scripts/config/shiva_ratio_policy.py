@@ -38,39 +38,39 @@ hook_config = {
 
 stage_config_dict = {
     "adaptive": [
-        {
-            "steps": 7000, 
-            "weights": {
-                "ratio": [0.0, 0.0, 0.0], 
-                "gate": 0.0,
-                "distill": [0.0, 0.0]
-            },
-            # LR: [Base(Router), LoRA, Gate, Fuser, Policy, CtxRatio, CtxPruner]
-            "lr": [5e-4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            "temp": [5.0, 15.0, 10.0, 20.0],
-        },
+        # {
+        #     "steps": 7000, 
+        #     "weights": {
+        #         "ratio": [0.0, 0.0, 0.0], 
+        #         "gate": 0.0,
+        #         "distill": [0.0, 0.0]
+        #     },
+        #     # LR: [Base(Router), LoRA, Gate, Fuser, Policy, CtxRatio, CtxPruner]
+        #     "lr": [5e-4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        #     "temp": [5.0, 15.0, 10.0, 20.0],
+        # },
 
-        {
-            "steps": 14000,
-            "weights": {
-                "ratio": [0.0, 10.0, 5.0],
-                "gate": 0.0,
-                "distill": [0.0, 0.0],
-            },
-            "lr": [1e-6, 1e-5, 0.0, 0.0, 2e-6, 0.0, 0.0],
-            "temp": [15.0, 15.0, 20.0, 50.0],
-        },
+        # {
+        #     "steps": 14000,
+        #     "weights": {
+        #         "ratio": [0.0, 10.0, 2.5],
+        #         "gate": 0.0,
+        #         "distill": [0.0, 0.0],
+        #     },
+        #     "lr": [1e-6, 1e-5, 0.0, 0.0, 2e-5, 0.0, 0.0],
+        #     "temp": [15.0, 15.0, 20.0, 50.0],
+        # },
 
-        {
-            "steps": -1,
-            "weights": {
-                "ratio": [0.0, 10.0, 0.5],
-                "gate": 0.0,
-                "distill": [0.0, 0.0],
-            },
-            "lr": [1e-6, 1e-5, 0.0, 0.0, 1e-7, 0.0, 0.0],
-            "temp": [15.0, 15.0, 50.0, 100.0],
-        },
+        # {
+        #     "steps": -1,
+        #     "weights": {
+        #         "ratio": [0.0, 10.0, 0.5],
+        #         "gate": 0.0,
+        #         "distill": [0.0, 0.0],
+        #     },
+        #     "lr": [1e-6, 1e-5, 0.0, 0.0, 1e-6, 0.0, 0.0],
+        #     "temp": [15.0, 15.0, 50.0, 100.0],
+        # },
     ],
 
     "fixed": [
@@ -152,11 +152,10 @@ trainer_config = {
     "log_with_tensorboard": True,
 }
 
-if __name__ == "__main__":
-    print(hook_config)
-    print(lora_config)
-    print(trainer_config)
+print(hook_config)
+print(lora_config)
+print(trainer_config)
 
-    config = TrainerConfig(**trainer_config)
-    trainer = DiffusionModelTrainer(config=config)
-    trainer.train()
+config = TrainerConfig(**trainer_config)
+trainer = DiffusionModelTrainer(config=config)
+trainer.train()
