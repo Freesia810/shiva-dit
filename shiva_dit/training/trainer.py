@@ -983,7 +983,7 @@ class DiffusionModelTrainer:
 
             if enable_mid:
                 model_kwargs["output_hidden_states"] = True
-                model_kwargs["output_hidden_states_step"] = 1
+                model_kwargs["output_hidden_states_step"] = 4
             
             with torch.autocast(device_type=self.device.type, dtype=DiffusionModelTrainer._get_dtype(self.config.mixed_precision)), torch.no_grad():
                 teacher_output = self.teacher_model(

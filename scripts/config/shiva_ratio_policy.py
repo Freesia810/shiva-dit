@@ -5,8 +5,8 @@ HookType = ShivaDitBlockHook
 
 lora_config = {
     "enable": True,
-    "rank": 32,
-    "lora_alpha": 32,
+    "rank": 256,
+    "lora_alpha": 256,
     "target_modules": [
         "to_q", "to_k", "to_v", "to_out.0",
         "linear", "proj_mlp", "proj_out", 
@@ -23,7 +23,7 @@ hook_config = {
 
     # --- Image Configs ---
     "image_ratio_mode": mode,
-    "fixed_image_ratio": 0.5,
+    "fixed_image_ratio": 0.6,
     "num_router_groups": 24,
     "bottleneck_dim": 512,
     "ratio_bottleneck_dim": 256,
@@ -43,7 +43,7 @@ stage_config_dict = {
             "weights": {
                 "ratio": [0.0, 0.0, 0.0],
                 "gate": 0.0,
-                "distill": [0.0, 0.0],
+                "distill": [0.1, 1.0],
             },
             "lr": {
                 "router": 3e-4,
@@ -173,7 +173,7 @@ trainer_config = {
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",
     "extra_config": {
-        "target_ratio": 0.5,
+        "target_ratio": 0.6,
         "stage_schedule": stage_config_dict[mode],
     },
     "log_with_tensorboard": True,
