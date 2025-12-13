@@ -677,6 +677,11 @@ class DiffusionModelTrainer:
                 if module is not None and isinstance(module, nn.Module):
                     for param in module.parameters():
                         pid_to_group[id(param)] = group_name
+                if attr_name == "router":
+                    module = getattr(hook, "router_layer_embedder", None)
+                    if module is not None and isinstance(module, nn.Module):
+                        for param in module.parameters():
+                            pid_to_group[id(param)] = group_name
 
         for name, param in self.model.named_parameters():
             if not param.requires_grad:
