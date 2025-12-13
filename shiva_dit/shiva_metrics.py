@@ -194,7 +194,7 @@ def _calc_ratio_loss_stratified(
     target_val = config.get("target_ratio", 0.8)
     accum_steps = config.get("gradient_accumulation_steps", 16)
     
-    DEBUG_PRINT_PROB = 0.01
+    DEBUG_PRINT_PROB = 1e-4
     is_main_process = (not dist.is_initialized()) or (dist.get_rank() == 0)
 
     if all_ratios.numel() > 0:
@@ -259,7 +259,6 @@ def _calc_ratio_loss_stratified(
         display_mse = torch.tensor(0.0, device=device)
 
     if is_main_process and random.random() < DEBUG_PRINT_PROB:
-        log_cycle_mean = global_mean_est if 'cycle_mean' not in locals() else cycle_mean
         log_est_mean = global_mean_est
         log_status = "CYCLE_UPDATE" if 'cycle_mean' in locals() else "ACCUMULATING"
         

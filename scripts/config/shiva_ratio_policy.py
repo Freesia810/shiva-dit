@@ -121,7 +121,6 @@ trainer_config = {
     "model_path": None,
     "output_dir": f"./checkpoints_{mode}",
     "training_mode": "lora",
-    "hook_only_steps": 0,
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
     "caption_dropout_rate": 0.1,

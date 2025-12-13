@@ -109,7 +109,7 @@ class ShivaRatioPolicy(nn.Module):
         # Logits = L + T + Bias
         final_logits = logits_l + logits_t + self.global_bias
         
-        if self.training and torch.rand(1).item() < 1e-3:
+        if self.training and torch.rand(1).item() < 1e-4:
             with torch.no_grad():
                 is_main_process = not dist.is_initialized() or dist.get_rank() == 0
                 if is_main_process:

@@ -2612,8 +2612,6 @@ class DiffusionModelTrainer:
                              except Exception as e:
                                 print(f"Gradient stats collection failed: {e}")
 
-                    self._trigger_phase()
-
                     gathered_losses = {
                         "total": self.accelerator.gather(total_loss).mean(),
                         "main": self.accelerator.gather(main_loss).mean(),
