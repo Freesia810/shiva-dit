@@ -39,8 +39,6 @@ class TrainerConfig:
     trainable_hook_config: Tuple[type, Dict[str, Any]] = None 
     compile_model: bool = True
 
-    hook_only_steps: int = 0
-
     caption_dropout_rate: float = 0.25
 
     num_epochs: int = 10
@@ -59,8 +57,14 @@ class TrainerConfig:
         default=1e-4,
         metadata={"help": "Learning rate for context parameters (k)."},
     )
+    router_learning_rate: float = field(
+        default=1e-4,
+        metadata={"help": "Learning rate for router parameters."},
+    )
     optimizer: str = "AdamW" # "Adam", "AdamW", "SGD"
     weight_decay: float = 1e-2
+
+    finetune_target_modules: Optional[List[str]] = None
 
     seed: int = 42
     logging_steps: int = 50

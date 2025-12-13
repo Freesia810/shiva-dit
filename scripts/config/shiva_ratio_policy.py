@@ -39,9 +39,9 @@ hook_config = {
 stage_config_dict = {
     "adaptive": [
         # {
-        #     "steps": 7000, 
+        #     "steps": 7000,
         #     "weights": {
-        #         "ratio": [0.0, 0.0, 0.0], 
+        #         "ratio": [0.0, 0.0, 0.0],
         #         "gate": 0.0,
         #         "distill": [0.0, 0.0]
         #     },
@@ -49,7 +49,6 @@ stage_config_dict = {
         #     "lr": [5e-4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         #     "temp": [5.0, 15.0, 10.0, 20.0],
         # },
-
         # {
         #     "steps": 14000,
         #     "weights": {
@@ -60,7 +59,6 @@ stage_config_dict = {
         #     "lr": [1e-6, 1e-5, 0.0, 0.0, 2e-5, 0.0, 0.0],
         #     "temp": [15.0, 15.0, 20.0, 50.0],
         # },
-
         # {
         #     "steps": -1,
         #     "weights": {
@@ -72,40 +70,46 @@ stage_config_dict = {
         #     "temp": [15.0, 15.0, 50.0, 100.0],
         # },
     ],
-
     "fixed": [
         {
-            "steps": 7000, 
+            "steps": 3500,
+            "weights": {
+                "ratio": [0.0, 0.0, 0.0],
+                "gate": 0.0,
+                "distill": [0.0, 0.0],
+            },
+            "lr": {
+                "router": 3e-4,
+            },
+            "warmup": 200,
+            "temp": [5.0, 5.0, 10.0, 10.0],
+        },
+        {
+            "steps": 21000,
+            "weights": {
+                "ratio": [0.0, 0.0, 0.0],
+                "gate": 0.0,
+                "distill": [1.0, 0.0],
+            },
+            "lr": {
+                "lora": 1e-4,
+                "router": 0.0,
+            },
+            "warmup": 500,
+            "temp": [5.0, 5.0, 50.0, 100.0],
+        },
+        {
+            "steps": -1,
             "weights": {
                 "ratio": [0.0, 0.0, 0.0], 
-                "gate": 0.0,
-                "distill": [0.0, 0.0]
+                "gate": 0.0, 
+                "distill": [1.0, 0.0]
             },
-            # LR: [Base(Router), LoRA, Gate, Fuser, Policy, CtxRatio, CtxPruner]
-            "lr": [5e-4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            "temp": [5.0, 10.0, 10.0, 20.0],
-        },
-
-        {
-            "steps": 14000, 
-            "weights": {
-                "ratio": [0.0, 0.0, 0.0],
-                "gate": 0.0,
-                "distill": [0.0, 0.0],
+            "lr": {
+                "lora": 1e-5,
+                "router": 0.0,
             },
-            "lr": [0.0, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
-            "temp": [10.0, 10.0, 20.0, 50.0],
-        },
-
-        {
-            "steps": -1, 
-            "weights": {
-                "ratio": [0.0, 0.0, 0.0],
-                "gate": 0.0,
-                "distill": [0.0, 0.0],
-            },
-            "lr": [0.0, 1e-4, 0.0, 0.0, 0.0, 0.0, 0.0],
-            "temp": [10.0, 10.0, 50.0, 100.0],
+            "temp": [5.0, 5.0, 100.0, 100.0],
         },
     ],
 }
@@ -123,7 +127,7 @@ trainer_config = {
     "caption_dropout_rate": 0.1,
     "num_epochs": 30,
     "train_batch_size": 1,
-    "gradient_accumulation_steps": 16,
+    "gradient_accumulation_steps": 2,
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
     "distillation_final_weight": 1.0,
@@ -145,8 +149,6 @@ trainer_config = {
     "mixed_precision": "bf16",
     "extra_config": {
         "target_ratio": 0.6,
-        # LR Order Mapping in Trainer: 
-        # [0:Base/Router, 1:LoRA, 2:Gate, 3:Fuser, 4:ImageRatio(Policy), 5:CtxRatio, 6:CtxPruner]
         "stage_schedule": stage_config_dict[mode],
     },
     "log_with_tensorboard": True,

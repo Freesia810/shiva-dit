@@ -130,12 +130,10 @@ class DiffusionModelTrainer:
 
         self._setup_dataloaders()
 
-        num_update_steps_per_epoch = max(
-            1, len(self.train_dataloader) // config.gradient_accumulation_steps
-        )
-        self.num_training_steps = num_update_steps_per_epoch * config.num_epochs
-
-        self._setup_scaled_steps()
+        steps_per_epoch = len(self.train_dataloader) // config.gradient_accumulation_steps
+        self.num_training_steps = steps_per_epoch * config.num_epochs
+        
+        self._setup_stage_schedule()
 
         self._prepare_with_accelerator()
 
@@ -180,27 +178,21 @@ class DiffusionModelTrainer:
         self.timestep_buffer = []
         self.schedule_timesteps_gpu = self.scheduler.timesteps.to(self.device)
 
-    def _scale_steps(self, steps: int) -> int:
-        if steps <= 0:
-            return steps
-        return max(1, steps // self.accelerator.num_processes)
-
-    def _setup_scaled_steps(self):
+    def _setup_stage_schedule(self):
         config = self.config
-
         total_train_steps = self.num_training_steps
 
         self.processed_stage_schedule = []
         current_step_threshold = 0
-        last_threshold = 0 
 
         if 'stage_schedule' not in self.config.extra_config:
             self.processed_stage_schedule.append({
-                "threshold": self._scale_steps(total_train_steps),
+                "threshold": total_train_steps,
                 "start_step": 0,
                 "weights": {"ratio": 0.5, "gate": 0.1},
                 "lr": None,
                 "temp": [5.0, 5.0],
+                "warmup": 0
             })
         else:
             schedule_list = self.config.extra_config['stage_schedule']
@@ -208,43 +200,30 @@ class DiffusionModelTrainer:
                 stage_duration = stage["steps"]
                 start_step = current_step_threshold
                 is_last_stage = (i == len(schedule_list) - 1)
-                scaled_total_steps = self._scale_steps(total_train_steps)
+                
                 if stage_duration < 0 or is_last_stage:
-                    scaled_threshold = scaled_total_steps
+                    threshold = total_train_steps 
+                    if threshold < start_step: threshold = start_step + 1
                 else:
-                    scaled_duration = self._scale_steps(stage_duration)
-                    scaled_threshold = current_step_threshold + scaled_duration
-                    if scaled_threshold > scaled_total_steps:
-                        scaled_threshold = scaled_total_steps
-
+                    threshold = current_step_threshold + stage_duration
+                
                 self.processed_stage_schedule.append({
-                    "threshold": scaled_threshold,
+                    "threshold": int(threshold),
                     "start_step": int(start_step),
                     "weights": stage["weights"],
                     "lr": stage.get("lr", None),
                     "temp": stage.get("temp", [5.0, 5.0]),
+                    "warmup": stage.get("warmup", 0) # [新增] 解析 warmup
                 })
 
-                current_step_threshold = scaled_threshold
-                last_threshold = scaled_threshold
+                current_step_threshold = int(threshold)
                 if current_step_threshold >= total_train_steps:
                     break
 
-        self.scaled_hook_only_steps = self._scale_steps(config.hook_only_steps)
-        self.log_trigger = self._scale_steps(config.logging_steps)
-        self.validate_trigger = (
-            self._scale_steps(config.validation_steps)
-            if config.validation_steps > 0
-            else None
-        )
-        self.inference_trigger = (
-            self._scale_steps(config.inference_steps)
-            if config.inference_steps > 0
-            else None
-        )
-        self.save_trigger = (
-            self._scale_steps(config.save_steps) if config.save_steps > 0 else None
-        )
+        self.log_trigger = config.logging_steps
+        self.validate_trigger = config.validation_steps if config.validation_steps > 0 else None
+        self.inference_trigger = config.inference_steps if config.inference_steps > 0 else None
+        self.save_trigger = config.save_steps if config.save_steps > 0 else None
 
     @staticmethod
     def _get_dtype(mixed_precision: str):
@@ -418,15 +397,10 @@ class DiffusionModelTrainer:
             self.train_dataloader,
         ]
 
-        # if self.teacher_model is not None:
-        #     prepare_list.insert(1, self.teacher_model)
-
         prepared = self.accelerator.prepare(*prepare_list)
 
         idx = 0
         self.model = prepared[idx]; idx += 1
-        # if self.teacher_model is not None:
-        #     self.teacher_model = prepared[idx]; idx += 1
         self.optimizer = prepared[idx]; idx += 1
         self.train_dataloader = prepared[idx]; idx += 1
         if self.val_dataloader is not None:
@@ -605,27 +579,34 @@ class DiffusionModelTrainer:
                 print("Training mode: hook_only (only training Hook parameters)")
             self.model.requires_grad_(False)
 
-            hook_param_found = False
             for hook in HookManager.get_all_hooks().values():
                 if isinstance(hook, nn.Module):
                     hook.requires_grad_(True)
-                    if list(hook.parameters()):
-                        hook_param_found = True
-
-            if not hook_param_found:
-                all_hook_params = []
-                for hook in HookManager.get_all_hooks().values():
-                    if isinstance(hook, nn.Module):
-                        all_hook_params.extend(list(hook.parameters()))
-                if not all_hook_params:
-                    raise ValueError(
-                        "No trainable Hook parameters found in 'hook_only' mode."
-                    )
 
         elif self.config.training_mode == "finetune":
             if self.accelerator.is_main_process:
-                print("Training mode: finetune (training all DiT parameters)")
-            self.model.requires_grad_(True)
+                print("Training mode: finetune")
+
+            target_modules = self.config.finetune_target_modules
+            
+            if target_modules and len(target_modules) > 0:
+                self.model.requires_grad_(False)
+                if self.accelerator.is_main_process:
+                    print(f"  -> Partial Finetune Enabled. Targets: {target_modules}")
+                
+                count_unfrozen = 0
+                for name, param in self.model.named_parameters():
+                    if any(t in name for t in target_modules):
+                        param.requires_grad_(True)
+                        count_unfrozen += 1
+                
+                if self.accelerator.is_main_process:
+                    print(f"  -> Unfrozen {count_unfrozen} parameters based on targets.")
+            else:
+                if self.accelerator.is_main_process:
+                    print("  -> Full Finetune (All DiT parameters)")
+                self.model.requires_grad_(True)
+
             for hook in HookManager.get_all_hooks().values():
                 if isinstance(hook, nn.Module):
                     hook.requires_grad_(True)
@@ -634,9 +615,7 @@ class DiffusionModelTrainer:
             if self.accelerator.is_main_process:
                 print("Training mode: lora (applying LoRA to DiT model)")
             if not self.config.lora_config.enable:
-                raise ValueError(
-                    "LoRA configuration is disabled in 'lora' training mode."
-                )
+                raise ValueError("LoRA configuration is disabled in 'lora' training mode.")
 
             self.model.requires_grad_(False)
             for hook in HookManager.get_all_hooks().values():
@@ -667,150 +646,92 @@ class DiffusionModelTrainer:
             if self.accelerator.is_main_process:
                 print("Enabled gradient checkpointing for the model.")
 
-        lora_params = []
-        lora_names = []
-        
-        gate_policy_params = []
-        gate_policy_names = []
-        
-        image_ratio_policy_params = []
-        image_ratio_policy_names = []
-        
-        fuser_params = []
-        fuser_names = []
-        
-        context_ratio_policy_params = []
-        context_ratio_policy_names = []
-        
-        context_pruner_params = []
-        context_pruner_names = []
-        
-        other_model_params = []
-        other_model_names = []
+        hook_submodule_config = {
+            "router":               ("router",               self.config.router_learning_rate,      self.config.weight_decay),
+            "gater_policy":         ("gate_policy",          self.config.policy_learning_rate,      0.0),
+            "image_ratio_policy":   ("image_ratio_policy",   self.config.policy_learning_rate,      0.0),
+            "fuse_expert":          ("fuser",                self.config.learning_rate,             0.0),
+            "context_ratio_policy": ("context_ratio_policy", self.config.policy_learning_rate,      0.0),
+            "context_pruner":       ("context_pruner",       self.config.context_learning_rate,     0.0),
+        }
 
-        gate_policy_param_ids = set()
-        image_ratio_policy_param_ids = set()
-        fuser_param_ids = set()
-        context_ratio_policy_param_ids = set()
-        context_pruner_param_ids = set()
+        # group_name -> list[params]
+        params_map = {cfg[0]: [] for cfg in hook_submodule_config.values()}
+        params_map["lora"] = []
+        params_map["base"] = []
 
-        # Identify parameters belonging to specific modules
+        names_map = {k: [] for k in params_map.keys()}
+
+        # param_id -> group_name
+        pid_to_group = {}
+
         for hook in HookManager.get_all_hooks().values():
-            if hasattr(hook, "gater_policy") and hook.gater_policy is not None:
-                for param in hook.gater_policy.parameters():
-                    gate_policy_param_ids.add(id(param))
-            if hasattr(hook, "image_ratio_policy") and hook.image_ratio_policy is not None:
-                for param in hook.image_ratio_policy.parameters():
-                    image_ratio_policy_param_ids.add(id(param))
-            if hasattr(hook, "fuse_expert") and hook.fuse_expert is not None:
-                for param in hook.fuse_expert.parameters():
-                    fuser_param_ids.add(id(param))
-            if hasattr(hook, "context_ratio_policy") and hook.context_ratio_policy is not None:
-                for param in hook.context_ratio_policy.parameters():
-                    context_ratio_policy_param_ids.add(id(param))
-            if hasattr(hook, "context_pruner") and isinstance(hook.context_pruner, nn.Module):
-                for param in hook.context_pruner.parameters():
-                    context_pruner_param_ids.add(id(param))
+            for attr_name, (group_name, _, _) in hook_submodule_config.items():
+                module = getattr(hook, attr_name, None)
+                if module is not None and isinstance(module, nn.Module):
+                    for param in module.parameters():
+                        pid_to_group[id(param)] = group_name
 
         for name, param in self.model.named_parameters():
             if not param.requires_grad:
                 continue
 
             pid = id(param)
-            if pid in gate_policy_param_ids:
-                gate_policy_params.append(param)
-                gate_policy_names.append(name)
-            elif pid in image_ratio_policy_param_ids:
-                image_ratio_policy_params.append(param)
-                image_ratio_policy_names.append(name)
-            elif pid in fuser_param_ids:
-                fuser_params.append(param)
-                fuser_names.append(name)
-            elif pid in context_ratio_policy_param_ids:
-                context_ratio_policy_params.append(param)
-                context_ratio_policy_names.append(name)
-            elif pid in context_pruner_param_ids:
-                context_pruner_params.append(param)
-                context_pruner_names.append(name)
-            elif "lora" in name:
-                lora_params.append(param)
-                lora_names.append(name)
-            else:
-                other_model_params.append(param)
-                other_model_names.append(name)
+            target_group = "base"
 
-        base_lr_params = other_model_params
-        base_lr_names = other_model_names
+            if pid in pid_to_group:
+                target_group = pid_to_group[pid]
+            elif "lora" in name:
+                target_group = "lora"
+            
+            params_map[target_group].append(param)
+            names_map[target_group].append(name)
 
         if self.accelerator.is_main_process:
             print(f"\n--- Optimizer Parameter Groups ---")
+            display_order = ["base", "lora", "router", "gate_policy", "image_ratio_policy", "fuser", "context_ratio_policy", "context_pruner"]
             
-            def print_group_info(group_name, params, names):
-                print(f"Optimizing {len(params)} {group_name} params")
-                if len(names) > 0:
-                    if len(names) > 20:
-                        print(f"  Names (first 10): {names[:10]}")
-                        print(f"  Names (last 5):   {names[-5:]}")
-                    else:
-                        print(f"  Names: {names}")
-                print("-" * 30)
+            for grp in display_order:
+                if grp in params_map and len(params_map[grp]) > 0:
+                    count = len(params_map[grp])
+                    n_list = names_map[grp]
+                    print(f"  {grp:<22} Params: {count}")
 
-            print_group_info("LoRA", lora_params, lora_names)
-            print_group_info("Gate Policy", gate_policy_params, gate_policy_names)
-            print_group_info("Image Ratio Policy", image_ratio_policy_params, image_ratio_policy_names)
-            print_group_info("Fuser", fuser_params, fuser_names)
-            print_group_info("Context Ratio Policy", context_ratio_policy_params, context_ratio_policy_names)
-            print_group_info("Context Pruner", context_pruner_params, context_pruner_names)
-            print_group_info("Base (Router/Other)", base_lr_params, base_lr_names)
+                    if len(n_list) > 0:
+                        if len(n_list) > 5:
+                            example_str = f"['{n_list[0]}', '{n_list[1]}', '{n_list[2]}', ..., '{n_list[-2]}', '{n_list[-1]}']"
+                            print(f"    Examples: {example_str}")
+                        else:
+                            print(f"    Names: {n_list}")
             print("----------------------------------\n")
 
-        # Define explicit groups
-        optimizer_grouped_parameters = [
-            {
-                "params": lora_params,
+        optimizer_grouped_parameters = []
+
+        for _, (group_name, lr, wd) in hook_submodule_config.items():
+            if params_map[group_name]:
+                optimizer_grouped_parameters.append({
+                    "params": params_map[group_name],
+                    "lr": lr,
+                    "weight_decay": wd,
+                    "name": group_name
+                })
+
+        if params_map["lora"]:
+            optimizer_grouped_parameters.append({
+                "params": params_map["lora"],
                 "lr": self.config.lora_learning_rate,
                 "weight_decay": self.config.weight_decay,
                 "name": "lora"
-            },
-            {
-                "params": gate_policy_params,
-                "lr": self.config.policy_learning_rate,
-                "weight_decay": 0.0,
-                "name": "gate_policy"
-            },
-            {
-                "params": image_ratio_policy_params,
-                "lr": self.config.policy_learning_rate,
-                "weight_decay": 0.0,
-                "name": "image_ratio_policy"
-            },
-            {
-                "params": fuser_params,
-                "lr": self.config.learning_rate,
-                "weight_decay": 0.0,
-                "name": "fuser"
-            },
-            {
-                "params": context_ratio_policy_params,
-                "lr": self.config.policy_learning_rate,
-                "weight_decay": 0.0,
-                "name": "context_ratio_policy"
-            },
-            {
-                "params": context_pruner_params,
-                "lr": self.config.context_learning_rate, 
-                "weight_decay": 0.0,
-                "name": "context_pruner"
-            },
-            {
-                "params": base_lr_params,
+            })
+
+        if params_map["base"]:
+            optimizer_grouped_parameters.append({
+                "params": params_map["base"],
                 "lr": self.config.learning_rate,
                 "weight_decay": self.config.weight_decay,
                 "name": "base"
-            },
-        ]
+            })
 
-        # Filter out empty groups
         optimizer_grouped_parameters = [g for g in optimizer_grouped_parameters if g["params"]]
 
         if not optimizer_grouped_parameters:
@@ -1461,29 +1382,16 @@ class DiffusionModelTrainer:
             timesteps.detach(),
         )
 
-    def _set_finetuning_trainable_state(self, requires_grad: bool):        
-        if self.accelerator.is_main_process:
-            print(f"\n[Step {self.global_step}]: Setting finetuning parameters' requires_grad = {requires_grad}")
-
-        unwrapped_model = self.accelerator.unwrap_model(self.model)
-        for name, param in unwrapped_model.named_parameters():
-            if self.config.training_mode == "lora":                
-                if "lora_" in name:
-                    if param.requires_grad != requires_grad:
-                        param.requires_grad = requires_grad
-            elif self.config.training_mode == "finetune":
-                if "_hook" not in name:
-                    if param.requires_grad != requires_grad:
-                        param.requires_grad = requires_grad
-
     def _update_learning_rate(self):
         current_lrs = None
         new_stage_idx = -1
+        current_stage_info = None
 
         for idx, stage in enumerate(self.processed_stage_schedule):
             if self.global_step < stage["threshold"]:
                 current_lrs = stage["lr"]
                 new_stage_idx = idx
+                current_stage_info = stage
                 break
 
         if new_stage_idx != self.current_stage_idx and new_stage_idx != -1:
@@ -1497,34 +1405,47 @@ class DiffusionModelTrainer:
         if current_lrs is None:
             return
 
-        # Strict 6-item mapping as requested
-        # [Base, LoRA, Gate, Fuser, ImageRatio, ContextRatio, ContextPruner]
-        
-        lr_base = current_lrs[0]
-        lr_lora = current_lrs[1]
-        lr_gate = current_lrs[2]
-        lr_fuser = current_lrs[3]
-        lr_img_ratio = current_lrs[4]
-        lr_ctx_ratio = current_lrs[5]
-        lr_ctx_pruner = current_lrs[6]
+        if not isinstance(current_lrs, dict):
+            raise ValueError("Learning rate configuration must be a dictionary mapping.")
+
+        warmup_factor = 1.0
+        if current_stage_info:
+            warmup_steps = current_stage_info.get("warmup", 0)
+            stage_start_step = current_stage_info.get("start_step", 0)
+            steps_in_stage = self.global_step - stage_start_step
+            
+            if warmup_steps > 0 and steps_in_stage < warmup_steps:
+                warmup_factor = float(steps_in_stage) / float(warmup_steps)
+                warmup_factor = max(0.0, min(1.0, warmup_factor))
+
+        alias_map = {
+            "gate_policy":          ["gate"],
+            "image_ratio_policy":   ["image_ratio", "img_ratio"],
+            "context_ratio_policy": ["context_ratio", "ctx_ratio"],
+            "context_pruner":       ["context_pruner", "ctx_pruner", "pruner"],
+            "fuser":                ["fuser", "fuse_expert"],
+            "router":               ["router"],
+            "base":                 ["base"],
+            "lora":                 ["lora"],
+        }
 
         for param_group in self.optimizer.param_groups:
             group_name = param_group.get("name", "")
+            target_lr = None
 
-            if group_name == "base":
-                param_group["lr"] = lr_base
-            elif group_name == "lora":
-                param_group["lr"] = lr_lora
-            elif group_name == "gate_policy":
-                param_group["lr"] = lr_gate
-            elif group_name == "image_ratio_policy":
-                param_group["lr"] = lr_img_ratio
-            elif group_name == "fuser":
-                param_group["lr"] = lr_fuser
-            elif group_name == "context_ratio_policy":
-                param_group["lr"] = lr_ctx_ratio
-            elif group_name == "context_pruner":
-                param_group["lr"] = lr_ctx_pruner
+            if group_name in current_lrs:
+                target_lr = current_lrs[group_name]
+            
+            elif group_name in alias_map:
+                for alias in alias_map[group_name]:
+                    if alias in current_lrs:
+                        target_lr = current_lrs[alias]
+                        break
+            
+            if target_lr is None:
+                target_lr = 0.0
+            
+            param_group["lr"] = target_lr * warmup_factor
 
     def _update_temperature(self):
         current_Ts = None
@@ -2627,24 +2548,6 @@ class DiffusionModelTrainer:
                     print(f"Adjusting epoch from {self.epoch} to {expected_epoch} based on global_step.")
                 self.epoch = expected_epoch
 
-    def _initial_phase(self):
-        ## resume hook-only state
-        if self.config.hook_only_steps > 0:
-            is_in_hookonly = self.global_step < self.scaled_hook_only_steps
-            self._set_finetuning_trainable_state(requires_grad=not is_in_hookonly)
-        else:
-            self._set_finetuning_trainable_state(requires_grad=True)
-
-        ## print parameter count
-        self._log_trainable_parameters('Initial')
-
-    def _trigger_phase(self):
-        # trigger hook-only completion
-        if self.config.hook_only_steps > 0:
-            if self.global_step == self.scaled_hook_only_steps:
-                self._set_finetuning_trainable_state(requires_grad=True)
-                self._log_trainable_parameters('After hook-only')
-
     def train(self):
         if self.accelerator.is_main_process:
             print("Starting training...")
@@ -2652,7 +2555,7 @@ class DiffusionModelTrainer:
 
         self._try_resume()
 
-        self._initial_phase()
+        self._log_trainable_parameters('Initial')
 
         self.prev_lora_state = None
         self.prev_finetune_state = None
@@ -2680,17 +2583,14 @@ class DiffusionModelTrainer:
                     self.optimizer.zero_grad(set_to_none=True)
 
                 total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid, timesteps = self._train_step(batch)
-                is_update_step = (
-                    step + 1
-                ) % self.config.gradient_accumulation_steps == 0
+                
+                is_update_step = (step + 1) % self.config.gradient_accumulation_steps == 0
                 is_last_step = (step + 1) == len(self.train_dataloader)
 
                 if self.accelerator.is_main_process:
                     t_val = timesteps.float().mean().item()
-
-                    if self.model_type in ["flux-dev", "flux-kontext"] and t_val <= 1.0:
+                    if self.model_type in ["flux-dev", "flux-kontext", "qwen-image", "qwen-image-edit"]:
                         t_val *= 1000.0
-                    
                     self.main_viz_buffer.append((t_val, main_loss.float().item()))
                     self.distill_final_viz_buffer.append((t_val, distill_loss_final.float().item()))
                     self.distill_mid_viz_buffer.append((t_val, distill_loss_mid.float().item()))
@@ -2698,18 +2598,19 @@ class DiffusionModelTrainer:
                 if is_update_step or is_last_step:
                     if self.accelerator.sync_gradients:
                         self.accelerator.clip_grad_norm_(self.model.parameters(), 1.0)
-
-                    if self.accelerator.is_main_process and self.global_step % self.log_trigger == 0:
-                        try:
-                            policy_grad_stats = shiva_metrics.collect_policy_gradient_stats(
-                                self.model, HookManager, self.device
-                            )
-                            self.logger.log_scalars(policy_grad_stats, step=self.global_step)
-                        except Exception as e:
-                            print(f"Gradient stats collection failed: {e}")
-
+                    
                     self.optimizer.step()
                     self.global_step += 1
+
+                    if self.log_trigger and self.global_step % self.log_trigger == 0:
+                        if self.accelerator.is_main_process:
+                             try:
+                                policy_grad_stats = shiva_metrics.collect_policy_gradient_stats(
+                                    self.model, HookManager, self.device
+                                )
+                                self.logger.log_scalars(policy_grad_stats, step=self.global_step)
+                             except Exception as e:
+                                print(f"Gradient stats collection failed: {e}")
 
                     self._trigger_phase()
 
