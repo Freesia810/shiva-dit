@@ -578,7 +578,7 @@ def collect_policy_gradient_stats(model, hook_manager, device) -> dict:
                 return f"|{'#'*fill}{'-'*(length-fill)}|"
 
             print(f"\n{'-'*30} [Policy Gradient Health: {name.upper()}] {'-'*30}")
-            print(f"  > Gradient Energy Distribution (Target: L >> T):")
+            print(f"  > Gradient Energy Distribution:")
             print(f"    [L] Layer Branch : {draw_bar(l_pct)} {l_pct*100:5.1f}% (Norm: {total_l_energy:.4f})")
             print(f"    [T] Time Branch  : {draw_bar(t_pct)} {t_pct*100:5.1f}% (Norm: {total_t_energy:.4f})")
             print(f"    [B] Global Bias  : {draw_bar(b_pct)} {b_pct*100:5.1f}% (Norm: {grad_bias:.4f})")

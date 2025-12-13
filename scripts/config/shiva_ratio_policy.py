@@ -5,8 +5,8 @@ HookType = ShivaDitBlockHook
 
 lora_config = {
     "enable": True,
-    "rank": 128,
-    "lora_alpha": 128,
+    "rank": 32,
+    "lora_alpha": 32,
     "target_modules": [
         "to_q", "to_k", "to_v", "to_out.0",
         "linear", "proj_mlp", "proj_out", 
@@ -14,8 +14,8 @@ lora_config = {
     ],
 }
 
-mode = "fixed"
-# mode = "adaptive"
+# mode = "fixed"
+mode = "adaptive"
 
 hook_config = {
     # --- Mode Selection ---
@@ -23,7 +23,7 @@ hook_config = {
 
     # --- Image Configs ---
     "image_ratio_mode": mode,
-    "fixed_image_ratio": 0.6,
+    "fixed_image_ratio": 0.8,
     "num_router_groups": 24,
     "bottleneck_dim": 512,
     "ratio_bottleneck_dim": 256,
@@ -38,37 +38,48 @@ hook_config = {
 
 stage_config_dict = {
     "adaptive": [
-        # {
-        #     "steps": 7000,
-        #     "weights": {
-        #         "ratio": [0.0, 0.0, 0.0],
-        #         "gate": 0.0,
-        #         "distill": [0.0, 0.0]
-        #     },
-        #     # LR: [Base(Router), LoRA, Gate, Fuser, Policy, CtxRatio, CtxPruner]
-        #     "lr": [5e-4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        #     "temp": [5.0, 15.0, 10.0, 20.0],
-        # },
-        # {
-        #     "steps": 14000,
-        #     "weights": {
-        #         "ratio": [0.0, 10.0, 2.5],
-        #         "gate": 0.0,
-        #         "distill": [0.0, 0.0],
-        #     },
-        #     "lr": [1e-6, 1e-5, 0.0, 0.0, 2e-5, 0.0, 0.0],
-        #     "temp": [15.0, 15.0, 20.0, 50.0],
-        # },
-        # {
-        #     "steps": -1,
-        #     "weights": {
-        #         "ratio": [0.0, 10.0, 0.5],
-        #         "gate": 0.0,
-        #         "distill": [0.0, 0.0],
-        #     },
-        #     "lr": [1e-6, 1e-5, 0.0, 0.0, 1e-6, 0.0, 0.0],
-        #     "temp": [15.0, 15.0, 50.0, 100.0],
-        # },
+        {
+            "steps": 3500,
+            "weights": {
+                "ratio": [0.0, 0.0, 0.0],
+                "gate": 0.0,
+                "distill": [0.0, 0.0],
+            },
+            "lr": {
+                "router": 3e-4,
+            },
+            "warmup": 200,
+            "temp": [5.0, 15.0, 10.0, 20.0],
+        },
+        {
+            "steps": 21000,
+            "weights": {
+                "ratio": [0.0, 0.0, 2.5],
+                "gate": 0.0,
+                "distill": [1.0, 0.0],
+            },
+            "lr": {
+                "lora": 1e-4,
+                "router": 1e-5,
+                "image_ratio_policy": 2e-5,
+            },
+            "warmup": 500,
+            "temp": [15.0, 15.0, 20.0, 50.0],
+        },
+        {
+            "steps": -1,
+            "weights": {
+                "ratio": [0.0, 0.0, 1.0], 
+                "gate": 0.0, 
+                "distill": [1.0, 0.0]
+            },
+            "lr": {
+                "lora": 1e-5,
+                "router": 1e-5,
+                "image_ratio_policy": 1e-4,
+            },
+            "temp": [15.0, 15.0, 50.0, 100.0],
+        },
     ],
     "fixed": [
         {
@@ -147,7 +158,7 @@ trainer_config = {
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",
     "extra_config": {
-        "target_ratio": 0.6,
+        "target_ratio": 0.8,
         "stage_schedule": stage_config_dict[mode],
     },
     "log_with_tensorboard": True,

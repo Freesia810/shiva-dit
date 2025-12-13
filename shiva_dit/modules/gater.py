@@ -109,7 +109,7 @@ class ShivaRatioPolicy(nn.Module):
         # Logits = L + T + Bias
         final_logits = logits_l + logits_t + self.global_bias
         
-        if self.training and torch.rand(1).item() < 1e-4:
+        if self.training and torch.rand(1).item() < 1e-3:
             with torch.no_grad():
                 is_main_process = not dist.is_initialized() or dist.get_rank() == 0
                 if is_main_process:
@@ -132,7 +132,7 @@ class ShivaRatioPolicy(nn.Module):
                     else:
                         layers_str = str(unique_layers)
 
-                    print(f"\n{'='*35} [Policy Monitor: Additive] {'='*35}")
+                    print(f"\n{'='*35} [Policy Monitor] {'='*35}")
                     print(f"  > Context:")
                     print(f"      Timestep (Global): {current_t}")
                     print(f"      Layers in Batch:   {layers_str}")
