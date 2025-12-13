@@ -216,7 +216,7 @@ class DiffusionModelTrainer:
                     "weights": stage["weights"],
                     "lr": stage.get("lr", None),
                     "temp": stage.get("temp", [5.0, 5.0]),
-                    "warmup": stage.get("warmup", 0) # [新增] 解析 warmup
+                    "warmup": stage.get("warmup", 0)
                 })
 
                 current_step_threshold = int(threshold)

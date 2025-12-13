@@ -51,8 +51,9 @@ stage_config_dict = {
             "warmup": 200,
             "temp": [5.0, 15.0, 10.0, 20.0],
         },
+
         {
-            "steps": 21000,
+            "steps": 3500,
             "weights": {
                 "ratio": [0.0, 0.0, 1.0],
                 "gate": 0.0,
@@ -64,7 +65,21 @@ stage_config_dict = {
                 "image_ratio_policy": 1e-4,
             },
             "warmup": 500,
-            "temp": [15.0, 15.0, 20.0, 50.0],
+            "temp": [15.0, 15.0, 20.0, 25.0],
+        },
+        {
+            "steps": 17500,
+            "weights": {
+                "ratio": [0.0, 0.0, 1.0],
+                "gate": 0.0,
+                "distill": [0.1, 0.0],
+            },
+            "lr": {
+                "lora": 5e-5,
+                "router": 1e-5,
+                "image_ratio_policy": 1e-4,
+            },
+            "temp": [15.0, 15.0, 25.0, 50.0],
         },
         {
             "steps": -1,

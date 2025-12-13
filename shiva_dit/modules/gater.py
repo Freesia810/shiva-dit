@@ -4,7 +4,8 @@ import torch.distributed as dist
 import math
 from shiva_dit.utils import global_context
 
-RATIO_STAGE = 1
+RATIO_LAYER_STAGE = 1
+RATIO_TIME_STAGE = 2
 
 class ShivaGaterPolicy(nn.Module):
     def __init__(self, time_embed_dim, layer_embed_dim, bottleneck_dim, num_layers):
@@ -116,6 +117,15 @@ class ShivaRatioPolicy(nn.Module):
 
         l_feat = self.layer_emb(layer_idx_tensor)
         logits_l = self.layer_mlp(l_feat)
+
+        # Hack: Freeze layer branch
+        is_freeze_layer_branch = (
+            self.training
+            and getattr(global_context, "current_stage_idx", -1)
+            == RATIO_TIME_STAGE
+        )
+        if self.training and is_freeze_layer_branch:
+            logits_l = logits_l.detach()
 
         if temb.dim() == 3:
             temb = temb.squeeze(1)
