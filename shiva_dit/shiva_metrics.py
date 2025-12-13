@@ -241,8 +241,16 @@ def _calc_ratio_loss_stratified(
             raise RuntimeError(f"[{prefix}] Error: All ranks reported NO data during accumulation cycle. Cannot compute average.")
             
         cycle_mean = global_sum / global_count
+
+        alpha = 0.2 
+
+        if "last_cycle_mean" in state_buffer:
+            old_mean = state_buffer["last_cycle_mean"]
+            new_mean = alpha * cycle_mean + (1 - alpha) * old_mean
+            state_buffer["last_cycle_mean"] = new_mean
+        else:
+            state_buffer["last_cycle_mean"] = cycle_mean
             
-        state_buffer["last_cycle_mean"] = cycle_mean
         state_buffer["history_ratios"] = []
         state_buffer["history_counts"] = []
         

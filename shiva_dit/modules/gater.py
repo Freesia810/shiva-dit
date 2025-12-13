@@ -71,8 +71,9 @@ class ShivaRatioPolicy(nn.Module):
             nn.Linear(ratio_bottleneck_dim, 1)
         )
 
-        self.global_bias = nn.Parameter(torch.zeros(1))
+        self.register_buffer("global_bias", torch.zeros(1))
 
+        # self.has_reset = False
         self.reset_parameters()
 
         self.grad_scale = 1.0 / float(total_layers)
@@ -109,6 +110,10 @@ class ShivaRatioPolicy(nn.Module):
             print(f"[ShivaRatioPolicy] Initialized (Additive). Bias={bias_val:.4f} (Target={self.init_ratio_val})")
 
     def forward(self, temb, layer_idx_tensor):
+        # if not self.has_reset:
+        #     self.reset_parameters()
+        #     self.has_reset = True
+
         l_feat = self.layer_emb(layer_idx_tensor)
         logits_l = self.layer_mlp(l_feat)
 
