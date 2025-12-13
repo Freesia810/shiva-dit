@@ -75,6 +75,16 @@ class ShivaRatioPolicy(nn.Module):
 
         self.reset_parameters()
 
+        self.grad_scale = 1.0 / float(total_layers)
+        
+        def scale_grad_hook(grad):
+            return grad * self.grad_scale
+
+        print(f"[ShivaRatioPolicy] Registering gradient scaler (1/{total_layers}) for Time MLP")
+        for param in self.time_mlp.parameters():
+            if param.requires_grad:
+                param.register_hook(scale_grad_hook)
+
     def reset_parameters(self):
         nn.init.normal_(self.layer_emb.weight, std=0.02)
         for m in self.layer_mlp.modules():
