@@ -91,7 +91,6 @@ stage_config_dict = {
             "lr": {
                 "lora": 1e-5,
                 "router": 1e-5,
-                "image_ratio_policy": 1e-4,
             },
             "temp": [15.0, 15.0, 50.0, 100.0],
         },
