@@ -73,7 +73,7 @@ hook_config_shared = {
     "init_Tk": 10.0,
 }
 
-hook_config_grouped = {
+hook_config_grouped_4 = {
     "shiva_mode": "image",
     "image_ratio_mode": "adaptive",
     "fixed_image_ratio": 0.6,
@@ -88,33 +88,64 @@ hook_config_grouped = {
     "init_Tk": 10.0,
 }
 
+hook_config_grouped_8 = {
+    "shiva_mode": "image",
+    "image_ratio_mode": "adaptive",
+    "fixed_image_ratio": 0.6,
+    
+    "num_router_groups": 8,
+    "bottleneck_dim": 64,
+    "layer_embed_dim": 64,
+    "fuse_expert_ffn_mult": 2,
+    "use_gater_lut": False,
+    
+    "init_Ts": 10.0,
+    "init_Tk": 10.0,
+}
+
+hook_config_grouped_12 = {
+    "shiva_mode": "image",
+    "image_ratio_mode": "adaptive",
+    "fixed_image_ratio": 0.6,
+    
+    "num_router_groups": 12,
+    "bottleneck_dim": 64,
+    "layer_embed_dim": 64,
+    "fuse_expert_ffn_mult": 2,
+    "use_gater_lut": False,
+    
+    "init_Ts": 10.0,
+    "init_Tk": 10.0,
+}
+
 hook_config = {
     "max": hook_config_max,
     "slim": hook_config_slim,
     "tiny": hook_config_tiny,
     "shared": hook_config_shared,
-    "grouped": hook_config_grouped,
+    "grouped_4": hook_config_grouped_4,
+    "grouped_8": hook_config_grouped_8,
+    "grouped_12": hook_config_grouped_12,
 }
 
-prefix = 'shared'
+prefix = 'max'
 
 trainer_config = {
     "metadata_file": "../dataset/MJHQ-30K/train.jsonl",
     "image_dir": "../dataset/MJHQ-30K/",
     "model_type": "sd3",
     "model_path": None,
-    "output_dir": f"./checkpoints-{prefix}",
+    "output_dir": f"./checkpoints_{prefix}",
     "training_mode": "lora",
-    "hook_only_steps": 0,
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config[prefix]),
     "caption_dropout_rate": 0.1,
-    "num_epochs": 6,
+    "num_epochs": 2,
     "train_batch_size": 1,
-    "gradient_accumulation_steps": 16,
+    "gradient_accumulation_steps": 2,
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
-    "distillation_final_weight": 0.0,
+    "distillation_final_weight": 1.0,
     "distillation_middle_weight": 0.0,
     "seed": 42,
     "logging_steps": 40,
@@ -128,22 +159,19 @@ trainer_config = {
     "mixed_precision": "bf16",
     "extra_config": {
         "target_ratio": 0.6,
-        # LR Order Mapping in Trainer: 
-        # [0:Base/Router, 1:LoRA, 2:Gate, 3:Fuser, 4:ImageRatio(Policy), 5:CtxRatio, 6:CtxPruner]
         "stage_schedule": [
-            # ------------------------------------------------------------------
-            # Stage 0: Router Warmup 
-            # ------------------------------------------------------------------
             {
-                "steps": 10500, 
+                "steps": 3500,
                 "weights": {
-                    "ratio": [0.0, 0.0, 0.0], 
+                    "ratio": [0.0, 0.0, 0.0],
                     "gate": 0.0,
-                    "distill": [0.0, 0.0]
+                    "distill": [2.0, 0.0],
                 },
-                # LR: [Base(Router), LoRA, Gate, Fuser, Policy, CtxRatio, CtxPruner]
-                "lr": [2e-4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-                "temp": [5.0, 10.0, 10.0, 20.0],
+                "lr": {
+                    "router": 3e-4,
+                },
+                "warmup": 200,
+                "temp": [5.0, 15.0, 10.0, 20.0],
             },
         ],
     },

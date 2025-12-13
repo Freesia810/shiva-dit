@@ -16,7 +16,7 @@ from shiva_dit.modules.fuser import ShivaFuserExpert
 
 RANDOM_STAGE = 0
 RATIO_STAGE = 1
-ACCUMULATION_STEPS = 16
+ACCUMULATION_STEPS = 2
 GATER_STAGE = 99
 
 class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
