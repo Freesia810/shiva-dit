@@ -15,6 +15,9 @@ from accelerate import Accelerator
 from accelerate.utils import set_seed, DistributedDataParallelKwargs, broadcast_object_list
 from dataclasses import asdict
 
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
 try:
     from torchmetrics.multimodal.clip_score import CLIPScore
     from torchmetrics.image.kid import KernelInceptionDistance
@@ -358,6 +361,9 @@ class DiffusionModelTrainer:
             shuffle=True,
             collate_fn=collate_fn,
             pin_memory=True,
+            num_workers=4,
+            persistent_workers=True,
+            prefetch_factor=2,
         )
 
         self.val_dataloader = None
@@ -836,7 +842,7 @@ class DiffusionModelTrainer:
     def _sample_stratified_indices(self, micro_batch_size):
         if len(self.timestep_buffer) < micro_batch_size:
             current_global_step = self.global_step
-            DEBUG_INTERVAL = 50 
+            DEBUG_INTERVAL = 200 
 
             should_debug_print = (
                 (current_global_step % DEBUG_INTERVAL == 0)
@@ -1189,7 +1195,7 @@ class DiffusionModelTrainer:
         distill_loss_mid: torch.Tensor, 
         hook_loss: torch.Tensor
     ):
-        debug_interval = 20
+        debug_interval = 200
         if global_step % debug_interval != 0 or not self.accelerator.is_main_process:
             return
 
