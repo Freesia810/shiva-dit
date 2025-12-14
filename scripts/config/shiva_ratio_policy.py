@@ -54,7 +54,7 @@ stage_config_dict = {
         {
             "steps": 21000,
             "weights": {
-                "ratio": [0.0, 0.0, 0.5],
+                "ratio": [0.0, 0.0, 1.0],
                 "gate": 0.0,
                 "distill": [0.1, 0.0],
             },
