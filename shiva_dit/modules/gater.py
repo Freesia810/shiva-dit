@@ -125,7 +125,7 @@ class ShivaRatioPolicy(nn.Module):
             == RATIO_TIME_STAGE
         )
         if self.training and is_freeze_layer_branch:
-            logits_l = logits_l.detach()
+            logits_l = logits_l.detach() + logits_l * 0.0
 
         if temb.dim() == 3:
             temb = temb.squeeze(1)
