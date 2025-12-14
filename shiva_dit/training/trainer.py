@@ -1782,9 +1782,6 @@ class DiffusionModelTrainer:
             with torch.no_grad():
                 unwrapped_model = self.accelerator.unwrap_model(self.model)
                 
-                # Logic to find the time embedder
-                time_embedder = None
-                
                 # Case A: Flux / SD3 (time_text_embed)
                 if hasattr(unwrapped_model, "time_text_embed"):
                     # Flux usually projects scalar t -> vector
@@ -1836,6 +1833,7 @@ class DiffusionModelTrainer:
                 policy_input = t_flat.unsqueeze(-1).to(dtype=p_param.dtype)
 
             # --- Forward ---
+            policy.eval()
             with torch.no_grad():
                 logits = policy(policy_input, l_flat.long())
                 
@@ -1844,6 +1842,7 @@ class DiffusionModelTrainer:
                     values = probs[:, 1] # Fuse prob
                 else:
                     values = torch.sigmoid(logits).reshape(-1)
+            policy.train()
 
             # --- Data Processing ---
             # Shape: (Steps, Valid_Layers)

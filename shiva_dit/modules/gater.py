@@ -118,14 +118,14 @@ class ShivaRatioPolicy(nn.Module):
         l_feat = self.layer_emb(layer_idx_tensor)
         logits_l = self.layer_mlp(l_feat)
 
-        # Hack: Freeze layer branch
-        is_freeze_layer_branch = (
-            self.training
-            and getattr(global_context, "current_stage_idx", -1)
-            == RATIO_TIME_STAGE
-        )
-        if self.training and is_freeze_layer_branch:
-            logits_l = logits_l.detach() + logits_l * 0.0
+        # # Hack: Freeze layer branch
+        # is_freeze_layer_branch = (
+        #     self.training
+        #     and getattr(global_context, "current_stage_idx", -1)
+        #     == RATIO_TIME_STAGE
+        # )
+        # if self.training and is_freeze_layer_branch:
+        #     logits_l = logits_l.detach() + logits_l * 0.0
 
         if temb.dim() == 3:
             temb = temb.squeeze(1)
@@ -133,6 +133,11 @@ class ShivaRatioPolicy(nn.Module):
 
         # Logits = L + T + Bias
         final_logits = logits_l + logits_t + self.global_bias
+
+        if self.training:
+            noise_scale = 1.0 
+            noise = torch.randn_like(final_logits) * noise_scale
+            final_logits = final_logits + noise
         
         if self.training and torch.rand(1).item() < 1e-3:
             with torch.no_grad():
