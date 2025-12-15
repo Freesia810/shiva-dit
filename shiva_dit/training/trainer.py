@@ -3099,6 +3099,8 @@ class DiffusionModelTrainer:
             final_path = os.path.join(self.config.output_dir, "final.pt")
             self.save_checkpoint(final_path)
             print(f"Final model saved to {final_path}")
+        
+        self.accelerator.end_training()
 
     def _save_trainer_state(self, save_dir: str):
         if not self.accelerator.is_main_process:
