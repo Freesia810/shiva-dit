@@ -140,7 +140,7 @@ class ShivaRatioPolicy(nn.Module):
             noise = torch.randn_like(final_logits) * noise_scale
             final_logits = final_logits + noise
         elif is_layer_stage:
-            logits_l = logits_l.detach() + logits_l * 0.0
+            logits_t = logits_t.detach() + logits_t * 0.0
             final_logits = logits_l + logits_t + self.global_bias
         else:
             final_logits = logits_l + logits_t + self.global_bias
