@@ -6,11 +6,7 @@ import seaborn as sns
 import os
 from matplotlib import font_manager
 
-# ============================================================
-# 1. 精细化外观设置 (Publication Quality Style)
-# ============================================================
 def set_style():
-    # 字体设置 (尝试 Times New Roman)
     font_path = 'Times New Roman.ttf'
     if os.path.exists(font_path):
         font_manager.fontManager.addfont(font_path)
@@ -20,19 +16,15 @@ def set_style():
         plt.rcParams['font.family'] = 'serif'
         plt.rcParams['font.serif'] = ['Times New Roman']
     
-    # 关键：全局线条变细 (Refined Look)
-    plt.rcParams['axes.linewidth'] = 0.6       # 边框线宽变细
-    plt.rcParams['xtick.major.width'] = 0.6    # 刻度线宽变细
+    plt.rcParams['axes.linewidth'] = 0.6
+    plt.rcParams['xtick.major.width'] = 0.6
     plt.rcParams['ytick.major.width'] = 0.6
-    plt.rcParams['xtick.direction'] = 'out'    # 刻度朝外
+    plt.rcParams['xtick.direction'] = 'out'
     plt.rcParams['ytick.direction'] = 'out'
-    plt.rcParams['font.size'] = 12             # 基础字号
+    plt.rcParams['font.size'] = 12
     plt.rcParams['axes.unicode_minus'] = False
-    plt.rcParams['mathtext.fontset'] = 'stix'  # 数学公式字体优化
+    plt.rcParams['mathtext.fontset'] = 'stix'
 
-# ============================================================
-# 2. 绘图主函数
-# ============================================================
 def plot_refined_landscape(csv_path, output_name="ratio_analysis"):
     set_style()
 
@@ -40,29 +32,19 @@ def plot_refined_landscape(csv_path, output_name="ratio_analysis"):
         print(f"Error: {csv_path} not found.")
         return
 
-    # 1. 数据读取与预处理
     df_raw = pd.read_csv(csv_path, header=None)
     
-    # 翻转数据：Top=Noise (t=1), Bottom=Image (t=0)
     df = df_raw.iloc[::-1].reset_index(drop=True)
 
-    # 统计量
-    layer_means = df.mean(axis=0)       # 顶部：空间维度平均
-    time_means = df.mean(axis=1)        # 右侧：时间维度平均
+    layer_means = df.mean(axis=0)
+    time_means = df.mean(axis=1)
 
-    # ------------------------------------------------------------
-    # 2. 自动计算 Range
-    # ------------------------------------------------------------
     vmin, vmax = 0.2, 1.0
     tm_min, tm_max = time_means.min(), time_means.max()
     tm_range = tm_max - tm_min
     x_line_min = max(0, tm_min - tm_range * 0.1) 
     x_line_max = min(1.05, tm_max + tm_range * 0.1)
 
-    # ------------------------------------------------------------
-    # 3. 画布布局
-    # ------------------------------------------------------------
-    # 保持 (9, 3.2) 的矮宽比例
     fig = plt.figure(figsize=(9, 3.2)) 
     
     gs = gridspec.GridSpec(2, 2, figure=fig, 
@@ -101,15 +83,11 @@ def plot_refined_landscape(csv_path, output_name="ratio_analysis"):
     # ============================================================
     ax_heat = fig.add_subplot(gs[1, 0])
     
-    # 关键修改：
-    # 1. 保持 rasterized=True 以消除白线
-    # 2. 保存时提高 DPI 解决模糊
     sns.heatmap(df, ax=ax_heat, 
                 cmap=cmap, norm=norm,
                 cbar=False,
-                rasterized=True) # 保持栅格化，防止矢量白线缝隙
+                rasterized=True)
     
-    # 边框：加上细黑框 (0.6 width)
     for _, spine in ax_heat.spines.items():
         spine.set_visible(True)
         spine.set_linewidth(0.6)
@@ -168,7 +146,6 @@ def plot_refined_landscape(csv_path, output_name="ratio_analysis"):
     # ============================================================
     # Save
     # ============================================================
-    # 关键修改：dpi=600 (High Resolution Rasterization)
     plt.savefig(f"{output_name}.pdf", dpi=600, bbox_inches='tight', pad_inches=0.02)
     plt.savefig(f"{output_name}.png", dpi=600, bbox_inches='tight', pad_inches=0.02)
     print(f"Saved: {output_name}.pdf")
