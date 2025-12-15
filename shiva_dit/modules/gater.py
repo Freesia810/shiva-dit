@@ -4,8 +4,8 @@ import torch.distributed as dist
 import math
 from shiva_dit.utils import global_context
 
-RATIO_LAYER_STAGE = 1
-RATIO_TIME_STAGE = 2
+RATIO_TIME_STAGE = 1
+RATIO_LAYER_STAGE = 2
 
 class ShivaGaterPolicy(nn.Module):
     def __init__(self, time_embed_dim, layer_embed_dim, bottleneck_dim, num_layers):
@@ -118,28 +118,34 @@ class ShivaRatioPolicy(nn.Module):
         l_feat = self.layer_emb(layer_idx_tensor)
         logits_l = self.layer_mlp(l_feat)
 
-        # # Hack: Freeze layer branch
-        # is_freeze_layer_branch = (
-        #     self.training
-        #     and getattr(global_context, "current_stage_idx", -1)
-        #     == RATIO_TIME_STAGE
-        # )
-        # if self.training and is_freeze_layer_branch:
-        #     logits_l = logits_l.detach() + logits_l * 0.0
-
         if temb.dim() == 3:
             temb = temb.squeeze(1)
         logits_t = self.time_mlp(temb)
 
-        # Logits = L + T + Bias
-        final_logits = logits_l + logits_t + self.global_bias
+        is_time_stage = (
+            self.training
+            and getattr(global_context, "current_stage_idx", -1)
+            == RATIO_TIME_STAGE
+        )
 
-        if self.training:
+        is_layer_stage = (
+            self.training
+            and getattr(global_context, "current_stage_idx", -1)
+            == RATIO_LAYER_STAGE
+        )
+
+        if is_time_stage:
+            final_logits = logits_l + logits_t + self.global_bias
             noise_scale = 1.0 
             noise = torch.randn_like(final_logits) * noise_scale
             final_logits = final_logits + noise
+        elif is_layer_stage:
+            logits_l = logits_l.detach() + logits_l * 0.0
+            final_logits = logits_l + logits_t + self.global_bias
+        else:
+            final_logits = logits_l + logits_t + self.global_bias
         
-        if self.training and torch.rand(1).item() < 1e-3:
+        if self.training and torch.rand(1).item() < 1e-3 and (is_time_stage or is_layer_stage):
             with torch.no_grad():
                 is_main_process = not dist.is_initialized() or dist.get_rank() == 0
                 if is_main_process:

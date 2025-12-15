@@ -1868,6 +1868,11 @@ class DiffusionModelTrainer:
                 print(f"    Observation  : 📉 Temporal dimension is FLAT (Stable).")
             else:
                 print(f"    Observation  : 📈 Temporal dimension shows variation.")
+            
+            print("\n    [Grid Values (Steps x Layers, CSV-like)]:")
+            for i in range(grid_values.shape[0]):
+                row_str = ",".join([f"{val:.4f}" for val in grid_values[i]])
+                print(f"    {row_str}")
 
             # Print ASCII Sparklines (Simplified)
             print(f"    Layer Profile (Avg over T):")
