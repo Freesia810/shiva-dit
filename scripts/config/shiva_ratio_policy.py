@@ -105,12 +105,13 @@ stage_config_dict = {
         },
     ],
     "fixed": [
+        # router stage
         {
             "steps": 3500,
             "weights": {
                 "ratio": [0.0, 0.0, 0.0],
                 "gate": 0.0,
-                "distill": [0.0, 0.0],
+                "distill": [0.1, 1.0],
             },
             "lr": {
                 "router": 3e-4,
@@ -118,32 +119,36 @@ stage_config_dict = {
             "warmup": 200,
             "temp": [5.0, 15.0, 10.0, 20.0],
         },
+
+        # fixed stage
         {
-            "steps": 21000,
+            "steps": 10500,
             "weights": {
                 "ratio": [0.0, 0.0, 0.0],
                 "gate": 0.0,
-                "distill": [1.0, 0.0],
+                "distill": [0.1, 0.0],
             },
             "lr": {
-                "lora": 1e-4,
-                "router": 0.0,
+                "lora": 5e-5,
+                "router": 1e-6,
             },
             "warmup": 500,
-            "temp": [15.0, 15.0, 20.0, 50.0],
+            "temp": [15.0, 15.0, 20.0, 30.0],
         },
+
+        # final stage
         {
             "steps": -1,
             "weights": {
                 "ratio": [0.0, 0.0, 0.0], 
                 "gate": 0.0, 
-                "distill": [1.0, 0.0]
+                "distill": [0.1, 0.0],
             },
             "lr": {
                 "lora": 1e-5,
                 "router": 0.0,
             },
-            "temp": [15.0, 15.0, 50.0, 100.0],
+            "temp": [15.0, 15.0, 30.0, 100.0],
         },
     ],
 }
