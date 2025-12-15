@@ -1799,13 +1799,11 @@ class DiffusionModelTrainer:
         if self.config.model_type in ["flux-dev", "qwen-image", "qwen-image-edit", "flux-kontext"]:
             # Flow Matching: 0.0 -> 1.0
             t_model_input = torch.linspace(0, 1, steps, device=self.device, dtype=self.dtype)
-            t_display_axis = np.linspace(0, 1, steps)
             t_label = "Time (0.0=Start -> 1.0=End)"
         else:
             # Standard DiT / SD3: 0 -> 1000 (usually)
             # Some SD3 implementations involve 0-1, but Diffusers standard is often 0-1000 for embeddings
             t_model_input = torch.linspace(0, 1000, steps, device=self.device, dtype=self.dtype)
-            t_display_axis = np.linspace(0, 1000, steps)
             t_label = "Timestep (0 -> 1000)"
 
         # Prepare Grid Tensors
