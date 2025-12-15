@@ -95,7 +95,7 @@ stage_config_dict = {
             "weights": {
                 "ratio": [0.0, 0.0, 0.0], 
                 "gate": 0.0, 
-                "distill": [0.1, 0.0]
+                "distill": [0.1, 1.0]
             },
             "lr": {
                 "lora": 1e-4,
