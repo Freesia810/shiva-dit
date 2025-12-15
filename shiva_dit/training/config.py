@@ -8,8 +8,10 @@ class LoraConfig:
     enable: bool = False
     rank: int = 8
     target_modules: Tuple[str] = ("to_q", "to_k", "to_v", "to_out.0") 
+    modules_to_save: Tuple[str] = None
     lora_alpha: int = 8
     lora_dropout: float = 0.1
+    use_dora: bool = False
 
 @dataclass
 class TrainerConfig:

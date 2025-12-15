@@ -634,12 +634,15 @@ class DiffusionModelTrainer:
                 lora_alpha=lora_conf.lora_alpha,
                 target_modules=lora_conf.target_modules,
                 lora_dropout=lora_conf.lora_dropout,
+                use_dora=lora_conf.use_dora,
+                modules_to_save=lora_conf.modules_to_save,
                 bias="none",
             )
             self.model = get_peft_model(self.model, peft_config)
 
             if self.accelerator.is_main_process:
                 self.model.print_trainable_parameters()
+                self._diagnose_lora_setup()
 
             for hook in HookManager.get_all_hooks().values():
                 if isinstance(hook, nn.Module):
@@ -694,6 +697,11 @@ class DiffusionModelTrainer:
                 target_group = pid_to_group[pid]
             elif "lora" in name:
                 target_group = "lora"
+            else:
+                if self.config.training_mode == "lora":
+                    target_group = "lora" 
+                else:
+                    target_group = "base"
             
             params_map[target_group].append(param)
             names_map[target_group].append(name)
@@ -824,6 +832,37 @@ class DiffusionModelTrainer:
             print(f"  Global Batch Size:   {config.train_batch_size * config.gradient_accumulation_steps * self.accelerator.num_processes}")
             print(f"  Total Steps:         {self.num_training_steps}")
             print(f"{'='*57}\n")
+
+    def _diagnose_lora_setup(self):
+        print("\n" + "="*30 + " [LoRA/DoRA Setup Diagnosis] " + "="*30)
+        
+        has_dora = False
+        has_norm_training = False
+        
+        for name, module in self.model.named_modules():
+            if isinstance(module, torch.nn.Linear) or "Linear" in module.__class__.__name__:
+                if "lora" in name or hasattr(module, "lora_A"):
+                    for param_name, _ in module.named_parameters():
+                        if "lora_magnitude_vector" in param_name:
+                            has_dora = True
+                            break
+            
+            if "norm" in name.lower() and not "lora" in name:
+                for param in module.parameters():
+                    if param.requires_grad:
+                        has_norm_training = True
+                        print(f"   [Norm Unfrozen] {name} is TRAINABLE")
+                        break
+            
+            if has_dora and has_norm_training:
+                break
+        
+        if has_dora: print("   DoRA Mode: DETECTED & ACTIVE")
+        else: print("     DoRA Mode: Not detected (Standard LoRA)")
+        
+        if has_norm_training: print("   LayerNorm: TRAINABLE (modules_to_save working)")
+        else: print("   LayerNorm: FROZEN (Check modules_to_save config if this is unintended)")
+        print("="*85 + "\n")
 
     @staticmethod
     def stratified_timestep_sampler(batch_size, num_timesteps, device, generator=None):
@@ -2650,18 +2689,21 @@ class DiffusionModelTrainer:
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
             model_state = {}
             unwrapped_model = self.accelerator.unwrap_model(self.model)
-            state_dict = unwrapped_model.state_dict()
+            full_state_dict = unwrapped_model.state_dict()
             mode = self.config.training_mode
             if mode == "lora":
-                for k, v in state_dict.items():
-                    if "lora" in k or "_hook" in k:
-                        model_state[k] = v
+                for name, param in unwrapped_model.named_parameters():
+                    if param.requires_grad:
+                        if name in full_state_dict:
+                            model_state[name] = full_state_dict[name]
 
             elif mode == "hook_only":
-                model_state = {k: v for k, v in state_dict.items() if "_hook" in k}
+                for name, param in unwrapped_model.named_parameters():
+                    if param.requires_grad:
+                         model_state[name] = full_state_dict.get(name)
 
             elif mode == "finetune":
-                model_state = state_dict
+                model_state = full_state_dict
 
             else:
                 raise ValueError(f"Unknown training_mode: {mode}")
