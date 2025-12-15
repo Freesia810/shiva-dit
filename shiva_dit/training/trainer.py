@@ -1047,7 +1047,12 @@ class DiffusionModelTrainer:
                 noise_pred = Y_d
             
             if enable_final:
-                distill_loss_final = F.mse_loss(Y_d.float(), Y_s.float(), reduction="mean")
+                s_feat = Y_d.float()
+                t_feat = Y_s.float()
+                sim_map = F.cosine_similarity(s_feat, t_feat, dim=1) 
+                feat_sim = sim_map.mean()
+                
+                distill_loss_final = F.mse_loss(s_feat, t_feat, reduction="mean")
                 distill_loss_final = distill_loss_final * w_final
             
             if enable_mid:
@@ -1078,7 +1083,7 @@ class DiffusionModelTrainer:
                 **model_kwargs,
             )[0]
 
-        return noise_pred, distill_loss_final, distill_loss_mid
+        return noise_pred, distill_loss_final, distill_loss_mid, feat_sim
 
     def _calculate_main_loss(self, noise_pred, noise, img_latents):
         if self.model_type == "pixart-sigma":
@@ -1218,7 +1223,7 @@ class DiffusionModelTrainer:
 
         loss_config = self._get_shiva_loss_config(global_step)
 
-        noise_pred, distill_loss_final, distill_loss_mid = self._forward_pass_with_distillation(
+        noise_pred, distill_loss_final, distill_loss_mid, feat_sim = self._forward_pass_with_distillation(
             noisy_latents, timesteps, model_kwargs, dynamic_distill_weights=loss_config
         )
 
@@ -1227,7 +1232,7 @@ class DiffusionModelTrainer:
 
         total_loss = main_loss + hook_loss + distill_loss_final + distill_loss_mid
 
-        return total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid, hook_metrics, timesteps
+        return total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid, hook_metrics, timesteps, feat_sim
 
     def _monitor_gradient_analysis(
         self, 
@@ -1401,7 +1406,7 @@ class DiffusionModelTrainer:
         print(f"{'='*96}\n")
 
     def _train_step(self, batch):
-        total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid, hook_metrics, timesteps = (
+        total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid, hook_metrics, timesteps, feat_sim = (
             self._compute_loss(batch, self.global_step, is_validation=False)
         )
 
@@ -2242,6 +2247,7 @@ class DiffusionModelTrainer:
         all_distill_losses = []
 
         all_hook_metrics = []
+        all_feat_sims = []
 
         val_progress_bar = tqdm(
             self.val_dataloader,
@@ -2253,7 +2259,7 @@ class DiffusionModelTrainer:
 
         for batch in val_progress_bar:
             try:
-                total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid, hook_metrics, _ = self._compute_loss(
+                total_loss, main_loss, hook_loss, distill_loss_final, distill_loss_mid, hook_metrics, timesteps, feat_sim = self._compute_loss(
                     batch, global_step, is_validation=True
                 )
 
@@ -2262,6 +2268,7 @@ class DiffusionModelTrainer:
                 all_hook_losses.append(hook_loss)
                 all_distill_losses.append(distill_loss_final + distill_loss_mid)
                 all_hook_metrics.append(hook_metrics) 
+                all_feat_sims.append(feat_sim)
             except Exception as e:
                 if self.accelerator.is_main_process:
                     print(f"Error during validation batch: {e}")
@@ -2281,6 +2288,9 @@ class DiffusionModelTrainer:
             avg_distill_loss = (
                 self.accelerator.gather(torch.stack(all_distill_losses)).mean().item()
             )
+            avg_feat_sim = (
+                self.accelerator.gather(torch.stack(all_feat_sims)).mean().item()
+            )
 
             if self.accelerator.is_main_process:
                 print(f"--- Validation Results (Step {global_step}) ---")
@@ -2288,6 +2298,7 @@ class DiffusionModelTrainer:
                 print(f"  Avg Main Loss:  {avg_main_loss:.4f}")
                 print(f"  Avg Hook Loss:  {avg_hook_loss:.4f}")
                 print(f"  Avg Distill Loss: {avg_distill_loss:.4f}")
+                print(f"  >> Feature Cosine Sim: {avg_feat_sim:.5f}")
                 print(f"--------------------------------------")
 
                 val_metrics_to_log = {}
@@ -2317,6 +2328,7 @@ class DiffusionModelTrainer:
                         "validation/main_loss": avg_main_loss,
                         "validation/hook_loss": avg_hook_loss,
                         "validation/distill_loss": avg_distill_loss,
+                        "validation/feature_cosine_sim": avg_feat_sim,
                     },
                     step=global_step
                 )

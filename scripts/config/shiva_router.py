@@ -165,7 +165,7 @@ trainer_config = {
                 "weights": {
                     "ratio": [0.0, 0.0, 0.0],
                     "gate": 0.0,
-                    "distill": [2.0, 0.0],
+                    "distill": [0.1, 1.0],
                 },
                 "lr": {
                     "router": 3e-4,
