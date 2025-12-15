@@ -210,6 +210,8 @@ class DiffusionModelTrainer:
 
         self._print_setup_summary()
 
+        self.resume_batch_idx = 0
+
         self.main_viz_buffer = []
         self.distill_final_viz_buffer = []
         self.distill_mid_viz_buffer = []
@@ -2994,12 +2996,29 @@ class DiffusionModelTrainer:
         for epoch in range(self.epoch, self.config.num_epochs):
             self.epoch = epoch
             self.model.train()
+
+            current_epoch_skip = 0
+            
+            if hasattr(self, "resume_batch_idx") and self.resume_batch_idx > 0:
+                current_epoch_skip = self.resume_batch_idx
+                
+                if self.accelerator.is_main_process:
+                    print(f"Skipping first {current_epoch_skip} batches to resume training...")
+                
+                active_dataloader = self.accelerator.skip_first_batches(
+                    self.train_dataloader, current_epoch_skip
+                )
+                self.resume_batch_idx = 0
+            else:
+                active_dataloader = self.train_dataloader
+
             progress_bar = tqdm(
-                self.train_dataloader,
+                active_dataloader,
                 desc=f"Epoch {epoch+1}/{self.config.num_epochs}",
-                total=len(self.train_dataloader),
+                total=len(self.train_dataloader), 
                 dynamic_ncols=True,
                 disable=not self.accelerator.is_local_main_process,
+                initial=current_epoch_skip
             )
 
             for step, batch in enumerate(progress_bar):
@@ -3195,8 +3214,8 @@ class DiffusionModelTrainer:
         modular_dir = os.path.join(ckpt_dir, "modular_weights")
         if not os.path.exists(modular_dir):
             return False
-
-        print(f"\n{'='*20} [Robust Loader] Starting Modular Loading {'='*20}")
+        if self.accelerator.is_main_process:
+            print(f"\n{'='*20} [Modular Loader] Starting Modular Loading {'='*20}")
         unwrapped_model = self.accelerator.unwrap_model(self.model)
         current_model_dict = unwrapped_model.state_dict()
 
@@ -3205,11 +3224,13 @@ class DiffusionModelTrainer:
 
         for pt_file in pt_files:
             comp_name = os.path.basename(pt_file)
-            print(f">> Processing {comp_name}...")
+            if self.accelerator.is_main_process:
+                print(f">> Processing {comp_name}...")
             try:
                 loaded_dict = torch.load(pt_file, map_location="cpu")
             except Exception as e:
-                print(f"   [Error] Load failed: {e}")
+                if self.accelerator.is_main_process:
+                    print(f"   [Error] Load failed: {e}")
                 continue
 
             valid_dict = {}
@@ -3219,13 +3240,15 @@ class DiffusionModelTrainer:
 
             if valid_dict:
                 unwrapped_model.load_state_dict(valid_dict, strict=False)
-                print(f"   ✅ Loaded {len(valid_dict)} keys.")
+                if self.accelerator.is_main_process:
+                    print(f"   ✅ Loaded {len(valid_dict)} keys.")
                 total_loaded += len(valid_dict)
             else:
-                print(f"   ⚠️ No valid keys/shapes match.")
-
-        print(f"[Robust Loader] Total keys loaded: {total_loaded}")
-        print(f"{'='*60}\n")
+                if self.accelerator.is_main_process:
+                    print(f"   ⚠️ No valid keys/shapes match.")
+        if self.accelerator.is_main_process:
+            print(f"[Modular Loader] Total keys loaded: {total_loaded}")
+            print(f"{'='*60}\n")
         return True
 
     def save_checkpoint(self, save_path: str):
@@ -3417,12 +3440,21 @@ class DiffusionModelTrainer:
                 len(self.train_dataloader) // self.config.gradient_accumulation_steps
             )
             expected_epoch = self.global_step // steps_per_epoch
+
+            current_epoch_update_steps = self.global_step % steps_per_epoch
+            self.resume_batch_idx = current_epoch_update_steps * self.config.gradient_accumulation_steps
+
             if self.epoch != expected_epoch:
                 if self.accelerator.is_main_process:
                     print(
                         f"Adjusting epoch from {self.epoch} to {expected_epoch} based on global_step."
                     )
                 self.epoch = expected_epoch
+            
+            if self.accelerator.is_main_process and self.resume_batch_idx > 0:
+                print(f"[Resumer] Ready to skip {self.resume_batch_idx} batches in Epoch {self.epoch}.")
+        else:
+            self.resume_batch_idx = 0
 
     def load_from_checkpoint(self, ckpt_path, model_only=True):
         if not os.path.exists(ckpt_path):
