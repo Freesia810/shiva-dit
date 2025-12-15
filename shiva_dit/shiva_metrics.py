@@ -89,94 +89,6 @@ def calculate_gate_loss(config: dict, device: torch.device) -> torch.Tensor:
     return final_loss, metrics, gate_probs_per_layer
 
 
-# def _calc_ratio_loss_flat(all_ratios, config, device, prefix="adaptive_ratio"):
-#     if all_ratios.numel() == 0:
-#         return torch.tensor(0.0, device=device), {}
-
-#     # Config parsing
-#     # Format: [w_budget_L1, w_floor, w_budget_MSE]
-#     w_config = config.get("ratio_loss_weight", 1.0)
-    
-#     w_budget_l1 = 0.0
-#     w_floor = 0.0
-#     w_budget_mse = 0.0
-
-#     if isinstance(w_config, list):
-#         if len(w_config) >= 1: w_budget_l1 = w_config[0]
-#         if len(w_config) >= 2: w_floor = w_config[1]
-#         if len(w_config) >= 3: w_budget_mse = w_config[2]
-#     else:
-#         w_budget_l1 = w_config
-
-#     current_target_ratio = config.get("target_ratio", 0.8)
-#     target = torch.tensor(current_target_ratio, device=device, dtype=all_ratios.dtype)
-    
-#     global_avg_ratio = torch.mean(all_ratios)
-
-#     # 1. Budget Loss (L1)
-#     if w_budget_l1 > 0.0:
-#         budget_loss_l1 = w_budget_l1 * torch.abs(global_avg_ratio - target)
-#     else:
-#         budget_loss_l1 = torch.tensor(0.0, device=device)
-
-#     # 2. Floor Loss
-#     if w_floor > 0.0:
-#         min_allowed = 0.1
-#         floor_penalties = torch.relu(min_allowed - all_ratios)
-#         floor_loss = torch.sum(floor_penalties) * w_floor / all_ratios.numel()
-#     else:
-#         floor_loss = torch.tensor(0.0, device=device)
-
-#     # 3. Budget Loss (MSE)
-#     if w_budget_mse > 0.0:
-#         # MSE = (avg - target)^2
-#         budget_loss_mse = w_budget_mse * ((global_avg_ratio - target) ** 2)
-#     else:
-#         budget_loss_mse = torch.tensor(0.0, device=device)
-
-#     ratio_std = torch.std(all_ratios)
-
-#     final_loss = budget_loss_l1 + floor_loss + budget_loss_mse
-
-#     metrics = {
-#         f"{prefix}/avg_ratio": global_avg_ratio.detach(),
-#         f"{prefix}/std_ratio": ratio_std.detach(),
-#         f"{prefix}/target_ratio": target,
-#         f"loss/{prefix}/budget_loss": budget_loss_l1.detach(),
-#         f"loss/{prefix}/mse_loss": budget_loss_mse.detach(),
-#         f"loss/{prefix}/floor_loss": floor_loss.detach(),
-#         f"loss/{prefix}/ratio_loss": final_loss.detach(),
-#     }
-#     return final_loss, metrics
-
-
-# def calculate_image_ratio_loss(
-#     config: dict, device: torch.device
-# ) -> tuple[torch.Tensor, dict, dict]:
-#     all_ratios_flat = []
-#     per_layer_ratios = {}
-
-#     for hook in _get_shiva_hooks():            
-#         accumulator = getattr(hook, "image_ratio_accumulator", [])
-#         if accumulator:
-#             stacked_ratios = torch.stack(accumulator)
-#             all_ratios_flat.append(stacked_ratios)
-#             per_layer_ratios[f"layer_{hook.layer_idx:02d}"] = stacked_ratios.mean().item()
-        
-#         if hasattr(hook, "image_ratio_accumulator"):
-#             hook.image_ratio_accumulator.clear()
-
-#     if not all_ratios_flat:
-#         return torch.tensor(0.0, device=device), {}, {}
-
-#     # (Total_Layers * Total_MicroBatches, )
-#     ratios_concat = torch.cat(all_ratios_flat).flatten()
-
-#     loss, metrics = _calc_ratio_loss_flat(ratios_concat, config, device, prefix="image_ratio")
-    
-#     return loss, metrics, per_layer_ratios
-
-
 def _calc_ratio_loss_stratified(
     all_ratios, 
     config, 
@@ -347,10 +259,10 @@ def calculate_context_ratio_loss(
     if not all_ratios_flat:
         return torch.tensor(0.0, device=device), {}, {}
 
-    ratios_concat = torch.cat(all_ratios_flat).flatten()
-    loss, metrics = _calc_ratio_loss_flat(ratios_concat, config, device, prefix="context_ratio")
+    # ratios_concat = torch.cat(all_ratios_flat).flatten()
+    # loss, metrics = _calc_ratio_loss_flat(ratios_concat, config, device, prefix="context_ratio")
     
-    return loss, metrics, per_layer_ratios
+    # return loss, metrics, per_layer_ratios
 
 
 def collect_context_stats(device: torch.device) -> dict:
@@ -522,10 +434,6 @@ def collect_policy_gradient_stats(model, hook_manager, device) -> dict:
         
         # Bias
         grad_bias = torch.tensor(0.0, device=device)
-
-        # ============================================================
-        # 1. Layer Branch Analysis (拟合空间差异的主力)
-        # ============================================================
         
         # 1.1 Layer Embedding
         if hasattr(policy_net, 'layer_emb'):
@@ -533,8 +441,7 @@ def collect_policy_gradient_stats(model, hook_manager, device) -> dict:
             if param.grad is not None:
                 grad = param.grad.detach()
                 grad_l_emb = grad.norm()
-                
-                # 统计活跃层的梯度分布 (检查是否只有部分层在更新)
+
                 layer_norms = grad.norm(dim=1)
                 active_mask = layer_norms > 1e-8
                 active_layer_norms = layer_norms[active_mask]
@@ -552,25 +459,15 @@ def collect_policy_gradient_stats(model, hook_manager, device) -> dict:
                 grad_l_mlp = torch.stack(grad_list).sum().sqrt()
                 stats[f"grad/{name}/layer_mlp_norm"] = grad_l_mlp.item()
 
-        # ============================================================
-        # 2. Time Branch Analysis (应该保持安静的辅助分支)
-        # ============================================================
         if hasattr(policy_net, 'time_mlp'):
             grad_list = [p.grad.detach().norm().square() for p in policy_net.time_mlp.parameters() if p.grad is not None]
             if grad_list:
                 grad_t_mlp = torch.stack(grad_list).sum().sqrt()
                 stats[f"grad/{name}/time_mlp_norm"] = grad_t_mlp.item()
 
-        # ============================================================
-        # 3. Global Bias Analysis (全局锚点)
-        # ============================================================
         if hasattr(policy_net, 'global_bias') and policy_net.global_bias.grad is not None:
             grad_bias = policy_net.global_bias.grad.detach().norm()
             stats[f"grad/{name}/global_bias_norm"] = grad_bias.item()
-
-        # ============================================================
-        # 4. Visualization & Logging
-        # ============================================================
         
         total_l_energy = grad_l_emb + grad_l_mlp
         total_t_energy = grad_t_mlp
