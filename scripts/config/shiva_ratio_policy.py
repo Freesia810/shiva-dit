@@ -145,7 +145,7 @@ stage_config_dict = {
                 "distill": [0.1, 0.0],
             },
             "lr": {
-                "lora": 1e-5,
+                "lora": 1e-4,
                 "router": 0.0,
             },
             "temp": [15.0, 15.0, 30.0, 100.0],
