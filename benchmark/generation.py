@@ -9,23 +9,23 @@ from types import ModuleType
 import numpy as np
 
 try:
+    from pytorch_fid.fid_score import calculate_fid_given_paths
     from torchmetrics.multimodal.clip_score import CLIPScore
-    from torchmetrics.image.fid import FrechetInceptionDistance
     from torchmetrics.multimodal import CLIPImageQualityAssessment
     import torchvision.transforms.functional as TF
 except ImportError:
     print(
-        "Error: torchmetrics is required. Install via: pip install torchmetrics[image]"
+        "Error: Required libraries missing. Please run:\n"
+        "pip install pytorch-fid torchmetrics[image]"
     )
     sys.exit(1)
 
-# Bert Monkey Patch
+
 LOCAL_BERT_PATH = "../bert-base-uncased"
 from transformers import BertTokenizer, BertModel
 
 _original_tokenizer_from_pretrained = BertTokenizer.from_pretrained
 _original_model_from_pretrained = BertModel.from_pretrained
-
 
 def _patched_tokenizer_loader(cls, pretrained_model_name_or_path, *args, **kwargs):
     if pretrained_model_name_or_path == "bert-base-uncased" and os.path.exists(
@@ -36,7 +36,6 @@ def _patched_tokenizer_loader(cls, pretrained_model_name_or_path, *args, **kwarg
         pretrained_model_name_or_path, *args, **kwargs
     )
 
-
 def _patched_model_loader(cls, pretrained_model_name_or_path, *args, **kwargs):
     if pretrained_model_name_or_path == "bert-base-uncased" and os.path.exists(
         LOCAL_BERT_PATH
@@ -46,14 +45,11 @@ def _patched_model_loader(cls, pretrained_model_name_or_path, *args, **kwargs):
         pretrained_model_name_or_path, *args, **kwargs
     )
 
-
 BertTokenizer.from_pretrained = classmethod(_patched_tokenizer_loader)
 BertModel.from_pretrained = classmethod(_patched_model_loader)
 
-# ImageReward Monkey Patch
 sys.modules["ImageReward.ReFL"] = ModuleType("ImageReward.ReFL")
 
-# Transformers Patch
 import transformers.modeling_utils
 import transformers.pytorch_utils
 
@@ -73,25 +69,26 @@ if not hasattr(transformers.modeling_utils, "prune_linear_layer"):
             transformers.pytorch_utils.prune_linear_layer
         )
 
-# Try Import ImageReward
 try:
     import ImageReward as RM
 except ImportError:
     RM = None
     print("Warning: ImageReward not installed. IR score will be skipped.")
 
-# Shiva Imports
 from shiva_dit.utils.inference_utils import load_pipeline_for_inference
 from shiva_dit.utils.utils import process_quick_start
 from accelerate.utils import set_seed
 
 
 class GenerationEvaluator:
-    def __init__(self, device):
+    def __init__(self, device, fid_stats_path=None):
         self.device = device
+        self.fid_stats_path = fid_stats_path
         print(f"Initializing metrics on {device}...")
-
-        self.fid = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
+        if fid_stats_path:
+            print(f"FID Reference Stats: {fid_stats_path}")
+        else:
+            print("Warning: No .npz provided. FID will be skipped.")
 
         self.clip_score = CLIPScore(
             model_name_or_path="../openai-clip-vit-base-patch16"
@@ -123,15 +120,10 @@ class GenerationEvaluator:
         gen_tensor = self.preprocess(generated_pil)
         gen_uint8 = self.preprocess_uint8(generated_pil)
 
-        # 1. FID Fake Update
-        self.fid.update(gen_uint8, real=False)
-
-        # 2. CLIP Score
         if prompt:
             score = self.clip_score(gen_uint8, [prompt])
             self.results["clip_scores"].append(score.item())
 
-        # 3. CLIP-IQA
         iqa_out = self.clip_iqa(gen_tensor)
         if isinstance(iqa_out, dict):
             mean_iqa = torch.stack(list(iqa_out.values())).mean().item()
@@ -139,35 +131,31 @@ class GenerationEvaluator:
         else:
             self.results["clip_iqa_scores"].append(iqa_out.item())
 
-        # 4. ImageReward
         if self.ir_model and prompt:
             ir_score = self.ir_model.score(prompt, generated_pil)
             self.results["ir_scores"].append(ir_score)
 
-    @torch.no_grad()
-    def update_real(self, real_pil):
-        real_uint8 = self.preprocess_uint8(real_pil)
-        self.fid.update(real_uint8, real=True)
-
-    def compute(self):
+    def compute(self, generated_images_dir):
         print("\nComputing aggregated metrics...")
         metrics = {}
 
-        # FID
-        try:
-            if (
-                self.fid.real_features_num_samples > 0
-                and self.fid.fake_features_num_samples > 0
-            ):
-                metrics["FID"] = self.fid.compute().item()
-            else:
+        if self.fid_stats_path and os.path.exists(self.fid_stats_path) and os.path.exists(generated_images_dir):
+            print(f"Running FID calculation between:\n - Gen: {generated_images_dir}\n - Ref: {self.fid_stats_path}")
+            try:
+                fid_value = calculate_fid_given_paths(
+                    paths=[generated_images_dir, self.fid_stats_path],
+                    batch_size=50,
+                    device=self.device,
+                    dims=2048
+                )
+                metrics["FID"] = fid_value
+            except Exception as e:
+                print(f"Error computing FID: {e}")
                 metrics["FID"] = -1.0
-                print("Warning: FID skipped (Not enough real/fake samples)")
-        except Exception as e:
-            print(f"FID computation warning: {e}")
+        else:
+            print("Skipping FID (Missing .npz file or output directory).")
             metrics["FID"] = -1.0
 
-        # Averages
         for key, val_list in self.results.items():
             if val_list:
                 metric_name = key.replace("_scores", "").upper()
@@ -195,16 +183,11 @@ def load_data(jsonl_path, image_dir, limit=None):
                 img_rel_path = (
                     item.get("file_name") or item.get("image") or item.get("jpg")
                 )
+                
                 full_img_path = None
                 if img_rel_path and image_dir:
                     full_img_path = os.path.join(image_dir, img_rel_path)
-                    if not os.path.exists(full_img_path):
-                        flat_path = os.path.join(
-                            image_dir, os.path.basename(img_rel_path)
-                        )
-                        if os.path.exists(flat_path):
-                            full_img_path = flat_path
-
+                
                 if "text" in item:
                     data_items.append(
                         {"text": item["text"], "image_path": full_img_path}
@@ -229,7 +212,7 @@ def main(args):
     os.makedirs(save_dir, exist_ok=True)
     print(f"Output Directory: {save_dir}")
 
-    evaluator = GenerationEvaluator(device)
+    evaluator = GenerationEvaluator(device, fid_stats_path=args.fid_stats)
 
     data_items = load_data(args.jsonl_path, args.image_dir, args.limit)
     if not data_items:
@@ -247,9 +230,6 @@ def main(args):
         merge_lora=args.merge_lora,
     )
 
-    # ==========================================================
-    # [HACK] Force Fixed Ratio Logic
-    # ==========================================================
     if args.force_fixed_ratio > 0:
         print(f"[INFO] Disabling Policy Network...")
         print(f"[INFO] Forcing Fixed Ratio: {args.force_fixed_ratio}")
@@ -279,20 +259,14 @@ def main(args):
     print(f"Samples per Prompt: {args.samples_per_prompt}")
     print(f"Total Target Samples: {total_samples}")
     print(f"Global Seed: {args.seed}")
-    print(f"Resume Mode: ON (Will skip existing images in {save_dir})")
+    print(f"FID Reference (.npz): {args.fid_stats}")
+    
+    print("-" * 50)
 
     pbar = tqdm(total=total_samples, desc="Processing")
 
     for i, item in enumerate(data_items):
         prompt = item["text"]
-        gt_path = item["image_path"]
-
-        if gt_path:
-            try:
-                real_image = Image.open(gt_path).convert("RGB")
-                evaluator.update_real(real_image)
-            except:
-                pass
 
         for j in range(args.samples_per_prompt):
             # i = Prompt Index, j = Sample Index
@@ -331,13 +305,8 @@ def main(args):
 
     pbar.close()
 
-    print("\n--- FID Sample Count ---")
-    print(f"Real Samples Collected: {evaluator.fid.real_features_num_samples}")
-    print(f"Fake Samples Collected: {evaluator.fid.fake_features_num_samples}")
-    print("------------------------")
-
     print(f"\nComputing final metrics on {total_samples} samples...")
-    metrics = evaluator.compute()
+    metrics = evaluator.compute(generated_images_dir=save_dir)
 
     print("\n" + "=" * 20 + " Benchmark Report " + "=" * 20)
     print(f"Model: {args.ckpt_path or args.model_type}")
@@ -369,8 +338,15 @@ if __name__ == "__main__":
         "--image_dir",
         type=str,
         default=None,
-        help="Root dir for GT images (for FID reference)",
+        help="Root dir for GT images (only used for loading paths if needed, not for FID)",
     )
+    parser.add_argument(
+        "--fid_stats", 
+        type=str, 
+        default="../dataset/MJHQ-30K/mjhq_30k_stats.npz", 
+        help="Path to precomputed .npz stats file for FID"
+    )
+
     parser.add_argument(
         "--output_dir", type=str, default="eval_results", help="Where to save images"
     )
