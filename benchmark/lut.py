@@ -101,6 +101,9 @@ def generate_lut(args):
     print(f"  Gater Shape: {gater_tensor.shape} | Fuse Ratio: {fuse_ratio:.2%}")
     print(f"  Ratio Shape: {ratio_tensor.shape} | Avg Ratio:  {avg_keep_ratio:.2%}")
     print("-" * 30)
+    for i in range(num_layers):
+        print(f"Layer {i+1}: {gater_tensor[i].tolist()}")
+        print(f"Layer {i+1}: {ratio_tensor[i].tolist()}")
 
     save_data = {
         "gater": gater_tensor,
