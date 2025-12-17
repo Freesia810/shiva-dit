@@ -66,10 +66,10 @@ def format_metric(value, base_unit=""):
 class AverageFlopsMeasurer:
     def __init__(self, model):
         self.model = model
-        self.flops_history = [] # 改为列表记录每一步
+        self.flops_history = []
         self.macs_history = []
         self.hook_handle = None
-        self.is_measuring = False # 递归锁
+        self.is_measuring = False
 
     def enable(self):
         self.flops_history = []

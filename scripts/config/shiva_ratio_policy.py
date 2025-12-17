@@ -67,7 +67,7 @@ stage_config_dict = {
         {
             "steps": 5250,
             "weights": {
-                "ratio": [0.0, 0.0, 1.0],
+                "ratio": [0.0, 0.0, 1.2],
                 "gate": 0.0,
                 "distill": [0.1, 0.0],
             },
@@ -105,8 +105,8 @@ stage_config_dict = {
                 "distill": [0.1, 1.0]
             },
             "lr": {
-                "lora": 1e-4,
-                "router": 1e-5,
+                "lora": 1e-5,
+                "router": 1e-6,
             },
             "temp": [15.0, 15.0, 30.0, 100.0],
         },
