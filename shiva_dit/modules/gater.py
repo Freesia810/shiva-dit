@@ -145,6 +145,12 @@ class ShivaRatioPolicy(nn.Module):
         else:
             final_logits = logits_l + logits_t + self.global_bias
         
+        if self.training:
+            clamp_val = 6.0
+            final_logits = torch.clamp(final_logits, min=-clamp_val, max=clamp_val)
+            
+            # final_logits = clamp_val * torch.tanh(final_logits / clamp_val)
+        
         if self.training and torch.rand(1).item() < 1e-3 and (is_time_stage or is_layer_stage):
             with torch.no_grad():
                 is_main_process = not dist.is_initialized() or dist.get_rank() == 0
@@ -172,6 +178,7 @@ class ShivaRatioPolicy(nn.Module):
                     print(f"  > Context:")
                     print(f"      Timestep (Global): {current_t}")
                     print(f"      Layers in Batch:   {layers_str}")
+                    print(f"      [Logit Clamped]:   Yes (+/- 6.0)")
                     
                     print(f"  > Components (Logits):")
                     print(f"      [L] Layer Branch:  Mean={l_mean:+.4f} | Std={l_std:.4f}")

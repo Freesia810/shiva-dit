@@ -122,9 +122,6 @@ def _calc_ratio_loss_stratified(
         state_buffer["history_ratios"] = []
     if "history_counts" not in state_buffer:
         state_buffer["history_counts"] = []
-        
-    if "last_cycle_mean" not in state_buffer:
-        state_buffer["last_cycle_mean"] = target_val
 
     if has_data:
         state_buffer["history_ratios"].append(current_ratio.item())
@@ -153,20 +150,18 @@ def _calc_ratio_loss_stratified(
             raise RuntimeError(f"[{prefix}] Error: All ranks reported NO data during accumulation cycle. Cannot compute average.")
             
         cycle_mean = global_sum / global_count
-
         alpha = 0.2 
-
-        if "last_cycle_mean" in state_buffer:
-            old_mean = state_buffer["last_cycle_mean"]
-            new_mean = alpha * cycle_mean + (1 - alpha) * old_mean
-            state_buffer["last_cycle_mean"] = new_mean
+        last_mean = state_buffer.get("last_cycle_mean", None)
+        if last_mean is None:
+            new_mean = cycle_mean
         else:
-            state_buffer["last_cycle_mean"] = cycle_mean
+            new_mean = alpha * cycle_mean + (1 - alpha) * last_mean
+        state_buffer["last_cycle_mean"] = new_mean
             
         state_buffer["history_ratios"] = []
         state_buffer["history_counts"] = []
         
-    global_mean_est = state_buffer["last_cycle_mean"]
+    global_mean_est = state_buffer.get("last_cycle_mean", target_val)
     global_diff = global_mean_est - target_val
     grad_scale = 2.0 * global_diff 
     
