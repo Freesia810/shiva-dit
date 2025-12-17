@@ -20,16 +20,15 @@ hook_config = {
 
 lora_config = {
     "enable": True,
-    "rank": 64,
-    "lora_alpha": 64,
+    "rank": 32,
+    "lora_alpha": 32,
     "target_modules": [
         "to_q", "to_k", "to_v", "to_out.0",
         "add_q_proj", "add_k_proj", "add_v_proj", "to_add_out",
         "net.0.proj", "net.2",
         "proj_mlp", "proj_out",
-        "norm.linear", "norm1.linear", "norm1_context.linear", "norm_out.linear",
-    ],
-    "use_dora": True, 
+        # "norm.linear", "norm1.linear", "norm1_context.linear", "norm_out.linear",
+    ]
 }
 
 trainer_config = {
@@ -42,7 +41,7 @@ trainer_config = {
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
     "caption_dropout_rate": 0.1,
-    "enable_gradient_checkpointing": True,
+    "enable_gradient_checkpointing": False,
     "num_epochs": 30,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 2,

@@ -1221,25 +1221,51 @@ class DiffusionModelTrainer:
 
                 distill_loss_final = F.mse_loss(s_feat, t_feat, reduction="mean")
                 distill_loss_final = distill_loss_final * w_final
+            else:
+                feat_sim = torch.tensor(0.0, device=self.device, dtype=self.dtype)
 
             if enable_mid:
                 assert len(Y_s_per) == len(
                     Y_d_per
-                ), "Teacher / student layer count mismatch!"
+                ), f"Teacher({len(Y_s_per)}) / student({len(Y_d_per)}) layer count mismatch!"
 
-                if len(Y_d_per) > 0:
-                    pred_stack = torch.stack(Y_d_per).float()
-                    target_stack = torch.stack(Y_s_per).float().detach()
+                accumulated_loss = 0.0
+                valid_layers = 0
+                
+                for i in range(len(Y_d_per)):
+                    s_layer = Y_d_per[i].float()
+                    t_layer = Y_s_per[i].float().detach()
 
-                    norm_shape = (pred_stack.shape[-2], pred_stack.shape[-1])
+                    norm_shape = s_layer.shape[-2:]
+                    
+                    s_norm = F.layer_norm(s_layer, norm_shape)
+                    t_norm = F.layer_norm(t_layer, norm_shape)
 
-                    pred_norm = F.layer_norm(pred_stack, norm_shape)
-                    target_norm = F.layer_norm(target_stack, norm_shape)
+                    layer_loss = F.mse_loss(s_norm, t_norm, reduction="mean")
+                    accumulated_loss += layer_loss
+                    valid_layers += 1
+                
+                if valid_layers > 0:
+                    distill_loss_mid = (accumulated_loss / valid_layers) * w_mid
 
-                    distill_loss_mid = F.mse_loss(
-                        pred_norm, target_norm, reduction="mean"
-                    )
-                    distill_loss_mid = distill_loss_mid * w_mid
+            # if enable_mid:
+            #     assert len(Y_s_per) == len(
+            #         Y_d_per
+            #     ), "Teacher / student layer count mismatch!"
+
+            #     if len(Y_d_per) > 0:
+            #         pred_stack = torch.stack(Y_d_per).float()
+            #         target_stack = torch.stack(Y_s_per).float().detach()
+
+            #         norm_shape = (pred_stack.shape[-2], pred_stack.shape[-1])
+
+            #         pred_norm = F.layer_norm(pred_stack, norm_shape)
+            #         target_norm = F.layer_norm(target_stack, norm_shape)
+
+            #         distill_loss_mid = F.mse_loss(
+            #             pred_norm, target_norm, reduction="mean"
+            #         )
+            #         distill_loss_mid = distill_loss_mid * w_mid
         else:
             noise_pred = self.model(
                 hidden_states=noisy_latents,
@@ -2978,6 +3004,9 @@ class DiffusionModelTrainer:
             )
 
             for step, batch in enumerate(progress_bar):
+                current_micro_step = self.epoch * len(self.train_dataloader) + step
+                global_context.update(train_step_idx=current_micro_step)
+
                 self._update_learning_rate()
                 self._update_temperature()
 

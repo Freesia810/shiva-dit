@@ -70,8 +70,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.ratio_cache = shared_ratio_cache
         self.context_ratio_cache = shared_context_ratio_cache
 
-        self._ratio_buffer = []
-
         if self.use_gater_lut:
             if self.shiva_mode in ["image", "both"]:
                 if self.gater_cache is None:
@@ -103,22 +101,30 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.capture_mask_for_viz = capture_mask_for_viz
 
     def _get_stratified_ratio_val(self, device):
-        if not self._ratio_buffer:
-            min_r = 0.2 
-            max_r = 0.9
-            steps = ACCUMULATION_STEPS
+        step_idx = getattr(global_context, "train_step_idx", 0)
+        if step_idx is None:
+            step_idx = 0
             
-            span = (max_r - min_r) / steps
-            bases = torch.linspace(min_r, max_r - span, steps, device=device)
-            
-            offsets = torch.rand(steps, device=device) * span
-            ratios = bases + offsets
-            
-            ratios = ratios[torch.randperm(steps, device=device)]
-            
-            self._ratio_buffer = ratios.tolist()
+        accum_steps = ACCUMULATION_STEPS
+        
+        cycle_idx = step_idx // accum_steps
+        step_in_cycle = step_idx % accum_steps
+        
+        g = torch.Generator(device=device)
+        g.manual_seed(int(cycle_idx) + 2024)
 
-        return self._ratio_buffer.pop(0)
+        min_r = 0.2 
+        max_r = 0.9
+        
+        span = (max_r - min_r) / accum_steps
+        bases = torch.linspace(min_r, max_r - span, accum_steps, device=device)
+        
+        offsets = torch.rand(accum_steps, generator=g, device=device) * span
+        ratios = bases + offsets
+        
+        ratios = ratios[torch.randperm(accum_steps, generator=g, device=device)]
+        
+        return ratios[step_in_cycle].item()
 
     def on_register_hook(self, block: nn.Module):
         self.register_buffer(
