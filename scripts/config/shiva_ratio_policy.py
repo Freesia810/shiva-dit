@@ -5,15 +5,22 @@ HookType = ShivaDitBlockHook
 
 lora_config = {
     "enable": True,
-    "rank": 128,
-    "lora_alpha": 128,
+    "rank": 64,  
+    "lora_alpha": 64,
     "target_modules": [
         "to_q", "to_k", "to_v", "to_out.0",
-        "add_q_proj", "add_k_proj", "add_v_proj",
-        "linear", "proj_mlp", "proj_out", 
-        "net.2", 
+        "add_q_proj", "add_k_proj", "add_v_proj", "to_add_out",
+        "net.0.proj", "net.2",
+        "proj_mlp", 
     ],
-    "modules_to_save": ["norm1", "norm1_context"],
+    "modules_to_save": [
+        "norm1", 
+        "norm1_context",
+        "norm_out",
+        "proj_out",
+        "pos_embed",
+        "context_embedder"
+    ],
     "use_dora": True,
 }
 
