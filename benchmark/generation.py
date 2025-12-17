@@ -221,6 +221,8 @@ def main(args):
         print(f"Found metadata config at {args.meta_config}")
         with open(args.meta_config, "r") as f:
             meta_config = json.load(f)
+    else:
+        meta_config = None
 
     print(f"Loading Pipeline...")
     pipe = load_pipeline_for_inference(
