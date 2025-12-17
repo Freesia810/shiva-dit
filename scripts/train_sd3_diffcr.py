@@ -39,15 +39,15 @@ trainer_config = {
     "weight_decay": 1e-2,
     "seed": 42,
     "logging_steps": 40,
-    "save_steps": 10, # 2 epoch
+    "save_steps": 1750, # 2 epoch
     "save_best": True,
     "run_validation": True,
-    "validation_steps": 10, # 0.5 epoch
+    "validation_steps": 875, # 0.5 epoch
     "val_batch_size": None,
     "val_metadata_file": "../dataset/MJHQ-30K/val.jsonl",
     "val_image_dir": "../dataset/MJHQ-30K/",
     "run_inference_validation": True,
-    "inference_steps": 10, # 1 epoch
+    "inference_steps": 1750, # 1 epoch
     "inference_metadata_file": "../dataset/MJHQ-30K/test.jsonl",
     "inference_seed": 42,
     "inference_num_inference_steps": 28,
