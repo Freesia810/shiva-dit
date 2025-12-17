@@ -3102,6 +3102,36 @@ class DiffusionModelTrainer:
         
         self.accelerator.end_training()
 
+    def _save_shiva_config(self, save_dir: str):
+        if not self.accelerator.is_main_process:
+            return
+            
+        hook_info = None
+        if self.config.trainable_hook_config:
+            hook_class, hook_kwargs = self.config.trainable_hook_config
+            # Ensure class name is string
+            hook_info = {"class_name": hook_class.__name__, "config": hook_kwargs}
+
+        lora_info = None
+        if self.config.lora_config and self.config.lora_config.enable:
+            lora_info = asdict(self.config.lora_config)
+
+        metadata = {
+            "model_type": self.model_type,
+            "training_mode": self.config.training_mode,
+            "hook_info": hook_info,
+            "lora_info": lora_info,
+            "finetune_target_modules": self.config.finetune_target_modules,
+            "global_step": self.global_step,
+        }
+        
+        config_path = os.path.join(save_dir, "shiva_config.json")
+        try:
+            with open(config_path, "w") as f:
+                json.dump(metadata, f, indent=4)
+        except Exception as e:
+            print(f"Warning: Failed to save shiva_config.json: {e}")
+
     def _save_trainer_state(self, save_dir: str):
         if not self.accelerator.is_main_process:
             return
@@ -3130,6 +3160,7 @@ class DiffusionModelTrainer:
     def _save_modular_weights(self, save_dir: str):
         modular_dir = os.path.join(save_dir, "modular_weights")
         os.makedirs(modular_dir, exist_ok=True)
+        self._save_shiva_config(save_dir)
 
         if self.accelerator.is_main_process:
             print(f"[Saver] Saving modular weights to {modular_dir} ...")
@@ -3167,7 +3198,7 @@ class DiffusionModelTrainer:
                 should_save = False
                 if self.config.training_mode == "lora" and "lora_" in k:
                     should_save = True
-                else:
+                elif self.config.training_mode == "finetune":
                     try:
                         if unwrapped_model.get_parameter(k).requires_grad:
                             should_save = True
@@ -3337,6 +3368,7 @@ class DiffusionModelTrainer:
 
         self.accelerator.save_state(save_path_dir)
         self._save_trainer_state(save_path_dir)
+        self._save_shiva_config(save_path_dir)
 
         self.accelerator.wait_for_everyone()
         if self.accelerator.is_main_process:

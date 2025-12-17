@@ -6,7 +6,6 @@ import argparse
 from PIL import Image
 from tqdm import tqdm
 from types import ModuleType
-import numpy as np
 
 try:
     from pytorch_fid.fid_score import calculate_fid_given_paths
@@ -218,6 +217,11 @@ def main(args):
     if not data_items:
         return
 
+    if args.meta_config and os.path.exists(args.meta_config):
+        print(f"Found metadata config at {args.meta_config}")
+        with open(args.meta_config, "r") as f:
+            meta_config = json.load(f)
+
     print(f"Loading Pipeline...")
     pipe = load_pipeline_for_inference(
         ckpt_path=args.ckpt_path,
@@ -228,6 +232,7 @@ def main(args):
         gater_lut_path=args.gater_lut,
         optimize_hooks=args.optimize_hooks,
         merge_lora=args.merge_lora,
+        meta_config=meta_config,
     )
 
     if args.force_fixed_ratio > 0:
@@ -249,7 +254,6 @@ def main(args):
             print(f"[SUCCESS] Modified {hooks_modified} hook(s) for Fixed Baseline.")
     else:
         print(f"\n[INFO] Inference Mode: Adaptive (Policy Enabled)")
-    # ==========================================================
 
     total_samples = len(data_items) * args.samples_per_prompt
     print("-" * 50)
@@ -329,6 +333,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_type", type=str, default=None)
     parser.add_argument("--base_model_path", type=str, default=None)
     parser.add_argument("--gater_lut", type=str, default=None)
+    parser.add_argument("--meta_config", type=str, default=None)
 
     # Data
     parser.add_argument(
@@ -343,7 +348,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--fid_stats", 
         type=str, 
-        default="../dataset/MJHQ-30K/mjhq_30k_stats.npz", 
+        default=None, 
         help="Path to precomputed .npz stats file for FID"
     )
 
