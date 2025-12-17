@@ -6,7 +6,6 @@ import sys
 import json
 import statistics
 import gc
-from typing import Optional
 
 from shiva_dit.utils.inference_utils import load_pipeline_for_inference
 from shiva_dit.utils.utils import process_quick_start
@@ -327,7 +326,6 @@ def benchmark(args):
         print(f"Model Parameters (DiT):")
         print(f"  Total:     {total_p / 1e9:.3f} B")
     
-    # 汇报 Average FLOPs
     if avg_flops_val is not None:
         print(f"Computational Cost (Average per Step):")
         print(f"  Avg FLOPs: {format_metric(avg_flops_val, 'FLOPs')}")
