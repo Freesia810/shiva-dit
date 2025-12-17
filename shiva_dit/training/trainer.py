@@ -24,12 +24,10 @@ torch.backends.cudnn.allow_tf32 = True
 
 try:
     from torchmetrics.multimodal.clip_score import CLIPScore
-    from torchmetrics.image.kid import KernelInceptionDistance
     from torchmetrics.multimodal import CLIPImageQualityAssessment
     import torchvision.transforms.functional as TF
 except ImportError:
     CLIPScore = None
-    KernelInceptionDistance = None
     CLIPImageQualityAssessment = None
     print(
         "Warning: torchmetrics not installed. Metrics (CLIP Score, KID, IQA) will not be calculated."
@@ -195,12 +193,6 @@ class DiffusionModelTrainer:
                     med_config="../ImageReward/med_config.json",
                 )
 
-            if KernelInceptionDistance:
-                print("Loading KID model...")
-                self.evaluators["kid"] = KernelInceptionDistance(
-                    subset_size=10, reset_real_features=False, sync_on_compute=False
-                ).to(self.device)
-                self.kid_stats_ready = False
             if CLIPImageQualityAssessment:
                 print("Loading CLIP IQA model...")
                 self.evaluators["clip_iqa"] = CLIPImageQualityAssessment(
@@ -2892,36 +2884,6 @@ class DiffusionModelTrainer:
                         print(f"  >> CLIP Score: {clip_val:.4f}")
                     except Exception as e:
                         print(f"  Error calculating CLIP Score: {e}")
-
-                if KernelInceptionDistance and "kid" in self.evaluators:
-                    try:
-                        if not self.kid_stats_ready and self.val_dataloader is not None:
-                            real_size = 128
-                            print(f"  Computing KID real stats..., {real_size} imgs")
-                            for i, batch in enumerate(self.val_dataloader):
-                                if i >= real_size:
-                                    break
-                                real_imgs = (
-                                    (
-                                        (batch["pixel_values"].to(self.device) + 1)
-                                        * 127.5
-                                    )
-                                    .clamp(0, 255)
-                                    .to(dtype=torch.uint8)
-                                )
-                                self.evaluators["kid"].update(real_imgs, real=True)
-                            self.kid_stats_ready = True
-
-                        self.evaluators["kid"].update(imgs_stack_uint8, real=False)
-                        kid_mean, kid_std = self.evaluators["kid"].compute()
-                        self.evaluators["kid"].reset()
-
-                        inference_metrics["kid_mean"] = kid_mean.item()
-                        print(
-                            f"  >> KID: {kid_mean.item():.5f} (±{kid_std.item():.5f})"
-                        )
-                    except Exception as e:
-                        print(f"  Error calculating KID: {e}")
 
                 if (
                     CLIPImageQualityAssessment is not None
