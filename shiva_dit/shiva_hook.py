@@ -111,8 +111,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         step_in_cycle = step_idx % accum_steps
         
         g = torch.Generator(device=device)
-        g.manual_seed(int(cycle_idx) + 2024)
-
+        seed = int(cycle_idx) * 1000 + int(self.layer_idx) + 2024
+        g.manual_seed(seed)
         min_r = 0.2 
         max_r = 0.9
         
