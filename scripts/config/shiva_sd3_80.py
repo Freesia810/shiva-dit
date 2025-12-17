@@ -124,7 +124,7 @@ trainer_config = {
                     "distill": [0.1, 1.0]
                 },
                 "lr": {
-                    "lora": 1e-4,
+                    "lora": 1e-5,
                     "router": 1e-5,
                 },
                 "temp": [15.0, 15.0, 30.0, 100.0],
