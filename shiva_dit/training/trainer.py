@@ -1234,13 +1234,6 @@ class DiffusionModelTrainer:
                 assert len(Y_s_per) == len(
                     Y_d_per
                 ), "Teacher / student layer count mismatch!"
-                # for idx, (s_i, d_i) in enumerate(zip(Y_s_per, Y_d_per)):
-                #     # s_i/d_i shape: (B, C, H, W)
-                #     layer_loss = F.mse_loss(d_i.float(), s_i.float(), reduction="mean")
-                #     distill_loss_mid += layer_loss
-
-                # distill_loss_mid = distill_loss_mid / len(Y_s_per)
-                # distill_loss_mid = distill_loss_mid * w_mid
 
                 if len(Y_d_per) > 0:
                     pred_stack = torch.stack(Y_d_per).float()
@@ -1261,6 +1254,7 @@ class DiffusionModelTrainer:
                 timestep=timesteps,
                 **model_kwargs,
             )[0]
+            feat_sim = torch.tensor(0.0, device=self.device, dtype=self.dtype)
 
         return noise_pred, distill_loss_final, distill_loss_mid, feat_sim
 
