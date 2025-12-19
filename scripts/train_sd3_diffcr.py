@@ -35,6 +35,7 @@ trainer_config = {
     "train_batch_size": 1,
     "gradient_accumulation_steps": 2,
     "learning_rate": 1e-4,
+    "lora_learning_rate": 1e-4,
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
     "seed": 42,
@@ -55,7 +56,7 @@ trainer_config = {
     "mixed_precision": "bf16",  # "no", "fp16", "bf16"
     "extra_config": {
         "ratio_loss_weight": 0.3,
-        "target_ratio": 0.6,
+        "target_ratio": 0.65,
     },
     "log_with_tensorboard": True,
 }

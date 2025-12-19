@@ -826,12 +826,9 @@ class DiffusionModelTrainer:
                     n_list = names_map[grp]
                     print(f"  {grp:<22} Params: {count}")
 
-                    if len(n_list) > 0:
-                        if len(n_list) > 5:
-                            example_str = f"['{n_list[0]}', '{n_list[1]}', '{n_list[2]}', ..., '{n_list[-2]}', '{n_list[-1]}']"
-                            print(f"    Examples: {example_str}")
-                        else:
-                            print(f"    Names: {n_list}")
+                    for name in n_list:
+                        print(f"    {name}")
+
             print("----------------------------------\n")
 
         optimizer_grouped_parameters = []
@@ -1334,9 +1331,15 @@ class DiffusionModelTrainer:
             aggregated_metrics["loss/diffcr_loss"] = total_hook_loss
 
             ratios = []
+            per_layer_ratios = {}
+            
             for hook in HookManager.get_all_hooks().values():
                 if isinstance(hook, DiffCRDitBlockHook):
-                    ratios.append(hook.diff_ratio)
+                    r = hook.diff_ratio
+                    ratios.append(r)
+                    
+                    if hasattr(hook, "layer_idx") and hook.layer_idx is not None:
+                        per_layer_ratios[f"layer_{hook.layer_idx}"] = r
 
             if ratios:
                 stacked_ratios = torch.stack(ratios)
@@ -1348,6 +1351,8 @@ class DiffusionModelTrainer:
                 aggregated_metrics["diffcr/target_ratio"] = torch.tensor(
                     target_r, device=self.device
                 )
+            if per_layer_ratios:
+                self.step_per_layer_metrics["diffcr/per_layer_ratios"] = per_layer_ratios
 
             return total_hook_loss, aggregated_metrics
 
