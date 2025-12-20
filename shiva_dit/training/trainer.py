@@ -2373,6 +2373,8 @@ class DiffusionModelTrainer:
 
         all_hooks = HookManager.get_all_hooks()
         hooks = list(HookManager.get_all_hooks().values())
+        if not hooks:
+            return
         if hasattr(hooks[0], "shiva_mode") and hooks[0].shiva_mode == "image":
             if batch is not None and "pixel_values" in batch:
                 try:
@@ -2518,6 +2520,8 @@ class DiffusionModelTrainer:
 
         all_hooks = HookManager.get_all_hooks()
         hooks = list(HookManager.get_all_hooks().values())
+        if not hooks:
+            return
         if hasattr(hooks[0], "shiva_mode") and hooks[0].shiva_mode == "context":
             input_ids = None
             if "input_ids" in batch:
