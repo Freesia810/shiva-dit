@@ -1165,14 +1165,14 @@ class DiffusionModelTrainer:
         return img_latents, noise, noisy_latents, timesteps, model_kwargs
 
     def _forward_pass_with_distillation(
-        self, noisy_latents, timesteps, model_kwargs, dynamic_distill_weights=None
+        self, noisy_latents, timesteps, model_kwargs, dynamic_distill_config=None
     ):
         distill_loss_final = torch.tensor(0.0, device=self.device, dtype=self.dtype)
         distill_loss_mid = torch.tensor(0.0, device=self.device, dtype=self.dtype)
 
-        if dynamic_distill_weights:
-            w_final = dynamic_distill_weights.get("distill_final_weight", 0.0)
-            w_mid = dynamic_distill_weights.get("distill_middle_weight", 0.0)
+        if dynamic_distill_config:
+            w_final = dynamic_distill_config.get("distill_final_weight", 0.0)
+            w_mid = dynamic_distill_config.get("distill_middle_weight", 0.0)
         else:
             w_final = self.config.distillation_final_weight
             w_mid = self.config.distillation_middle_weight
@@ -1291,7 +1291,7 @@ class DiffusionModelTrainer:
 
         return main_loss
 
-    def _get_shiva_loss_config(self, global_step: int) -> dict:
+    def _get_extra_loss_config(self, global_step: int) -> dict:
         current_weights = {}
 
         for stage in self.processed_stage_schedule:
@@ -1321,9 +1321,78 @@ class DiffusionModelTrainer:
         aggregated_metrics = {}
         self.step_per_layer_metrics = {}
 
-        current_state_buffer = self.state_buffer if not is_validation else {}
+        if self.hook_type == 'shiva':
+            current_state_buffer = self.state_buffer if not is_validation else {}
 
-        if self.hook_type == "diffcr":
+            loss_config = self._get_extra_loss_config(global_step)
+
+            # 1. Gate Loss
+            gate_loss, g_metrics, per_layer_fuse_probs = shiva_metrics.calculate_gate_loss(
+                loss_config, self.device
+            )
+
+            # 2. Image Ratio Loss
+            img_ratio_loss, img_r_metrics, per_layer_ratios = (
+                shiva_metrics.calculate_image_ratio_loss(
+                    loss_config, self.device, current_state_buffer
+                )
+            )
+
+            # 3. Context Ratio Loss
+            ctx_ratio_loss, ctx_r_metrics, per_layer_context_ratios = (
+                shiva_metrics.calculate_context_ratio_loss(loss_config, self.device)
+            )
+
+            # 4. Context Auxiliary Loss
+            ctx_aux_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
+            aux_weight = loss_config.get("aux_loss_weight", 0.0)
+            if aux_weight > 0:
+                all_aux_losses = []
+                for hook in HookManager.get_all_hooks().values():
+                    if (
+                        hasattr(hook, "context_aux_loss_accumulator")
+                        and hook.context_aux_loss_accumulator
+                    ):
+                        layer_aux_losses = torch.stack(hook.context_aux_loss_accumulator)
+                        all_aux_losses.append(layer_aux_losses.sum())
+                if all_aux_losses:
+                    ctx_aux_loss_raw = torch.stack(all_aux_losses).sum()
+                    ctx_aux_loss = ctx_aux_loss_raw * aux_weight
+                    aggregated_metrics["loss/context/context_aux_loss_raw"] = (
+                        ctx_aux_loss_raw.detach()
+                    )
+                    aggregated_metrics["loss/context/context_aux_loss"] = (
+                        ctx_aux_loss.detach()
+                    )
+
+            context_stats = shiva_metrics.collect_context_stats(self.device)
+            aggregated_metrics.update(context_stats)
+
+            total_hook_loss = gate_loss + img_ratio_loss + ctx_ratio_loss + ctx_aux_loss
+
+            aggregated_metrics.update(g_metrics)
+            aggregated_metrics.update(img_r_metrics)
+            aggregated_metrics.update(ctx_r_metrics)
+
+            self.step_per_layer_metrics.update(
+                {
+                    "gater/per_layer_fuse_prob": per_layer_fuse_probs,
+                    "ratio_policy/image_ratio/per_layer_ratios": per_layer_ratios,
+                    "ratio_policy/context_ratio/per_layer_context_ratios": per_layer_context_ratios,
+                }
+            )
+
+            router_stats = shiva_metrics.collect_router_stats(self.device)
+            aggregated_metrics.update(router_stats)
+
+            autograd_stats = shiva_metrics.collect_autograd_stats(self.device)
+            aggregated_metrics.update(autograd_stats)
+
+            for hook in HookManager.get_all_hooks().values():
+                if hasattr(hook, "clear_accumulators"):
+                    hook.clear_accumulators()
+
+        elif self.hook_type == 'diffcr':
             loss_config = self.config.extra_config
             total_hook_loss = DiffCRDitBlockHook.calculate_ratio_loss(
                 loss_config, self.device
@@ -1354,79 +1423,6 @@ class DiffusionModelTrainer:
             if per_layer_ratios:
                 self.step_per_layer_metrics["diffcr/per_layer_ratios"] = per_layer_ratios
 
-            return total_hook_loss, aggregated_metrics
-
-        if self.hook_type != "shiva":
-            return total_hook_loss, aggregated_metrics
-
-        loss_config = self._get_shiva_loss_config(global_step)
-
-        # 1. Gate Loss
-        gate_loss, g_metrics, per_layer_fuse_probs = shiva_metrics.calculate_gate_loss(
-            loss_config, self.device
-        )
-
-        # 2. Image Ratio Loss
-        img_ratio_loss, img_r_metrics, per_layer_ratios = (
-            shiva_metrics.calculate_image_ratio_loss(
-                loss_config, self.device, current_state_buffer
-            )
-        )
-
-        # 3. Context Ratio Loss
-        ctx_ratio_loss, ctx_r_metrics, per_layer_context_ratios = (
-            shiva_metrics.calculate_context_ratio_loss(loss_config, self.device)
-        )
-
-        # 4. Context Auxiliary Loss
-        ctx_aux_loss = torch.tensor(0.0, device=self.device, dtype=self.dtype)
-        aux_weight = loss_config.get("aux_loss_weight", 0.0)
-        if aux_weight > 0:
-            all_aux_losses = []
-            for hook in HookManager.get_all_hooks().values():
-                if (
-                    hasattr(hook, "context_aux_loss_accumulator")
-                    and hook.context_aux_loss_accumulator
-                ):
-                    layer_aux_losses = torch.stack(hook.context_aux_loss_accumulator)
-                    all_aux_losses.append(layer_aux_losses.sum())
-            if all_aux_losses:
-                ctx_aux_loss_raw = torch.stack(all_aux_losses).sum()
-                ctx_aux_loss = ctx_aux_loss_raw * aux_weight
-                aggregated_metrics["loss/context/context_aux_loss_raw"] = (
-                    ctx_aux_loss_raw.detach()
-                )
-                aggregated_metrics["loss/context/context_aux_loss"] = (
-                    ctx_aux_loss.detach()
-                )
-
-        context_stats = shiva_metrics.collect_context_stats(self.device)
-        aggregated_metrics.update(context_stats)
-
-        total_hook_loss = gate_loss + img_ratio_loss + ctx_ratio_loss + ctx_aux_loss
-
-        aggregated_metrics.update(g_metrics)
-        aggregated_metrics.update(img_r_metrics)
-        aggregated_metrics.update(ctx_r_metrics)
-
-        self.step_per_layer_metrics.update(
-            {
-                "gater/per_layer_fuse_prob": per_layer_fuse_probs,
-                "ratio_policy/image_ratio/per_layer_ratios": per_layer_ratios,
-                "ratio_policy/context_ratio/per_layer_context_ratios": per_layer_context_ratios,
-            }
-        )
-
-        router_stats = shiva_metrics.collect_router_stats(self.device)
-        aggregated_metrics.update(router_stats)
-
-        autograd_stats = shiva_metrics.collect_autograd_stats(self.device)
-        aggregated_metrics.update(autograd_stats)
-
-        for hook in HookManager.get_all_hooks().values():
-            if hasattr(hook, "clear_accumulators"):
-                hook.clear_accumulators()
-
         return total_hook_loss, aggregated_metrics
 
     def _compute_loss(self, batch, global_step: int, is_validation: bool = False):
@@ -1436,14 +1432,12 @@ class DiffusionModelTrainer:
 
         noisy_latents = noisy_latents.to(self.dtype).detach()
 
-        loss_config = self._get_shiva_loss_config(global_step)
-
         noise_pred, distill_loss_final, distill_loss_mid, feat_sim = (
             self._forward_pass_with_distillation(
                 noisy_latents,
                 timesteps,
                 model_kwargs,
-                dynamic_distill_weights=loss_config,
+                dynamic_distill_config=self._get_extra_loss_config(global_step) if self.hook_type else None,
             )
         )
 
