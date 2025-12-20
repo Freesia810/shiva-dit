@@ -123,7 +123,7 @@ except ImportError:
 
 
 class DiffusionModelTrainer:
-    def __init__(self, config: TrainerConfig, load_evaluators: bool = True):
+    def __init__(self, config: TrainerConfig, load_evaluators: bool = True, static_graph: bool = True):
         self.config = config
         self.model_type = config.model_type
         self.current_stage_idx = -1
@@ -131,7 +131,7 @@ class DiffusionModelTrainer:
         self.input_preparer_fn = get_input_preparer(self.model_type)
 
         ## Initialize accelerator, device, seed and generator
-        ddp_kwargs = DistributedDataParallelKwargs(static_graph=True)
+        ddp_kwargs = DistributedDataParallelKwargs(static_graph=static_graph)
         self.accelerator = Accelerator(
             mixed_precision=config.mixed_precision,
             gradient_accumulation_steps=config.gradient_accumulation_steps,
@@ -825,6 +825,9 @@ class DiffusionModelTrainer:
                 "fuser",
                 "context_ratio_policy",
                 "context_pruner",
+
+                # dydit
+                "dynamic_token_selector",
             ]
 
             for grp in display_order:
@@ -1177,12 +1180,13 @@ class DiffusionModelTrainer:
         distill_loss_final = torch.tensor(0.0, device=self.device, dtype=self.dtype)
         distill_loss_mid = torch.tensor(0.0, device=self.device, dtype=self.dtype)
 
+        w_final = self.config.distillation_final_weight
+        w_mid = self.config.distillation_middle_weight
         if dynamic_distill_config:
-            w_final = dynamic_distill_config.get("distill_final_weight", 0.0)
-            w_mid = dynamic_distill_config.get("distill_middle_weight", 0.0)
-        else:
-            w_final = self.config.distillation_final_weight
-            w_mid = self.config.distillation_middle_weight
+            if "distill_final_weight" in dynamic_distill_config:
+                w_final = dynamic_distill_config["distill_final_weight"]
+            if "distill_middle_weight" in dynamic_distill_config:
+                w_mid = dynamic_distill_config["distill_middle_weight"]
 
         if self.teacher_model is not None:
             enable_final = w_final > 0
@@ -1310,12 +1314,10 @@ class DiffusionModelTrainer:
         config["ratio_loss_weight"] = current_weights.get("ratio", [0.0, 0.0])
         config["gate_loss_weight"] = current_weights.get("gate", 0.0)
         config["aux_loss_weight"] = current_weights.get("aux", 0.0)
-        distill_weights = current_weights.get("distill", [0.0, 0.0])
-        config["distill_final_weight"] = distill_weights[0]
-        config["distill_middle_weight"] = (
-            distill_weights[1] if len(distill_weights) > 1 else 0.0
-        )
-        config["target_ratio"] = self.config.extra_config["target_ratio"]
+        if "distill" in current_weights:
+            config["distill_final_weight"] = current_weights["distill"][0]
+            config["distill_middle_weight"] = current_weights["distill"][1]
+        config["target_ratio"] = self.config.extra_config.get("target_ratio", 1.0)
 
         config["gradient_accumulation_steps"] = self.config.gradient_accumulation_steps
 
@@ -1723,15 +1725,16 @@ class DiffusionModelTrainer:
             feat_sim,
         ) = self._compute_loss(batch, self.global_step, is_validation=False)
 
-        self._monitor_gradient_analysis(
-            global_step=self.global_step,
-            timesteps=timesteps,
-            hook_metrics=hook_metrics,
-            main_loss=main_loss,
-            distill_loss_final=distill_loss_final,
-            distill_loss_mid=distill_loss_mid,
-            hook_loss=hook_loss,
-        )
+        if self.hook_type == "shiva":
+            self._monitor_gradient_analysis(
+                global_step=self.global_step,
+                timesteps=timesteps,
+                hook_metrics=hook_metrics,
+                main_loss=main_loss,
+                distill_loss_final=distill_loss_final,
+                distill_loss_mid=distill_loss_mid,
+                hook_loss=hook_loss,
+            )
 
         self.accelerator.backward(total_loss)
         if self.config.enable_gradient_checkpointing:

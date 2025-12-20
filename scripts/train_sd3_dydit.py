@@ -3,12 +3,14 @@ from baselines.dy_dit import DynamicDiTBlockHook
 
 HookType = DynamicDiTBlockHook
 hook_config = {
-    "dynamic_width": {"enable": False, "select_threshold": 0.5},
-    "dynamic_token": {
-        "enable": True,
-        "select_threshold": 0.5,
-        "tau": 5.0,
-    },
+    "config": {
+        "dynamic_width": {"enable": False, "select_threshold": 0.5},
+        "dynamic_token": {
+            "enable": True,
+            "select_threshold": 0.5,
+            "tau": 5.0,
+        }
+    }
 }
 
 lora_config = {
@@ -48,6 +50,8 @@ trainer_config = {
     "lora_learning_rate": 1e-4,
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
+    "distillation_final_weight": 1.0,
+    "distillation_middle_weight": 1.0,
     "seed": 42,
     "logging_steps": 40,
     "save_steps": 1750,
@@ -73,5 +77,5 @@ trainer_config = {
 }
 
 config = TrainerConfig(**trainer_config)
-trainer = DiffusionModelTrainer(config=config)
+trainer = DiffusionModelTrainer(config=config, static_graph=False)
 trainer.train()
