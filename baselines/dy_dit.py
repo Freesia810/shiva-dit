@@ -57,9 +57,9 @@ class TokenSelect_baesd_on_x_t_text(nn.Module):
         self.full_dim_in = dim_in
         self.router = nn.Linear(dim_in, 1, bias=True)
 
-        nn.init.constant_(self.router.weight, 5.0)
+        nn.init.xavier_uniform_(self.router.weight)
         if self.router.bias is not None:
-            nn.init.constant_(self.router.bias, 0.0)
+            nn.init.constant_(self.router.bias, 5.0)
 
         self.is_hard = is_hard
         self.threshold = threshold

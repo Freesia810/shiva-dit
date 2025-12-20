@@ -763,6 +763,13 @@ class DiffusionModelTrainer:
                 self.config.context_learning_rate,
                 0.0,
             ),
+
+            # other methods
+            "dynamic_token_selector": (
+                "dynamic_token_selector",
+                self.config.learning_rate,
+                self.config.weight_decay,
+            ),
         }
 
         # group_name -> list[params]
@@ -1422,6 +1429,35 @@ class DiffusionModelTrainer:
                 )
             if per_layer_ratios:
                 self.step_per_layer_metrics["diffcr/per_layer_ratios"] = per_layer_ratios
+        elif self.hook_type == 'dydit':
+            loss_config = self.config.extra_config
+            target_flops = loss_config.get("target_flops", 0.7)
+            warmup_steps = loss_config.get("warmup_steps", 0)
+
+            if global_step < warmup_steps:
+                progress = global_step / float(warmup_steps)
+                current_target = 1.0 - (1.0 - target_flops) * progress
+            else:
+                current_target = target_flops
+                
+            current_iter_config = loss_config.copy()
+            current_iter_config["target_flops"] = current_target
+            
+            total_hook_loss = DynamicDiTBlockHook.calculate_flops_loss(current_iter_config, self.device)
+            aggregated_metrics["loss/dydit/flops_loss"] = total_hook_loss
+            aggregated_metrics["dydit/target_ratio_dynamic"] = torch.tensor(current_target)
+            
+            f_ratios = []
+            for hook in HookManager.get_all_hooks().values():
+                if isinstance(hook, DynamicDiTBlockHook) and hook.f_dynamic_batch is not None:
+                    if hook.f_static_total_block > 0:
+                        ratio = (hook.f_dynamic_batch.mean() / hook.f_static_total_block)
+                        f_ratios.append(ratio)
+            
+            if f_ratios:
+                avg_ratio = torch.stack(f_ratios).mean()
+                aggregated_metrics["dydit/real_flops_ratio"] = avg_ratio
+
 
         return total_hook_loss, aggregated_metrics
 
