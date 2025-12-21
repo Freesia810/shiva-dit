@@ -293,6 +293,8 @@ class PixArtTransformer2DModel(ModelMixin, ConfigMixin):
         cross_attention_kwargs: Dict[str, Any] = None,
         attention_mask: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
+        output_hidden_states: bool = False,
+        output_hidden_states_step: int = None,
         return_dict: bool = True,
     ):
         """
@@ -379,8 +381,11 @@ class PixArtTransformer2DModel(ModelMixin, ConfigMixin):
             encoder_hidden_states = self.caption_projection(encoder_hidden_states)
             encoder_hidden_states = encoder_hidden_states.view(batch_size, -1, hidden_states.shape[-1])
 
+        if output_hidden_states:
+            all_hidden_states = ()
+
         # 2. Blocks
-        for block in self.transformer_blocks:
+        for index_block, block in enumerate(self.transformer_blocks):
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 hidden_states = self._gradient_checkpointing_func(
                     block,
@@ -402,6 +407,9 @@ class PixArtTransformer2DModel(ModelMixin, ConfigMixin):
                     cross_attention_kwargs=cross_attention_kwargs,
                     class_labels=None,
                 )
+            
+            if output_hidden_states and index_block % output_hidden_states_step == 0:
+                all_hidden_states = all_hidden_states + (hidden_states, )
 
         # 3. Output
         shift, scale = (
@@ -423,6 +431,8 @@ class PixArtTransformer2DModel(ModelMixin, ConfigMixin):
         )
 
         if not return_dict:
+            if output_hidden_states:
+                return (output, all_hidden_states)
             return (output,)
 
         return Transformer2DModelOutput(sample=output)

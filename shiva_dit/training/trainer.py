@@ -2214,24 +2214,23 @@ class DiffusionModelTrainer:
             with torch.no_grad():
                 unwrapped_model = self.accelerator.unwrap_model(self.model)
 
-                # Case A: Flux / SD3 (time_text_embed)
                 if hasattr(unwrapped_model, "time_text_embed"):
-                    # Flux usually projects scalar t -> vector
-                    # Note: We manually invoke the submodule to avoid full forward pass
+                    # Case A: Flux / SD3 (time_text_embed)
                     emb_module = unwrapped_model.time_text_embed
-                    if hasattr(emb_module, "time_proj") and hasattr(
-                        emb_module, "timestep_embedder"
-                    ):
-                        t_proj = emb_module.time_proj(t_flat)
-                        temb_input = emb_module.timestep_embedder(
-                            t_proj.to(dtype=self.dtype)
-                        )
-                    elif hasattr(emb_module, "forward"):
-                        # Try calling it directly if it accepts just timestep
-                        # Flux time_text_embed usually takes (timestep, pooled_text, text_seq_len)
-                        # This might be tricky without text.
-                        # Fallback: Assume we have a helper or specific projection available
-                        pass
+                elif hasattr(unwrapped_model, "adaln_single"):
+                    # Case B: Pixart (adaln_single.emb)
+                    emb_module = unwrapped_model.adaln_single.emb
+                else:
+                    print("[Viz] ⚠️ Warning: Unsupported model architecture.")
+                    emb_module = None
+                
+                if hasattr(emb_module, "time_proj") and hasattr(
+                    emb_module, "timestep_embedder"
+                ):
+                    t_proj = emb_module.time_proj(t_flat)
+                    temb_input = emb_module.timestep_embedder(
+                        t_proj.to(dtype=self.dtype)
+                    )
 
         except Exception as e:
             print(f"[Viz] ⚠️ Warning: Failed to extract Time Embedding: {e}")

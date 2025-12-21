@@ -158,9 +158,9 @@ def _print_console_stats(stats):
     
     # 3. Diagnosis
     if active < 2.0:
-        print(f"    ⚠️  Gradient Vanishing! (Too Hard? Increase Ts/Tk or check upstream)")
+        print(f"    ⚠️  Gradient Vanishing! (Too Hard? Decrease Ts/Tk or check upstream)")
     elif active > N * 0.9:
-        print(f"    ⚠️  All Tokens Updating! (Too Soft? Decrease Ts/Tk to enforce sparsity)")
+        print(f"    ⚠️  All Tokens Updating! (Too Soft? Increase Ts/Tk to enforce sparsity)")
     else:
         print(f"    ✅  Healthy Sparsity.")
         
