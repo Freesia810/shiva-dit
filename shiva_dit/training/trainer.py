@@ -216,7 +216,6 @@ class DiffusionModelTrainer:
         print(f"[Trainer] Device [{self.device}] Set Local seed: {local_seed}")
 
         self.timestep_buffer = []
-        self.schedule_timesteps_gpu = self.scheduler.timesteps.to(self.device)
 
     def _setup_stage_schedule(self):
         config = self.config
@@ -295,12 +294,23 @@ class DiffusionModelTrainer:
 
         self.image_processor = self.pipe.image_processor
         self.vae = self.pipe.vae
-        self.scheduler = self.pipe.scheduler
+        self.scheduler = copy.deepcopy(self.pipe.scheduler)
         self.model = tuple(
             getattr(self.pipe, model) for model in self.model_attrs
         )  # DiT
         assert len(self.model) == 1, "Currently only single DiT model is supported."
         self.model = self.model[0]
+
+        if self.model_type == "pixart-sigma":
+            if self.accelerator.is_main_process:
+                print(f"[Trainer] Detected {self.model_type}. Initializing Scheduler for training...")
+            
+            num_train_timesteps = self.config.extra_config.get("num_train_timesteps", 1000)
+            if hasattr(self.scheduler.config, "num_train_timesteps"):
+                num_train_timesteps = self.scheduler.config.num_train_timesteps
+            
+            self.scheduler.set_timesteps(num_train_timesteps, device=self.device)
+        self.schedule_timesteps_gpu = self.scheduler.timesteps.to(self.device)
 
         # distillation setup
         self.teacher_model = None

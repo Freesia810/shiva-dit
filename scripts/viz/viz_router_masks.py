@@ -12,8 +12,6 @@ from shiva_dit.hook import HookManager
 from shiva_dit.shiva_hook import ShivaDitBlockHook
 from shiva_dit.utils import global_context
 
-from scripts.config.shiva_router import hook_config, lora_config
-
 FONT_PATH = "./Times New Roman.ttf" 
 custom_font_name = 'serif'
 
@@ -34,15 +32,8 @@ plt.rcParams['mathtext.it'] = f"{custom_font_name}:italic"
 plt.rcParams['mathtext.bf'] = f"{custom_font_name}:bold"
 plt.rcParams['axes.unicode_minus'] = False
 
-mode = 'max'
-HOOK_CONFIG = copy.deepcopy(hook_config[mode])
-HOOK_CONFIG["fixed_image_ratio"] = 0.6
-HOOK_CONFIG["ratio_bottleneck_dim"] = 256
-HOOK_CONFIG["capture_mask_for_viz"] = True
-HOOK_CONFIG["skip_layer_indices"] = [0]
-
 # --- Input Image & Prompt ---
-IMAGE_PATH = "/home/admin/workspace/aop_lab/app_source/dataset/MJHQ-30K/indoor/45de4fb1e89b0d07d76b71bdcb6e6f02fabfdbb0.jpg"
+IMAGE_PATH = "../dataset/MJHQ-30K/indoor/45de4fb1e89b0d07d76b71bdcb6e6f02fabfdbb0.jpg"
 PROMPT = "A jawdropping image of a bold red Ferrari SF90 Stradale, displayed inside a luxurious, highrise apartment in Tokyo, Japan, during a neonlit night. The cars striking design is accentuated by the citys dazzling lights, visible through the floortoceiling windows. This photograph embodies the fusion of automotive art and modern living, rendered in stunning 8K UHD resolution"
 
 OUTPUT_DIR = "./viz_results"
@@ -205,8 +196,34 @@ def plot_paper_grid(data_storage, row_labels, col_labels, save_path):
 def main():
     image_dir = create_temp_metadata()
 
+    if os.path.isdir(ckpt_path):
+        config_path = os.path.join(CHECKPOINT_PATH, "shiva_config.json")  
+        if os.path.exists(config_path):
+            print(f"Found metadata config at {config_path}")
+            with open(config_path, "r") as f:
+                meta_config = json.load(f)
+    elif os.path.isfile(ckpt_path):
+        load_format = "single_file"
+        print("Detected Format 3: Single PT File")
+        checkpoint_state = torch.load(ckpt_path, map_location="cpu")
+        if isinstance(checkpoint_state, dict):
+            if "model_type" in checkpoint_state: 
+                meta_config = {
+                    "model_type": checkpoint_state.get("model_type"),
+                    "training_mode": checkpoint_state.get("training_mode"),
+                    "hook_info": checkpoint_state.get("hook_info"),
+                    "lora_info": checkpoint_state.get("lora_info"),
+                }
+            else:
+                raise ValueError("Could not determine checkpoint format.")
+        else:
+            raise ValueError("Could not determine checkpoint format.")
+    
+    lora_config = meta_config['lora_info']
+    HOOK_CONFIG = meta_config['hook_info']
+
     trainer_config = {
-        "model_type": "sd3",
+        "model_type": meta_config['model_type'],
         "model_path": None,
         "output_dir": OUTPUT_DIR,
         "training_mode": "lora",
@@ -223,7 +240,7 @@ def main():
 
     print(">>> Initializing Trainer...")
     config = TrainerConfig(**trainer_config)
-    trainer = DiffusionModelTrainer(config)
+    trainer = DiffusionModelTrainer(config, load_evaluators=False)
 
     if os.path.exists(CHECKPOINT_PATH):
         print(f">>> Loading checkpoint from {CHECKPOINT_PATH}...")
@@ -237,12 +254,12 @@ def main():
     with torch.no_grad():
         img_latents, _, _, _, _ = trainer.prepare_model_inputs(batch, timestep_index=0)
     
-    if config.model_type == "sd3":
+    if config.model_type == "sd3" or config.model_type == "pixart-sigma":
         H, W = img_latents.shape[-2], img_latents.shape[-1]
         grid_h, grid_w = H // 2, W // 2
-    else:
-        grid_h = int(img_latents.shape[1] ** 0.5)
-        grid_w = grid_h
+    elif config.model_type == "flux-dev":
+        H = W = int(img_latents.shape[-2] ** 0.5)
+        grid_h, grid_w = H, W
 
     trainer.model.eval()
     
@@ -275,6 +292,9 @@ def main():
         with torch.no_grad():
             if config.model_type == "sd3":
                 latents_for_viz = (noisy_latents / trainer.vae.config.scaling_factor) + trainer.vae.config.shift_factor
+            elif config.model_type == "flux-dev":
+                latents_for_viz = trainer.pipe._unpack_latents(noisy_latents, batch['pixel_values'].shape[2], batch['pixel_values'].shape[3], trainer.pipe.vae_scale_factor)
+                latents_for_viz = (latents_for_viz / trainer.vae.config.scaling_factor) + trainer.vae.config.shift_factor
             else:
                 latents_for_viz = noisy_latents / trainer.vae.config.scaling_factor
 
