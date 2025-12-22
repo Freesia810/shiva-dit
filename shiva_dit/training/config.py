@@ -49,7 +49,7 @@ class TrainerConfig:
 
     learning_rate: float = 1e-4
     lora_learning_rate: float = field(
-        default=1e-6, metadata={"help": "Learning rate for LoRA parameters."}
+        default=1e-4, metadata={"help": "Learning rate for LoRA parameters."}
     )
     policy_learning_rate: float = field(
         default=1e-4,
