@@ -5,14 +5,14 @@
         "class_name": "ToMADitBlockHook",
         "config": {
             "tile_nums": [8, 8],
-            "merged_ratio": 0.25,
+            "merged_ratio": 0.3,
             "merge_config": {
                 "self-attn": true,
                 "cross-attn": false,
                 "ffn": true,
                 "parallel": false
             },
-            "skip_layer_nums": 10
+            "skip_layer_nums": 5
         }
     }
 }

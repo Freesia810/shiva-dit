@@ -179,6 +179,13 @@ class DiTProfiler:
 def benchmark(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float16
+
+    if args.meta_config and os.path.exists(args.meta_config):
+        print(f"Found metadata config at {args.meta_config}")
+        with open(args.meta_config, "r") as f:
+            meta_config = json.load(f)
+    else:
+        meta_config = None
     
     set_seed(42)
 
@@ -190,7 +197,8 @@ def benchmark(args):
         dtype=dtype,
         gater_lut_path=args.gater_lut,
         optimize_hooks=args.optimize_hooks,
-        merge_lora=args.merge_lora
+        merge_lora=args.merge_lora,
+        meta_config=meta_config,
     )
     
     model = None
@@ -349,6 +357,7 @@ if __name__ == "__main__":
     parser.add_argument("--base_model_path", type=str, default=None)
     parser.add_argument("--jsonl_path", type=str, default="test/training/dataset/meta.jsonl", help="Dataset jsonl file")
     parser.add_argument("--gater_lut", type=str, default=None, help="Path to gater LUT .pt file")
+    parser.add_argument("--meta_config", type=str, default=None)
     
     parser.add_argument("--limit", type=int, default=None, help="Limit number of samples to test")
     parser.add_argument("--steps", type=int, default=-1, help="Override inference steps (default uses pipeline default)")
@@ -368,8 +377,5 @@ if __name__ == "__main__":
     parser.add_argument("--save_images", action="store_true", help="Save generated images to disk")
     
     args = parser.parse_args()
-    
-    if args.ckpt_path is None and args.model_type is None:
-        parser.error("--model_type is required when --ckpt_path is not provided.")
         
     benchmark(args)
