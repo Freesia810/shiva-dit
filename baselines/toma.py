@@ -254,7 +254,7 @@ if __name__ == "__main__":
 
     toma_config = {
         "tile_nums": (8, 8),
-        "merged_ratio": 0.4,
+        "merged_ratio": 0.25,
         "merge_config": {
             "self-attn": True,
             "cross-attn": False,
