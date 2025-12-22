@@ -37,10 +37,10 @@ IMAGE_PATH = "../dataset/MJHQ-30K/indoor/45de4fb1e89b0d07d76b71bdcb6e6f02fabfdbb
 PROMPT = "A jawdropping image of a bold red Ferrari SF90 Stradale, displayed inside a luxurious, highrise apartment in Tokyo, Japan, during a neonlit night. The cars striking design is accentuated by the citys dazzling lights, visible through the floortoceiling windows. This photograph embodies the fusion of automotive art and modern living, rendered in stunning 8K UHD resolution"
 
 OUTPUT_DIR = "./viz_results"
-CHECKPOINT_PATH = "checkpoints_adaptive/best_val_main_loss.pt"
+CHECKPOINT_PATH = "checkpoints/checkpoint_step_003500"
 
 TIMESTEPS_TO_VIZ = [900, 700, 500, 100]  
-LAYERS_TO_VIZ = [1, 8, 15, 23]           
+LAYERS_TO_VIZ = [1, 8, 15, 23, 27]           
 TEMP_META_FILE = "./viz_temp_meta.jsonl"
 
 def create_temp_metadata():
@@ -196,16 +196,16 @@ def plot_paper_grid(data_storage, row_labels, col_labels, save_path):
 def main():
     image_dir = create_temp_metadata()
 
-    if os.path.isdir(ckpt_path):
+    if os.path.isdir(CHECKPOINT_PATH):
         config_path = os.path.join(CHECKPOINT_PATH, "shiva_config.json")  
         if os.path.exists(config_path):
             print(f"Found metadata config at {config_path}")
             with open(config_path, "r") as f:
                 meta_config = json.load(f)
-    elif os.path.isfile(ckpt_path):
+    elif os.path.isfile(CHECKPOINT_PATH):
         load_format = "single_file"
         print("Detected Format 3: Single PT File")
-        checkpoint_state = torch.load(ckpt_path, map_location="cpu")
+        checkpoint_state = torch.load(CHECKPOINT_PATH, map_location="cpu")
         if isinstance(checkpoint_state, dict):
             if "model_type" in checkpoint_state: 
                 meta_config = {
@@ -220,7 +220,7 @@ def main():
             raise ValueError("Could not determine checkpoint format.")
     
     lora_config = meta_config['lora_info']
-    HOOK_CONFIG = meta_config['hook_info']
+    HOOK_CONFIG = meta_config['hook_info']['config']
 
     trainer_config = {
         "model_type": meta_config['model_type'],
