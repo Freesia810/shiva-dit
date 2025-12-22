@@ -82,6 +82,12 @@ class IBTMDiTBlockHook(BaseDiTBlockHook):
 
         self.enable = any(self.merge_config.values())
 
+        if self.model_type == 'sd3':
+            total_layers = 24
+            if self.layer_idx < int(total_layers * 0.25) or self.layer_idx > int(total_layers * 0.75):
+                self.enable = False
+                print(f"  - Layer {self.layer_idx} is not enabled")
+
     @torch.no_grad()
     def select_dst_src_ind_tokens(self, x, r, generator: torch.Generator = None, **kwargs):
         if r == 0:
@@ -134,16 +140,28 @@ class IBTMDiTBlockHook(BaseDiTBlockHook):
             [src_pool_indices_orig, unimportant_indices_orig]
         )  # (N - N_dst,)
 
-        x_dst = x.gather(
-            dim=1, index=dst_indices_orig.unsqueeze(0).unsqueeze(-1).expand(B, -1, C)
-        ) # (B, N_dst, C)
-        x_src = x.gather(
-            dim=1, index=src_indices_orig.unsqueeze(0).unsqueeze(-1).expand(B, -1, C)
-        ) # (B, N - N_dst, C)
+        H = global_context.hidden_seq_height
+        W = global_context.hidden_seq_width
+        grid_y, grid_x = torch.meshgrid(torch.arange(H, device=x.device), torch.arange(W, device=x.device), indexing='ij')
+        coords = torch.stack([grid_x.flatten(), grid_y.flatten()], dim=-1).float() # (N, 2)
 
-        x_src_norm = F.normalize(x_src, dim=-1)
-        x_dst_norm = F.normalize(x_dst, dim=-1)
-        sim = x_src_norm @ x_dst_norm.transpose(-2, -1) # (B, N - N_dst, N_dst)
+        coords_dst = coords[dst_indices_orig].unsqueeze(0).expand(B, -1, -1)
+        coords_src = coords[src_indices_orig].unsqueeze(0).expand(B, -1, -1)
+        dists = torch.cdist(coords_src, coords_dst, p=2) 
+        sim = -dists
+
+        # x_dst = x.gather(
+        #     dim=1, index=dst_indices_orig.unsqueeze(0).unsqueeze(-1).expand(B, -1, C)
+        # ) # (B, N_dst, C)
+        # x_src = x.gather(
+        #     dim=1, index=src_indices_orig.unsqueeze(0).unsqueeze(-1).expand(B, -1, C)
+        # ) # (B, N - N_dst, C)
+
+        # x_src_norm = F.normalize(x_src, dim=-1)
+        # x_dst_norm = F.normalize(x_dst, dim=-1)
+        # sim = x_src_norm @ x_dst_norm.transpose(-2, -1) # (B, N - N_dst, N_dst)
+        
+        
         sim_max, sim_idx = sim.max(dim=-1)  # (B, N - N_dst)
 
         N_src_pool = src_pool_indices_orig.shape[0]
@@ -378,7 +396,7 @@ class IBTMDiTBlockHook(BaseDiTBlockHook):
         norm_encoder_hidden_states: torch.Tensor = None,
         image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ):
-        if self.merge_config.get(module_name, False) and global_context.current_iteration > 0:
+        if self.merge_config.get(module_name, False) and self.enable and global_context.current_iteration > 0:
             reduce_mode = 'prune' if global_context.current_iteration <= self.prune_timestep_ratio * global_context.num_inference_steps else 'mean'
             
             if global_context.hidden_extra_seq_len is not None:
@@ -397,7 +415,7 @@ class IBTMDiTBlockHook(BaseDiTBlockHook):
         hidden_output: torch.Tensor,
         encoder_hidden_output: torch.Tensor = None,
     ):
-        if self.merge_config.get(module_name, False) and global_context.current_iteration > 0:
+        if self.merge_config.get(module_name, False) and self.enable and global_context.current_iteration > 0:
             if global_context.hidden_extra_seq_len is not None:
                 # dual hidden states for edit task
                 k = self.indices_dict['merge_idx'].shape[0]
@@ -415,11 +433,11 @@ class IBTMDiTBlockHook(BaseDiTBlockHook):
         return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
 
 if __name__ == "__main__":
-    model_type = "flux-dev"
+    model_type = "sd3"
     pipe, model_attrs = get_pipeline(model_type)
 
     ibtm_config = {
-        "merged_ratio": 0.3,
+        "merged_ratio": 0.2,
         "merge_config": {
             "self-attn": True,
             "cross-attn": False,

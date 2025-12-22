@@ -8,10 +8,18 @@ from shiva_dit.utils import get_pipeline
 from shiva_dit.hook import HookManager
 
 from shiva_dit.shiva_hook import ShivaDitBlockHook
+from baselines.tome_sd import ToMeSDDitBlockHook
+from baselines.tofu import ToFuDitBlockHook
+from baselines.ibtm import IBTMDiTBlockHook
+from baselines.sdtm import SDTMDiTBlockHook
 from baselines.diffcr import DiffCRDitBlockHook
 from baselines.dy_dit import DynamicDiTBlockHook
 
 HOOK_CLASS_MAP = {
+    "ToMeSDDitBlockHook": ToMeSDDitBlockHook,
+    "ToFuDitBlockHook": ToFuDitBlockHook,
+    "IBTMDiTBlockHook": IBTMDiTBlockHook,
+    "SDTMDiTBlockHook": SDTMDiTBlockHook,
     "DiffCRDitBlockHook": DiffCRDitBlockHook,
     "DynamicDiTBlockHook": DynamicDiTBlockHook,
     "ShivaDitBlockHook": ShivaDitBlockHook,
@@ -28,66 +36,76 @@ def load_pipeline_for_inference(
     merge_lora: bool = True,
     meta_config: dict = None
 ):
-    if ckpt_path is None:
-        if model_type is None:
-            raise ValueError("Baseline mode: 'model_type' required.")
-        print(f"Loading Baseline Pipeline for: {model_type}")
-        pipe, model_attrs = get_pipeline(model_type, model_path=base_model_path, dtype=dtype)
-        pipe.to(device)
-        return pipe
-    
-    if not os.path.exists(ckpt_path):
-        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
-
     checkpoint_state = None
     load_format = "unknown"
 
-    if os.path.isdir(ckpt_path):
-        config_path = os.path.join(ckpt_path, "shiva_config.json")
-        
-        if os.path.exists(config_path):
-            print(f"Found metadata config at {config_path}")
-            with open(config_path, "r") as f:
-                meta_config = json.load(f)
-        
-        modular_dir = os.path.join(ckpt_path, "modular_weights")
-        if os.path.exists(modular_dir):
-            load_format = "modular"
-            print("Detected Format 2: Modular Weights Directory")
+    if ckpt_path is None:
+        if meta_config is None:
+            if model_type is None:
+                raise ValueError("Baseline mode: 'model_type' required.")
+            
+            print(f"Loading Baseline Pipeline for: {model_type}")
+            pipe, model_attrs = get_pipeline(model_type, model_path=base_model_path, dtype=dtype)
+            pipe.to(device)
+            return pipe
         else:
-            potential_weights = glob.glob(os.path.join(ckpt_path, "*model*.safetensors")) + \
-                                glob.glob(os.path.join(ckpt_path, "*model*.bin"))
-            if potential_weights:
-                load_format = "accelerator"
-                weights_path = potential_weights[0]
-                print(f"Detected Format 1: Accelerator State Directory (Found {os.path.basename(weights_path)})")
-                
-                if weights_path.endswith(".safetensors"):
-                    from safetensors.torch import load_file as load_safetensors
-                    checkpoint_state = load_safetensors(weights_path, device="cpu")
-                else:
-                    checkpoint_state = torch.load(weights_path, map_location="cpu")
+            if 'model_type' in meta_config:
+                model_type = meta_config['model_type']
             else:
-                raise ValueError("Could not determine checkpoint format.")
+                raise ValueError("Meta Config mode: 'model_type' required.")
+            print(f"Loading Meta Pipeline for: {model_type}")
+            pipe, model_attrs = get_pipeline(model_type, model_path=base_model_path, dtype=dtype)
+            pipe.to(device)
+    else:
+        if not os.path.exists(ckpt_path):
+            raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 
-    elif os.path.isfile(ckpt_path):
-        load_format = "single_file"
-        print("Detected Format 3: Single PT File")
-        checkpoint_state = torch.load(ckpt_path, map_location="cpu")
-        if isinstance(checkpoint_state, dict):
-            if "model_type" in checkpoint_state: 
-                meta_config = {
-                    "model_type": checkpoint_state.get("model_type"),
-                    "training_mode": checkpoint_state.get("training_mode"),
-                    "hook_info": checkpoint_state.get("hook_info"),
-                    "lora_info": checkpoint_state.get("lora_info"),
-                }
-                checkpoint_state = checkpoint_state.get("model") # Extract weights
+        if os.path.isdir(ckpt_path):
+            config_path = os.path.join(ckpt_path, "shiva_config.json")
+            
+            if os.path.exists(config_path):
+                print(f"Found metadata config at {config_path}")
+                with open(config_path, "r") as f:
+                    meta_config = json.load(f)
+            
+            modular_dir = os.path.join(ckpt_path, "modular_weights")
+            if os.path.exists(modular_dir):
+                load_format = "modular"
+                print("Detected Format 2: Modular Weights Directory")
+            else:
+                potential_weights = glob.glob(os.path.join(ckpt_path, "*model*.safetensors")) + \
+                                    glob.glob(os.path.join(ckpt_path, "*model*.bin"))
+                if potential_weights:
+                    load_format = "accelerator"
+                    weights_path = potential_weights[0]
+                    print(f"Detected Format 1: Accelerator State Directory (Found {os.path.basename(weights_path)})")
+                    
+                    if weights_path.endswith(".safetensors"):
+                        from safetensors.torch import load_file as load_safetensors
+                        checkpoint_state = load_safetensors(weights_path, device="cpu")
+                    else:
+                        checkpoint_state = torch.load(weights_path, map_location="cpu")
+                else:
+                    raise ValueError("Could not determine checkpoint format.")
+
+        elif os.path.isfile(ckpt_path):
+            load_format = "single_file"
+            print("Detected Format 3: Single PT File")
+            checkpoint_state = torch.load(ckpt_path, map_location="cpu")
+            if isinstance(checkpoint_state, dict):
+                if "model_type" in checkpoint_state: 
+                    meta_config = {
+                        "model_type": checkpoint_state.get("model_type"),
+                        "training_mode": checkpoint_state.get("training_mode"),
+                        "hook_info": checkpoint_state.get("hook_info"),
+                        "lora_info": checkpoint_state.get("lora_info"),
+                    }
+                    checkpoint_state = checkpoint_state.get("model") # Extract weights
+                else:
+                    raise ValueError("Could not determine checkpoint format.")
             else:
                 raise ValueError("Could not determine checkpoint format.")
-        else:
-            raise ValueError("Could not determine checkpoint format.")
-    
+        
     resolved_model_type = meta_config.get("model_type", model_type)
     if resolved_model_type is None:
         raise ValueError("Could not determine 'model_type' from checkpoint or arguments.")

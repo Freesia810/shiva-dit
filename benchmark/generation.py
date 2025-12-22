@@ -475,7 +475,4 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    if args.ckpt_path is None and args.model_type is None:
-        parser.error("Please provide --ckpt_path or --model_type")
-
     main(args)

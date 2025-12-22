@@ -1004,7 +1004,7 @@ class SDTMDiTBlockHook(BaseDelegator, BaseDiTBlockHook):
 
 
 if __name__ == "__main__":
-    model_type = "flux-dev"
+    model_type = "sd3"
     pipe, model_attrs = get_pipeline(model_type)
 
     generator = torch.Generator("cuda").manual_seed(0)
@@ -1012,11 +1012,11 @@ if __name__ == "__main__":
     sdtm_config = {
         "stride": (2, 2),
         "switch_step_fraction": 0.4,
-        "init_ratio": 0.3,
+        "init_ratio": 0.5,
         "deviation": 0.2,
         "alpha_s": 0.05,
-        "mcw": 0.1,
-        "protected_step_stride": 1,
+        "mcw": 0.2,
+        "protected_step_stride": 3,
         "generator": generator,
     }
 
