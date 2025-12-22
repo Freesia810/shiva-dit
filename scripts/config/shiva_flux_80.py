@@ -7,7 +7,7 @@ hook_config = {
 
     "image_ratio_mode": "adaptive",
     "fixed_image_ratio": 0.8,
-    "num_router_groups": 12,
+    "num_router_groups": 28,
     "bottleneck_dim": 64,
     "ratio_bottleneck_dim": 256,
     "layer_embed_dim": 64,
@@ -23,12 +23,14 @@ lora_config = {
     "rank": 32,
     "lora_alpha": 32,
     "target_modules": [
+        "norm1.linear", "norm1_context.linear", "norm.linear",
         "to_q", "to_k", "to_v", "to_out.0",
         "add_q_proj", "add_k_proj", "add_v_proj", "to_add_out",
         "net.0.proj", "net.2",
-        "proj_mlp", "proj_out",
-        # "norm.linear", "norm1.linear", "norm1_context.linear", "norm_out.linear",
-    ]
+        "single_transformer_blocks.proj_mlp", "single_transformer_blocks.proj_out",
+        "proj_out",
+    ],
+    "use_dora": False,
 }
 
 trainer_config = {
