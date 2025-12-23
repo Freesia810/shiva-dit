@@ -69,5 +69,5 @@ trainer_config = {
 }
 
 config = TrainerConfig(**trainer_config)
-trainer = DiffusionModelTrainer(config=config, static_graph=False)
+trainer = DiffusionModelTrainer(config=config, static_graph=True, find_unused_parameters=True)
 trainer.train()

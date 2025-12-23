@@ -17,6 +17,7 @@ from shiva_dit.utils import (
 class SparseDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
     """
     SparseDiT: Token Sparsification for Efficient Diffusion Transformer
+    Only for SD3 Now
     Reference:
         - Paper: https://arxiv.org/abs/2412.06028
     """
@@ -35,12 +36,6 @@ class SparseDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.r_min = r_min
         self.r_max = r_max
 
-        self.recovery_projs = nn.ModuleList()
-        for _ in sdtm_ranges:
-            self.recovery_projs.append(
-                nn.ModuleDict({"w1": nn.Identity(), "w2": nn.Identity()})
-            )
-
     def on_register_hook(self, block: nn.Module):
         hidden_dim = global_context.hidden_dim
         if hidden_dim is None:
@@ -48,21 +43,25 @@ class SparseDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         device = next(block.parameters()).device
         dtype = next(block.parameters()).dtype
+        
+        layer_idx = self.layer_idx 
 
-        # X_merged = Upsample(Xs)W1 + XW2
-        for i in range(len(self.sdtm_ranges)):
-            self.recovery_projs[i]["w1"] = nn.Linear(hidden_dim, hidden_dim).to(
-                device, dtype
-            )
-            self.recovery_projs[i]["w2"] = nn.Linear(hidden_dim, hidden_dim).to(
-                device, dtype
-            )
+        is_rec = False
+        for i, (start, end) in enumerate(self.sdtm_ranges):
+            if layer_idx == end:
+                is_rec = True
+                break
+        
+        if is_rec:
+            self.recovery_projs = nn.ModuleList()
+            self.recovery_projs.append(nn.Linear(hidden_dim, hidden_dim).to(device, dtype))
+            self.recovery_projs.append(nn.Linear(hidden_dim, hidden_dim).to(device, dtype))
 
-            nn.init.zeros_(self.recovery_projs[i]["w1"].weight)
-            nn.init.zeros_(self.recovery_projs[i]["w1"].bias)
-            nn.init.eye_(self.recovery_projs[i]["w2"].weight)
-            nn.init.zeros_(self.recovery_projs[i]["w2"].bias)
-
+            nn.init.zeros_(self.recovery_projs[0].weight)
+            nn.init.zeros_(self.recovery_projs[0].bias)
+            nn.init.eye_(self.recovery_projs[1].weight)
+            nn.init.zeros_(self.recovery_projs[1].bias)
+        
         self.to(device, dtype)
 
     def get_current_pruning_rate(self):
@@ -72,9 +71,13 @@ class SparseDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         ):
             raise ValueError("global_context.current_timestep is not set")
 
-        i = global_context.current_iteration
-        T = global_context.num_inference_steps
-        t = T - i
+        if self.training:
+            T = 1000.0
+            t = global_context.current_timestep.item()
+        else:
+            i = global_context.current_iteration
+            T = global_context.num_inference_steps
+            t = T - i
 
         threshold = T / 4.0
 
@@ -342,9 +345,7 @@ class SparseDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             x_upsampled = x_upsampled.flatten(2).transpose(1, 2)
 
             # Fuse with Original Dense -> Merged Residual Base
-            w1 = self.recovery_projs[group_id]["w1"]
-            w2 = self.recovery_projs[group_id]["w2"]
-            x_residual = w1(x_upsampled) + w2(x_dense_orig)
+            x_residual = self.recovery_projs[0](x_upsampled) + self.recovery_projs[1](x_dense_orig)
 
             # Norm Merged Dense -> Dense Query
             norm_x_merged, *modulations = module_self.norm1(x_residual, emb=temb)

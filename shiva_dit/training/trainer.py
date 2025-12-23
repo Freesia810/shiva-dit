@@ -123,7 +123,7 @@ except ImportError:
 
 
 class DiffusionModelTrainer:
-    def __init__(self, config: TrainerConfig, load_evaluators: bool = True, static_graph: bool = True):
+    def __init__(self, config: TrainerConfig, load_evaluators: bool = True, static_graph: bool = True, find_unused_parameters: bool = False):
         self.config = config
         self.model_type = config.model_type
         self.current_stage_idx = -1
@@ -131,7 +131,7 @@ class DiffusionModelTrainer:
         self.input_preparer_fn = get_input_preparer(self.model_type)
 
         ## Initialize accelerator, device, seed and generator
-        ddp_kwargs = DistributedDataParallelKwargs(static_graph=static_graph)
+        ddp_kwargs = DistributedDataParallelKwargs(static_graph=static_graph, find_unused_parameters=find_unused_parameters)
         self.accelerator = Accelerator(
             mixed_precision=config.mixed_precision,
             gradient_accumulation_steps=config.gradient_accumulation_steps,
@@ -393,6 +393,8 @@ class DiffusionModelTrainer:
                 self.hook_type = "dydit"
             elif hook_class.__name__ == "DiffCRDitBlockHook":
                 self.hook_type = "diffcr"
+            elif hook_class.__name__ == "SparseDiTBlockHook":
+                self.hook_type = "sparse"
             elif hook_class.__name__ == "ShivaDitBlockHook":
                 self.hook_type = "shiva"
                 hook_kwargs["capture_mask_for_viz"] = True
@@ -780,6 +782,7 @@ class DiffusionModelTrainer:
                 self.config.learning_rate,
                 self.config.weight_decay,
             ),
+            "recovery_projs": ("recovery_projs", self.config.learning_rate, self.config.weight_decay),
         }
 
         # group_name -> list[params]
@@ -838,6 +841,8 @@ class DiffusionModelTrainer:
 
                 # dydit
                 "dynamic_token_selector",
+                # sparse-dit
+                "recovery_projs",
             ]
 
             for grp in display_order:
