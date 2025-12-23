@@ -89,47 +89,108 @@ class SparseDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         return r
 
     def _manual_attention(self, attn_module, x_q, x_kv, encoder_hidden_states=None):
-        if hasattr(attn_module, "to_q"):
-            q = attn_module.to_q(x_q)
-            k = attn_module.to_k(x_kv)
-            v = attn_module.to_v(x_kv)
+        # 1. Project Image Stream
+        q = attn_module.to_q(x_q)
+        k = attn_module.to_k(x_kv)
+        v = attn_module.to_v(x_kv)
+
+        # 2. Project Context Stream (If exists)
+        q_ctx = None
+        if encoder_hidden_states is not None:
+            if hasattr(attn_module, "add_k_proj"):
+                k_ctx = attn_module.add_k_proj(encoder_hidden_states)
+                v_ctx = attn_module.add_v_proj(encoder_hidden_states)
+                q_ctx = attn_module.add_q_proj(encoder_hidden_states)
+
+                # Concatenate along sequence dim
+                k = torch.cat([k, k_ctx], dim=1)
+                v = torch.cat([v, v_ctx], dim=1)
+
+        # 3. Multi-Head Split
+        B = q.shape[0]
+        num_heads = attn_module.heads
+        head_dim = q.shape[-1] // num_heads
+
+        def _split_heads(x):
+            return x.view(B, -1, num_heads, head_dim).transpose(1, 2)
+
+        q = _split_heads(q)
+        k = _split_heads(k)
+        v = _split_heads(v)
+
+        out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
+        out = out.transpose(1, 2).reshape(B, -1, q.shape[-1] * num_heads)
+        out = attn_module.to_out[0](out)
+
+        context_out = None
+        if q_ctx is not None:
+            q_ctx = _split_heads(q_ctx)
+            out_ctx = F.scaled_dot_product_attention(q_ctx, k, v, dropout_p=0.0)
+            out_ctx = out_ctx.transpose(1, 2).reshape(
+                B, -1, q_ctx.shape[-1] * num_heads
+            )
+            if hasattr(attn_module, "to_add_out"):
+                context_out = attn_module.to_add_out(out_ctx)
+
+        return out, context_out
+
+    def _apply_sd3_block_logic(
+        self,
+        module_self,
+        hidden_states,
+        encoder_hidden_states,
+        x_q_norm,
+        x_kv_norm,
+        norm_encoder_hidden_states,
+        modulations,  # (gate_msa, shift_mlp, scale_mlp, gate_mlp)
+        context_modulations,  # (c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp) or None
+    ):
+        gate_msa, shift_mlp, scale_mlp, gate_mlp = modulations
+
+        # Unpack context modulations safely
+        if context_modulations is not None:
+            c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp = context_modulations
         else:
-            raise NotImplementedError(
-                "Unknown attention module structure (packed QKV not supported)"
+            c_gate_msa = c_shift_mlp = c_scale_mlp = c_gate_mlp = None
+
+        attn_output, context_attn_output = self._manual_attention(
+            module_self.attn,
+            x_q=x_q_norm,
+            x_kv=x_kv_norm,
+            encoder_hidden_states=norm_encoder_hidden_states,
+        )
+
+        # Residual 1 (Attention)
+        hidden_states = hidden_states + gate_msa.unsqueeze(1) * attn_output
+        if encoder_hidden_states is not None and context_attn_output is not None:
+            encoder_hidden_states = (
+                encoder_hidden_states + c_gate_msa.unsqueeze(1) * context_attn_output
             )
 
+        # === 2. FFN ===
+        # Image Stream FFN
+        norm_hidden_states = module_self.norm2(hidden_states)
+        norm_hidden_states = norm_hidden_states * (
+            1 + scale_mlp.unsqueeze(1)
+        ) + shift_mlp.unsqueeze(1)
+        ff_output = module_self.ff(norm_hidden_states)
+        hidden_states = hidden_states + gate_mlp.unsqueeze(1) * ff_output
+
+        # Context Stream FFN
         if encoder_hidden_states is not None:
-            if hasattr(attn_module, "add_k_proj") and hasattr(
-                attn_module, "add_v_proj"
-            ):
-                k_context = attn_module.add_k_proj(encoder_hidden_states)
-                v_context = attn_module.add_v_proj(encoder_hidden_states)
+            norm_encoder_hidden_states = module_self.norm2_context(
+                encoder_hidden_states
+            )
+            norm_encoder_hidden_states = norm_encoder_hidden_states * (
+                1 + c_scale_mlp.unsqueeze(1)
+            ) + c_shift_mlp.unsqueeze(1)
+            context_ff_output = module_self.ff_context(norm_encoder_hidden_states)
 
-                k = torch.cat([k, k_context], dim=1)
-                v = torch.cat([v, v_context], dim=1)
+            encoder_hidden_states = (
+                encoder_hidden_states + c_gate_mlp.unsqueeze(1) * context_ff_output
+            )
 
-        # 3. Split Heads
-        B, N_q, C = q.shape
-        B, N_kv, _ = k.shape
-
-        num_heads = attn_module.heads
-        head_dim = C // num_heads
-
-        q = q.view(B, N_q, num_heads, head_dim).transpose(1, 2)
-        k = k.view(B, N_kv, num_heads, head_dim).transpose(1, 2)
-        v = v.view(B, N_kv, num_heads, head_dim).transpose(1, 2)
-
-        # 4. Scaled Dot Product Attention
-        out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
-
-        out = out.transpose(1, 2).reshape(B, N_q, C)
-
-        # 5. Output Projection
-        if hasattr(attn_module, "to_out"):
-            out = attn_module.to_out[0](out)
-            out = attn_module.to_out[1](out)
-
-        return out
+        return encoder_hidden_states, hidden_states
 
     def delegated_call(self, func, module_self, *args, **kwargs):
         sig = inspect.signature(func)
@@ -138,13 +199,12 @@ class SparseDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         hidden_states = bound.arguments.get("hidden_states", None)
         encoder_hidden_states = bound.arguments.get("encoder_hidden_states", None)
+        temb = bound.arguments.get("temb", None)
         image_rotary_emb = bound.arguments.get("image_rotary_emb", None)
 
         if image_rotary_emb is not None:
             raise ValueError(
-                "SparseDiT baseline does not support explicit `image_rotary_emb` input. "
-                "Because pooling disrupts the spatial grid required for pre-computed RoPE. "
-                "Please set image_rotary_emb=None or modify the model to re-compute RoPE dynamically."
+                "SparseDiT does not support explicit image_rotary_emb. Set it to None."
             )
 
         layer_idx = self.layer_idx
@@ -152,20 +212,22 @@ class SparseDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         # === 1. Poolingformer (Bottom Layers) ===
         if layer_idx in self.poolingformer_layers:
-            residual = hidden_states
-            x = module_self.norm1(hidden_states)
-            v = module_self.attn.to_v(x)
-            v_mean = v.mean(dim=1, keepdim=True)
-            x = residual + v_mean
-
-            residual = x
-            x = module_self.norm2(x)
-            x = module_self.ffn(x)
-            x = x + residual
-
-            return (
-                (encoder_hidden_states, x) if encoder_hidden_states is not None else x
+            norm_hidden_states, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
+                module_self.norm1(hidden_states, emb=temb)
             )
+            v = module_self.attn.to_v(norm_hidden_states)
+            v_mean = v.mean(dim=1, keepdim=True)
+            hidden_states = hidden_states + gate_msa.unsqueeze(1) * v_mean
+
+            norm_hidden_states = module_self.norm2(hidden_states)
+            norm_hidden_states = norm_hidden_states * (
+                1 + scale_mlp.unsqueeze(1)
+            ) + shift_mlp.unsqueeze(1)
+
+            ff_output = module_self.ff(norm_hidden_states)
+            hidden_states = hidden_states + gate_mlp.unsqueeze(1) * ff_output
+
+            return (encoder_hidden_states, hidden_states)
 
         # Determine SDTM Role
         sdtm_role = None
@@ -189,48 +251,47 @@ class SparseDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         # === 2. SDTM Logic ===
 
+        norm_encoder_hidden_states = None
+        context_modulations = None
+        if encoder_hidden_states is not None:
+            res_ctx = module_self.norm1_context(encoder_hidden_states, emb=temb)
+            norm_encoder_hidden_states = res_ctx[0]
+            context_modulations = res_ctx[
+                1:
+            ]  # (c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp)
+
+        x_residual = None
+        x_q_norm = None
+        x_kv_norm = None
+        modulations = None  # (gate_msa, shift_mlp, scale_mlp, gate_mlp)
+
         # A. Sparse Generation (Gen)
         if sdtm_role == "gen":
             self.dense_buffer[group_id] = hidden_states
             r = self.get_current_pruning_rate()
 
+            norm_hidden_states, *modulations = module_self.norm1(
+                hidden_states, emb=temb
+            )
+
             ratio = math.sqrt((1 - r))
             H_new, W_new = int(H * ratio), int(W * ratio)
 
-            # Pooling (Dense -> Sparse)
-            x_dense = hidden_states.transpose(1, 2).view(
+            # Downsample Normed Dense -> Sparse Query
+            x_norm_dense_2d = norm_hidden_states.transpose(1, 2).view(
                 hidden_states.shape[0], -1, H, W
             )
-            x_sparse = F.adaptive_avg_pool2d(x_dense, (H_new, W_new))
-            x_sparse = x_sparse.flatten(2).transpose(1, 2)
+            x_q_norm = F.adaptive_avg_pool2d(x_norm_dense_2d, (H_new, W_new))
+            x_q_norm = x_q_norm.flatten(2).transpose(1, 2)
 
-            # Manual Attention (Sparse Q, Dense K/V + Text)
-            x_norm_dense = module_self.norm1(hidden_states)
-            x_norm_sparse = module_self.norm1(x_sparse)
-
-            attn_out = self._manual_attention(
-                module_self.attn,
-                x_q=x_norm_sparse,
-                x_kv=x_norm_dense,
-                encoder_hidden_states=encoder_hidden_states,
+            x_kv_norm = norm_hidden_states
+            x_dense_2d = hidden_states.transpose(1, 2).view(
+                hidden_states.shape[0], -1, H, W
             )
+            x_residual = F.adaptive_avg_pool2d(x_dense_2d, (H_new, W_new))
+            x_residual = x_residual.flatten(2).transpose(1, 2)
 
-            x_sparse = x_sparse + attn_out
-
-            # FFN
-            residual = x_sparse
-            x_sparse = module_self.norm2(x_sparse)
-            x_sparse = module_self.ffn(x_sparse)
-            x_sparse = x_sparse + residual
-
-            final_hidden = x_sparse
-            return (
-                (encoder_hidden_states, final_hidden)
-                if encoder_hidden_states is not None
-                else final_hidden
-            )
-
-        # B. Sparse Transformers
+        # B. Sparse Transformers (Sparse)
         elif sdtm_role == "sparse":
             return func(module_self, *args, **kwargs)
 
@@ -243,44 +304,40 @@ class SparseDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             ratio = math.sqrt(M / (H * W))
             H_new, W_new = int(H * ratio), int(W * ratio)
 
-            # Upsample (Sparse -> Dense)
+            # Upsample Sparse -> Dense
             x_sparse_2d = x_sparse.transpose(1, 2).view(
                 x_sparse.shape[0], -1, H_new, W_new
             )
             x_upsampled = F.interpolate(x_sparse_2d, size=(H, W), mode="nearest")
             x_upsampled = x_upsampled.flatten(2).transpose(1, 2)
 
-            # Linear Fusion
+            # Fuse with Original Dense -> Merged Residual Base
             w1 = self.recovery_projs[group_id]["w1"]
             w2 = self.recovery_projs[group_id]["w2"]
-            x_merged = w1(x_upsampled) + w2(x_dense_orig)
+            x_residual = w1(x_upsampled) + w2(x_dense_orig)
 
-            # Manual Attention (Dense Q, Sparse K/V + Text)
-            x_norm_merged = module_self.norm1(x_merged)
-            x_norm_sparse = module_self.norm1(x_sparse)
+            # Norm Merged Dense -> Dense Query
+            norm_x_merged, *modulations = module_self.norm1(x_residual, emb=temb)
+            x_q_norm = norm_x_merged
 
-            attn_out = self._manual_attention(
-                module_self.attn,
-                x_q=x_norm_merged,
-                x_kv=x_norm_sparse,
-                encoder_hidden_states=encoder_hidden_states,
+            # Downsample Normed Merged -> Sparse KV
+            norm_x_merged_2d = norm_x_merged.transpose(1, 2).view(
+                x_residual.shape[0], -1, H, W
             )
+            x_kv_norm = F.adaptive_avg_pool2d(norm_x_merged_2d, (H_new, W_new))
+            x_kv_norm = x_kv_norm.flatten(2).transpose(1, 2)
 
-            x_dense = x_merged + attn_out
-
-            # FFN
-            residual = x_dense
-            x_dense = module_self.norm2(x_dense)
-            x_dense = module_self.ffn(x_dense)
-            x_dense = x_dense + residual
-
-            return (
-                (encoder_hidden_states, x_dense)
-                if encoder_hidden_states is not None
-                else x_dense
-            )
-
-        return func(module_self, *args, **kwargs)
+        # === Execute Common Logic ===
+        return self._apply_sd3_block_logic(
+            module_self,
+            hidden_states=x_residual,
+            encoder_hidden_states=encoder_hidden_states,
+            x_q_norm=x_q_norm,
+            x_kv_norm=x_kv_norm,
+            norm_encoder_hidden_states=norm_encoder_hidden_states,
+            modulations=modulations,
+            context_modulations=context_modulations,
+        )
 
 
 if __name__ == "__main__":
