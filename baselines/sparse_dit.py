@@ -35,9 +35,6 @@ class SparseDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.r_min = r_min
         self.r_max = r_max
 
-        # Key: sdtm_group_index, Value: Tensor
-        self.dense_buffer = {}
-
         self.recovery_projs = nn.ModuleList()
         for _ in sdtm_ranges:
             self.recovery_projs.append(
@@ -60,6 +57,7 @@ class SparseDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             self.recovery_projs[i]["w2"] = nn.Linear(hidden_dim, hidden_dim).to(
                 device, dtype
             )
+
             nn.init.zeros_(self.recovery_projs[i]["w1"].weight)
             nn.init.zeros_(self.recovery_projs[i]["w1"].bias)
             nn.init.eye_(self.recovery_projs[i]["w2"].weight)
@@ -89,50 +87,83 @@ class SparseDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         return r
 
     def _manual_attention(self, attn_module, x_q, x_kv, encoder_hidden_states=None):
-        # 1. Project Image Stream
-        q = attn_module.to_q(x_q)
-        k = attn_module.to_k(x_kv)
-        v = attn_module.to_v(x_kv)
+        batch_size = x_q.shape[0]
 
-        # 2. Project Context Stream (If exists)
-        q_ctx = None
+        # 1. Image Stream Projections (`sample` projections)
+        query = attn_module.to_q(x_q)
+        key = attn_module.to_k(x_kv)
+        value = attn_module.to_v(x_kv)
+
+        inner_dim = key.shape[-1]
+        head_dim = inner_dim // attn_module.heads
+
+        def split_heads(x):
+            return x.view(batch_size, -1, attn_module.heads, head_dim).transpose(1, 2)
+
+        query = split_heads(query)
+        key = split_heads(key)
+        value = split_heads(value)
+
+        if attn_module.norm_q is not None:
+            query = attn_module.norm_q(query)
+        if attn_module.norm_k is not None:
+            key = attn_module.norm_k(key)
+
+        # 2. Context Stream Projections & Concatenation (`context` projections)
         if encoder_hidden_states is not None:
-            if hasattr(attn_module, "add_k_proj"):
-                k_ctx = attn_module.add_k_proj(encoder_hidden_states)
-                v_ctx = attn_module.add_v_proj(encoder_hidden_states)
-                q_ctx = attn_module.add_q_proj(encoder_hidden_states)
+            # Project
+            enc_query = attn_module.add_q_proj(encoder_hidden_states)
+            enc_key = attn_module.add_k_proj(encoder_hidden_states)
+            enc_value = attn_module.add_v_proj(encoder_hidden_states)
 
-                # Concatenate along sequence dim
-                k = torch.cat([k, k_ctx], dim=1)
-                v = torch.cat([v, v_ctx], dim=1)
+            # Reshape
+            enc_query = split_heads(enc_query)
+            enc_key = split_heads(enc_key)
+            enc_value = split_heads(enc_value)
 
-        # 3. Multi-Head Split
-        B = q.shape[0]
-        num_heads = attn_module.heads
-        head_dim = q.shape[-1] // num_heads
+            # Norm
+            if attn_module.norm_added_q is not None:
+                enc_query = attn_module.norm_added_q(enc_query)
+            if attn_module.norm_added_k is not None:
+                enc_key = attn_module.norm_added_k(enc_key)
 
-        def _split_heads(x):
-            return x.view(B, -1, num_heads, head_dim).transpose(1, 2)
+            # Joint Attention: Concatenate along sequence dim (dim=2)
+            query = torch.cat([query, enc_query], dim=2)
+            key = torch.cat([key, enc_key], dim=2)
+            value = torch.cat([value, enc_value], dim=2)
 
-        q = _split_heads(q)
-        k = _split_heads(k)
-        v = _split_heads(v)
+        # 3. Attention Calculation
+        hidden_states = F.scaled_dot_product_attention(query, key, value, dropout_p=0.0, is_causal=False)
 
-        out = F.scaled_dot_product_attention(q, k, v, dropout_p=0.0)
-        out = out.transpose(1, 2).reshape(B, -1, q.shape[-1] * num_heads)
-        out = attn_module.to_out[0](out)
+        # 4. Reshape Output
+        hidden_states = hidden_states.transpose(1, 2).reshape(batch_size, -1, attn_module.heads * head_dim)
+        hidden_states = hidden_states.to(query.dtype)
 
-        context_out = None
-        if q_ctx is not None:
-            q_ctx = _split_heads(q_ctx)
-            out_ctx = F.scaled_dot_product_attention(q_ctx, k, v, dropout_p=0.0)
-            out_ctx = out_ctx.transpose(1, 2).reshape(
-                B, -1, q_ctx.shape[-1] * num_heads
-            )
-            if hasattr(attn_module, "to_add_out"):
-                context_out = attn_module.to_add_out(out_ctx)
+        # 5. Split and Output Projections
+        encoder_out = None
 
-        return out, context_out
+        if encoder_hidden_states is not None:
+            # Split the attention outputs back into Image and Context
+            # x_q.shape[1] is the sequence length of the image part
+            img_seq_len = x_q.shape[1]
+            
+            img_hidden_states = hidden_states[:, :img_seq_len]
+            enc_hidden_states = hidden_states[:, img_seq_len:]
+
+            # Context output projection
+            if not getattr(attn_module, "context_pre_only", False):
+                encoder_out = attn_module.to_add_out(enc_hidden_states)
+            
+            hidden_states = img_hidden_states
+
+        # Image output projection (linear)
+        hidden_states = attn_module.to_out[0](hidden_states)
+        
+        # Image output dropout (if present in to_out list)
+        if len(attn_module.to_out) > 1:
+            hidden_states = attn_module.to_out[1](hidden_states)
+
+        return hidden_states, encoder_out
 
     def _apply_sd3_block_logic(
         self,
@@ -250,15 +281,14 @@ class SparseDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             return func(module_self, *args, **kwargs)
 
         # === 2. SDTM Logic ===
-
         norm_encoder_hidden_states = None
         context_modulations = None
         if encoder_hidden_states is not None:
             res_ctx = module_self.norm1_context(encoder_hidden_states, emb=temb)
             norm_encoder_hidden_states = res_ctx[0]
-            context_modulations = res_ctx[
-                1:
-            ]  # (c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp)
+
+            # (c_gate_msa, c_shift_mlp, c_scale_mlp, c_gate_mlp)
+            context_modulations = res_ctx[1:]  
 
         x_residual = None
         x_q_norm = None
@@ -267,7 +297,7 @@ class SparseDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         # A. Sparse Generation (Gen)
         if sdtm_role == "gen":
-            self.dense_buffer[group_id] = hidden_states
+            HookManager.set_global(f"dense_buffer_{group_id}", hidden_states)
             r = self.get_current_pruning_rate()
 
             norm_hidden_states, *modulations = module_self.norm1(
@@ -298,7 +328,7 @@ class SparseDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         # C. Dense Recovery (Rec)
         elif sdtm_role == "rec":
             x_sparse = hidden_states
-            x_dense_orig = self.dense_buffer[group_id]
+            x_dense_orig = HookManager.get_global(f"dense_buffer_{group_id}")
 
             M = x_sparse.shape[1]
             ratio = math.sqrt(M / (H * W))
@@ -345,10 +375,10 @@ if __name__ == "__main__":
     pipe, model_attrs = get_pipeline(model_type)
 
     sparsedit_config = {
-        "sdtm_ranges": [(2, 6), (10, 14)],
-        "poolingformer_layers": [0, 1],
+        "sdtm_ranges": [(2, 6)],
+        "poolingformer_layers": [-1],
         "r_min": 0.0,
-        "r_max": 0.5,
+        "r_max": 0.0,
     }
 
     HookManager.configure_hooks(
