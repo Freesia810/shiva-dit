@@ -3,7 +3,7 @@ import pandas as pd
 import matplotlib.font_manager as fm
 import numpy as np
 
-FIG_WIDTH = 3.25   # ICML单栏标准宽度
+FIG_WIDTH = 3.25
 FIG_HEIGHT = 2.1   
 FONT_PATH = './Times New Roman.ttf'
 CSV_PATH = './efficiency_data.csv'
@@ -92,7 +92,6 @@ for i, row in df.iterrows():
                  textcoords='offset points', fontsize=6.5, ha=settings[2], va=settings[3], 
                  fontweight=weight, color=color, zorder=15)
 
-# --- 8. Final Labels (紧凑版) ---
 plt.xlabel('Inference Latency (ms)', fontweight='bold', labelpad=2)
 plt.ylabel('FID', fontweight='bold', labelpad=1)
 
