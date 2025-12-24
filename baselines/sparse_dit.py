@@ -71,7 +71,8 @@ class SparseDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         ):
             raise ValueError("global_context.current_timestep is not set")
 
-        if self.training:
+        if global_context.current_iteration is None:
+            # training or val
             T = 1000.0
             t = global_context.current_timestep.item()
         else:
