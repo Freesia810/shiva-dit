@@ -4,10 +4,10 @@ from baselines.sparse_dit import SparseDiTBlockHook
 HookType = SparseDiTBlockHook
 
 hook_config = {
-    "poolingformer_layers": [0, 1], 
-    "sdtm_ranges": [(2, 22)], 
-    "r_min": 0.61,
-    "r_max": 0.86,
+    "poolingformer_layers": [0], 
+    "sdtm_ranges": [(1, 22)], 
+    "r_min": 0.1,
+    "r_max": 0.3,
 }
 
 lora_config = {
@@ -22,12 +22,9 @@ lora_config = {
         "add_q_proj",
         "add_k_proj",
         "add_v_proj",
-        "linear",
-        "proj_mlp",
         "net.2", 
     ],
-    "modules_to_save": ["norm1", "norm1_context", "proj_out"],
-    "use_dora": True,
+    "use_dora": False,
 }
 
 trainer_config = {
