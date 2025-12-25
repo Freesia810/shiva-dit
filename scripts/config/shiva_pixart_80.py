@@ -5,7 +5,7 @@ HookType = ShivaDitBlockHook
 hook_config = {
     "shiva_mode": "image",
     "image_ratio_mode": "adaptive",
-    "fixed_image_ratio": 0.8,
+    "fixed_image_ratio": 0.9,
     "num_router_groups": 14,
     "bottleneck_dim": 64,
     "ratio_bottleneck_dim": 256,
@@ -18,24 +18,17 @@ hook_config = {
 
 lora_config = {
     "enable": True,
-    "rank": 32,
-    "lora_alpha": 32,
+    "rank": 64,
+    "lora_alpha": 128,
     "target_modules": [
-        "to_q",
-        "to_k",
-        "to_v",
-        "to_out.0",
-        "add_q_proj",
-        "add_k_proj",
-        "add_v_proj",
-        "to_add_out",
-        "net.0.proj",
-        "net.2",
+        "to_q", "to_k", "to_v", "to_out.0",
+        "add_q_proj", "add_k_proj", "add_v_proj", "to_add_out",
+        "net.0.proj", "net.2",
         "proj_mlp",
-        "proj_out",
+        "proj_out"
     ],
     "modules_to_save": [
-        "norm1",
+        "norm1", 
         "norm1_context",
         "norm_out",
     ],
@@ -56,6 +49,8 @@ trainer_config = {
     "train_batch_size": 1,
     "gradient_accumulation_steps": 2,
     "optimizer": "AdamW",
+    "learning_rate": 1e-4,
+    "lora_learning_rate": 1e-4,
     "weight_decay": 1e-2,
     "distillation_final_weight": 1.0,
     "distillation_middle_weight": 0.0,
@@ -75,7 +70,7 @@ trainer_config = {
     "inference_output_dir": "inference_samples",
     "mixed_precision": "bf16",
     "extra_config": {
-        "target_ratio": 0.8,
+        "target_ratio": 0.9,
         "stage_schedule": [
             # router stage
             {
@@ -128,13 +123,13 @@ trainer_config = {
                 "weights": {
                     "ratio": [0.0, 0.0, 0.0],
                     "gate": 0.0,
-                    "distill": [0.1, 1.0],
+                    "distill": [2.0, 0.0],
                 },
                 "lr": {
-                    "lora": 1e-5,
+                    "lora": 1e-4,
                     "router": 1e-5,
                 },
-                "temp": [15.0, 15.0, 30.0, 100.0],
+                "temp": [15.0, 15.0, 30.0, 33.0],
             },
         ],
     },
