@@ -15,6 +15,7 @@ from baselines.sdtm import SDTMDiTBlockHook
 from baselines.toma import ToMADitBlockHook
 from baselines.diffcr import DiffCRDitBlockHook
 from baselines.dy_dit import DynamicDiTBlockHook
+from baselines.sparse_dit import SparseDiTBlockHook
 
 HOOK_CLASS_MAP = {
     "ToMeSDDitBlockHook": ToMeSDDitBlockHook,
@@ -24,6 +25,7 @@ HOOK_CLASS_MAP = {
     "ToMADitBlockHook": ToMADitBlockHook,
     "DiffCRDitBlockHook": DiffCRDitBlockHook,
     "DynamicDiTBlockHook": DynamicDiTBlockHook,
+    "SparseDiTBlockHook": SparseDiTBlockHook,
     "ShivaDitBlockHook": ShivaDitBlockHook,
 }
 
