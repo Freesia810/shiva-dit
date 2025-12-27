@@ -35,7 +35,10 @@ def install_shiva_hooks(
     # Context Configs
     context_ratio_mode = kwargs.pop("context_ratio_mode", "fixed")
     fixed_context_ratio = kwargs.pop("fixed_context_ratio", 1.0)
-    proj_dim = kwargs.pop("context_proj_dim", 128)
+    context_num_groups = kwargs.pop("context_num_groups", 1)
+    context_pruner_mode = kwargs.pop("context_pruner_mode", "learned")
+    context_pool_size = kwargs.pop("context_pool_size", None)
+    context_proj_dim = kwargs.pop("context_proj_dim", 128)
 
     # Common Configs
     init_Ts = kwargs.pop("init_Ts", 30.0)
@@ -83,6 +86,7 @@ def install_shiva_hooks(
     shared_pruner_expert = None
     shared_fuse_expert = None
     grouped_routers = None
+    context_grouped_routers = None
 
     if shiva_mode in ["image", "both"]:
         print("  > Instantiating Image Pruning Modules...")
@@ -122,14 +126,21 @@ def install_shiva_hooks(
     shared_context_ratio_policy = None
 
     if shiva_mode in ["context", "both"]:
-        print("  > Instantiating Context Pruning Modules...")
-        shared_context_pruner = ShivaContextPruner(
-            img_dim=model_dim,
-            txt_dim=prompt_embed_dim,
-            proj_dim=proj_dim,
-            init_Ts=init_Ts,
-            init_Tk=init_Tk,
-        ).to(device, torch.float32)
+        print("  > Instantiating Context Modules...")
+        context_grouped_routers = nn.ModuleList(
+            [
+                ShivaContextPruner(
+                    mode=context_pruner_mode,
+                    pool_size=context_pool_size,
+                    img_dim=model_dim,
+                    txt_dim=prompt_embed_dim,
+                    proj_dim=context_proj_dim,
+                    init_Ts=init_Ts,
+                    init_Tk=init_Tk,
+                )
+                for _ in range(context_num_groups)
+            ]
+        ).to(device, dtype)
 
         if context_ratio_mode == "adaptive":
             shared_context_ratio_policy = ShivaRatioPolicy(
@@ -137,6 +148,7 @@ def install_shiva_hooks(
             ).to(device, dtype)
 
     layers_per_group = num_layers // num_router_groups if num_router_groups > 0 else num_layers
+    context_layers_per_group = num_layers // context_num_groups if context_num_groups > 0 else num_layers
 
     if skip_layer_indices is None:
         skip_layer_indices = []
@@ -148,11 +160,17 @@ def install_shiva_hooks(
         if i in skip_layer_indices:
             skipped += 1
             continue
-
+        
+        # Image Router
         injected_router = None
         if grouped_routers is not None:
             router_group_id = min(i // layers_per_group, num_router_groups - 1)
             injected_router = grouped_routers[router_group_id]
+        # Context Router
+        injected_context_router = None
+        if context_grouped_routers is not None:
+            context_router_group_id = min(i // context_layers_per_group, context_num_groups - 1)
+            injected_context_router = context_grouped_routers[context_router_group_id]
 
         hook_kwargs = {
             "shiva_mode": shiva_mode,
@@ -166,7 +184,7 @@ def install_shiva_hooks(
             "shared_fuse_expert": shared_fuse_expert,
             "fixed_image_ratio": fixed_image_ratio,
             # Context Modules
-            "shared_context_pruner": shared_context_pruner,
+            "shared_context_pruner": injected_context_router,
             "shared_context_ratio_policy": shared_context_ratio_policy,
             "fixed_context_ratio": fixed_context_ratio,
             # LuT

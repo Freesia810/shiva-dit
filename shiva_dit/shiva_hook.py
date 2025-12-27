@@ -131,6 +131,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             "layer_id_tensor", torch.tensor([self.layer_idx], dtype=torch.long)
         )
 
+        if self.context_pruner is not None and self.shiva_mode in ["context", "both"]:
+            self.context_pruner.on_register(block)
+
         # Placeholders for loss calculation
         self.current_gate_logits_for_loss = None
         self.current_ratio_for_loss = None
