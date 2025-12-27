@@ -323,17 +323,17 @@ class ToMeSDDitBlockHook(BaseDiTBlockHook):
 
 
 if __name__ == "__main__":
-    model_type = "flux-dev"
+    model_type = "sd3"
     pipe, model_attrs = get_pipeline(model_type)
 
     tomesd_config = {
         "stride": (2, 2),
-        "merged_ratio": 0.3,
+        "merged_ratio": 0.15,
         "merge_config": {
             "self-attn": True,
             "cross-attn": False,
-            "ffn": False,
-            "parallel": True,
+            "ffn": True,
+            "parallel": False,
         },
         "generator": torch.Generator("cuda").manual_seed(0),
     }

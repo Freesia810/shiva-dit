@@ -13,7 +13,7 @@ class PipelineContext:
     hidden_seq_height: Optional[int] = None
     hidden_seq_width: Optional[int] = None
 
-    encoder_flag: Optional[bool] = None
+    encoder_flag: Optional[bool] = True
 
     encoder_hidden_seq_len: Optional[int] = None
     negative_encoder_hidden_seq_len: Optional[int] = None
@@ -44,6 +44,8 @@ class PipelineContext:
 
     # for Shiva, we need to temb which is not merged with encoder_hiddens
     pure_temb: Optional[torch.Tensor] = None
+
+    train_step_idx: Optional[int] = None
 
     def hidden_seq_len_gen(self) -> int:
         if self.hidden_extra_seq_len is not None:

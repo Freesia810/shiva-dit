@@ -1,8 +1,7 @@
 import torch
 from diffusers.pipelines.flux.pipeline_flux_kontext import retrieve_latents
 
-
-def prepare_flux_inputs(trainer, batch):
+def prepare_flux_inputs(trainer, batch, timesteps, generator=None):
     model_kwargs = {}
 
     # default params
@@ -70,15 +69,12 @@ def prepare_flux_inputs(trainer, batch):
         model_kwargs["txt_ids"] = text_ids
 
     # add noise
-    noise = torch.randn_like(img_latents)
-    indices = torch.randint(
-        0,
-        trainer.scheduler.config.num_train_timesteps,
-        (batch_size,),
-        device=trainer.device,
+    noise = torch.randn(
+        img_latents.shape, 
+        generator=generator, 
+        device=img_latents.device, 
+        dtype=img_latents.dtype
     )
-    schedule_timesteps_gpu = trainer.scheduler.timesteps.to(trainer.device)
-    timesteps = schedule_timesteps_gpu[indices]
     noisy_latents = trainer.scheduler.scale_noise(
         sample=img_latents,
         timestep=timesteps,
@@ -97,7 +93,7 @@ def prepare_flux_inputs(trainer, batch):
     return img_latents, noise, noisy_latents, timesteps, model_kwargs
 
 
-def prepare_pixart_sigma_inputs(trainer, batch):
+def prepare_pixart_sigma_inputs(trainer, batch, timesteps, generator=None):
     model_kwargs = {}
     model_kwargs["return_dict"] = False
     model_kwargs["added_cond_kwargs"] = {"resolution": None, "aspect_ratio": None}
@@ -142,15 +138,12 @@ def prepare_pixart_sigma_inputs(trainer, batch):
     model_kwargs["encoder_attention_mask"] = prompt_attention_mask
 
     # add noise
-    noise = torch.randn_like(img_latents)
-    indices = torch.randint(
-        0,
-        trainer.scheduler.config.num_train_timesteps,
-        (batch_size,),
-        device=trainer.device,
+    noise = torch.randn(
+        img_latents.shape, 
+        generator=generator, 
+        device=img_latents.device, 
+        dtype=img_latents.dtype
     )
-    schedule_timesteps_gpu = trainer.scheduler.timesteps.to(trainer.device)
-    timesteps = schedule_timesteps_gpu[indices]
     noisy_latents = trainer.scheduler.add_noise(
         original_samples=img_latents,
         timesteps=timesteps,
@@ -160,7 +153,7 @@ def prepare_pixart_sigma_inputs(trainer, batch):
     return img_latents, noise, noisy_latents, timesteps, model_kwargs
 
 
-def prepare_sd3_inputs(trainer, batch):
+def prepare_sd3_inputs(trainer, batch, timesteps, generator=None):
     model_kwargs = {}
     model_kwargs["return_dict"] = False
     model_kwargs["joint_attention_kwargs"] = {}
@@ -255,15 +248,12 @@ def prepare_sd3_inputs(trainer, batch):
         model_kwargs["pooled_projections"] = pooled_prompt_embeds
 
     # add noise
-    noise = torch.randn_like(img_latents)
-    indices = torch.randint(
-        0,
-        trainer.scheduler.config.num_train_timesteps,
-        (batch_size,),
-        device=trainer.device,
+    noise = torch.randn(
+        img_latents.shape, 
+        generator=generator, 
+        device=img_latents.device, 
+        dtype=img_latents.dtype
     )
-    schedule_timesteps_gpu = trainer.scheduler.timesteps.to(trainer.device)
-    timesteps = schedule_timesteps_gpu[indices]
     noisy_latents = trainer.scheduler.scale_noise(
         sample=img_latents,
         timestep=timesteps,
@@ -273,7 +263,7 @@ def prepare_sd3_inputs(trainer, batch):
     return img_latents, noise, noisy_latents, timesteps, model_kwargs
 
 
-def prepare_qwen_image_inputs(trainer, batch):
+def prepare_qwen_image_inputs(trainer, batch, timesteps, generator=None):
     model_kwargs = {}
     model_kwargs["return_dict"] = False
     model_kwargs["attention_kwargs"] = trainer.pipe.attention_kwargs
@@ -355,15 +345,12 @@ def prepare_qwen_image_inputs(trainer, batch):
     model_kwargs["encoder_hidden_states_mask"] = prompt_embeds_mask
 
     # add noise
-    noise = torch.randn_like(img_latents)
-    indices = torch.randint(
-        0,
-        trainer.scheduler.config.num_train_timesteps,
-        (batch_size,),
-        device=trainer.device,
+    noise = torch.randn(
+        img_latents.shape, 
+        generator=generator, 
+        device=img_latents.device, 
+        dtype=img_latents.dtype
     )
-    schedule_timesteps_gpu = trainer.scheduler.timesteps.to(trainer.device)
-    timesteps = schedule_timesteps_gpu[indices]
     noisy_latents = trainer.scheduler.scale_noise(
         sample=img_latents,
         timestep=timesteps,
@@ -373,11 +360,108 @@ def prepare_qwen_image_inputs(trainer, batch):
     return img_latents, noise, noisy_latents, timesteps, model_kwargs
 
 
+def prepare_qwen_image_edit_inputs(trainer, batch, timesteps, generator=None):
+    model_kwargs = {}
+    model_kwargs["return_dict"] = False
+    model_kwargs["attention_kwargs"] = {}
+
+    batch_size = batch["pixel_values"].shape[0]
+    pixel_values = batch["pixel_values"].to(dtype=trainer.vae.dtype)
+
+    ## image encode
+    img_latents = retrieve_latents(
+        trainer.vae.encode(pixel_values.unsqueeze(2)),
+        generator=trainer.generator,
+        sample_mode="argmax",
+    )
+    latents_mean = (
+        torch.tensor(trainer.vae.config.latents_mean)
+        .view(1, trainer.pipe.latent_channels, 1, 1, 1)
+        .to(img_latents.device, img_latents.dtype)
+    )
+    latents_std = (
+        torch.tensor(trainer.vae.config.latents_std)
+        .view(1, trainer.pipe.latent_channels, 1, 1, 1)
+        .to(img_latents.device, img_latents.dtype)
+    )
+    img_latents = (img_latents - latents_mean) / latents_std
+    height, width = img_latents.shape[3], img_latents.shape[4]
+    img_shapes = [
+        [
+            (1, height // 2, width // 2),
+            (1, height // 2, width // 2),
+        ]
+    ] * batch_size
+    model_kwargs["img_shapes"] = img_shapes
+
+    ## text encode
+    num_images_per_prompt = 1
+    input_ids = batch['input_ids'][0][0]
+    attention_mask = batch['attention_mask'][0][0]
+    text_encoder_pixel_values = batch['text_encoder_pixel_values'][0][0]
+    image_grid_thw = batch['image_grid_thw'][0][0]
+    condition_pixel_values = batch['condition_pixel_values'].to(dtype=trainer.vae.dtype)
+    drop_idx = trainer.pipe.prompt_template_encode_start_idx
+
+    outputs = trainer.text_encoders[0](
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        pixel_values=text_encoder_pixel_values,
+        image_grid_thw=image_grid_thw,
+        output_hidden_states=True,
+    )
+    hidden_states = outputs.hidden_states[-1]
+    split_hidden_states = trainer.pipe._extract_masked_hidden(hidden_states, attention_mask)
+    split_hidden_states = [e[drop_idx:] for e in split_hidden_states]
+    attn_mask_list = [torch.ones(e.size(0), dtype=torch.long, device=e.device) for e in split_hidden_states]
+    max_seq_len = max([e.size(0) for e in split_hidden_states])
+    prompt_embeds = torch.stack(
+        [torch.cat([u, u.new_zeros(max_seq_len - u.size(0), u.size(1))]) for u in split_hidden_states]
+    )
+    prompt_embeds_mask = torch.stack(
+        [torch.cat([u, u.new_zeros(max_seq_len - u.size(0))]) for u in attn_mask_list]
+    )
+    prompt_embeds = prompt_embeds.to(dtype=trainer.dtype, device=trainer.device)
+    _, seq_len, _ = prompt_embeds.shape
+    prompt_embeds = prompt_embeds.repeat(1, num_images_per_prompt, 1)
+    prompt_embeds = prompt_embeds.view(batch_size * num_images_per_prompt, seq_len, -1)
+    prompt_embeds_mask = prompt_embeds_mask.repeat(1, num_images_per_prompt, 1)
+    prompt_embeds_mask = prompt_embeds_mask.view(batch_size * num_images_per_prompt, seq_len)
+
+    model_kwargs["encoder_hidden_states"] = prompt_embeds.to(dtype=trainer.dtype)
+    model_kwargs["encoder_hidden_states_mask"] = prompt_embeds_mask
+    model_kwargs["txt_seq_lens"] = prompt_embeds_mask.sum(dim=1).tolist()
+
+    # add noise
+    noise = torch.randn(
+        img_latents.shape, 
+        generator=generator, 
+        device=img_latents.device, 
+        dtype=img_latents.dtype
+    )
+    noisy_latents = trainer.scheduler.scale_noise(
+        sample=img_latents,
+        timestep=timesteps,
+        noise=noise,
+    )
+
+    # cond image
+    cond_latents = retrieve_latents(
+        trainer.vae.encode(condition_pixel_values.unsqueeze(2)),
+        generator=trainer.generator,
+        sample_mode="argmax",
+    )
+    cond_latents = (cond_latents - latents_mean) / latents_std
+
+    return (img_latents, cond_latents), noise, noisy_latents, timesteps, model_kwargs
+
+
 INPUT_PREPARER_REGISTRY = {
     "flux-dev": prepare_flux_inputs,
     "pixart-sigma": prepare_pixart_sigma_inputs,
     "sd3": prepare_sd3_inputs,
     "qwen-image": prepare_qwen_image_inputs,
+    "qwen-image-edit": prepare_qwen_image_edit_inputs,
 }
 
 

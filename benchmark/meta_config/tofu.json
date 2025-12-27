@@ -1,0 +1,18 @@
+{
+    "training_mode": "hook_only",
+    "model_type": "sd3",
+    "hook_info": {
+        "class_name": "ToFuDitBlockHook",
+        "config": {
+            "stride": [2, 2],
+            "merged_ratio": 0.2,
+            "merge_config": {
+                "self-attn": true,
+                "cross-attn": false,
+                "ffn": true,
+                "parallel": false
+            },
+            "prune_layer_nums": 12
+        }
+    }
+}

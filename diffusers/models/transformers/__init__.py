@@ -6,6 +6,7 @@ if is_torch_available():
     from .pixart_transformer_2d import PixArtTransformer2DModel
     from .transformer_2d import Transformer2DModel
     from .transformer_flux import FluxTransformer2DModel
+    from .transformer_flux2 import Flux2Transformer2DModel
     from .transformer_qwenimage import QwenImageTransformer2DModel
     from .transformer_sd3 import SD3Transformer2DModel
     from .transformer_temporal import TransformerTemporalModel

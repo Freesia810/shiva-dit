@@ -12,7 +12,6 @@ from shiva_dit.utils import (
     join_image_rotary_emb,
 )
 
-
 class ToMADitBlockHook(BaseDiTBlockHook):
     def __init__(
         self,
@@ -24,184 +23,120 @@ class ToMADitBlockHook(BaseDiTBlockHook):
         **kwargs,
     ):
         super().__init__()
-        self.tile_nums = tile_nums
+        if isinstance(tile_nums, int):
+            self.h_tile_num = self.w_tile_num = tile_nums
+        else:
+            self.h_tile_num, self.w_tile_num = tile_nums
+        self.num_tiles = self.h_tile_num * self.w_tile_num
         self.ratio = merged_ratio
+        
         if merge_config is None:
-            self.merge_config = {
-                "self-attn": True,
-                "cross-attn": True,
-                "ffn": True,
-                "parallel": True,
-            }
+            self.merge_config = {"self-attn": True, "cross-attn": True, "ffn": True, "parallel": True}
         else:
             self.merge_config = merge_config
 
-        self.size = None  # dynamic attr
-        self.k = None
-        self.context_dict = {
-            "dst_idx": None,
-            "A": None,
-            "A_inv": None,
-        }
-
-        # only work for edit task with dual hidden states
-        self.extra_size = None
-        self.extra_k = None
-        self.extra_context_dict = {
-            "dst_idx": None,
-            "A": None,
-            "A_inv": None,
-        }
+        self.size = None 
+        self.context_dict = {"dst_idx": None, "A": None, "A_inv": None}
+        self.extra_context_dict = {"dst_idx": None, "A": None, "A_inv": None}
 
         self.skip_layer_nums = skip_layer_nums
         self.skip_single_layer_nums = skip_single_layer_nums
+    
+    @staticmethod
+    def fold_with_indices(x: torch.Tensor, h_tile_num: int, w_tile_num: int):
+        B, N, C = x.shape
+        H = int(N**0.5) 
+        tile_h = H // h_tile_num
+        tile_w = H // w_tile_num 
+        x_reshaped = x.reshape(B, h_tile_num, tile_h, w_tile_num, tile_w, C)
+        x_reshaped = x_reshaped.permute(0, 1, 3, 2, 4, 5)
+        x_folded = x_reshaped.reshape(B, h_tile_num * w_tile_num, tile_h * tile_w, C)
+        return x_folded
+
+    @staticmethod
+    def unfold_with_indices(x_folded: torch.Tensor, h_tile_num: int, w_tile_num: int, original_N: int):
+        B, num_tiles, tile_size, C = x_folded.shape
+        H = int(original_N**0.5)
+        tile_h = H // h_tile_num
+        tile_w = H // w_tile_num
+        x = x_folded.reshape(B, h_tile_num, w_tile_num, tile_h, tile_w, C)
+        x = x.permute(0, 1, 3, 2, 4, 5)
+        x_restored = x.reshape(B, original_N, C)
+        return x_restored
 
     @torch.no_grad()
-    @staticmethod
-    def facility_location(x: torch.Tensor, k: int) -> torch.Tensor:
-        """
-        x: (B, N, C)
-        """
+    def compute_partition(self, x: torch.Tensor, ratio: float):
         B, N, C = x.shape
-        device = x.device
-
-        x_normalized = F.normalize(x, p=2, dim=-1, eps=1e-8)
-        scores = x_normalized @ x_normalized.transpose(-1, -2)  # (B, N, N)
-
-        row_sums = torch.sum(scores, dim=2)  # (B, N)
-        init_v = torch.argmax(row_sums, dim=1)  # (B,)
-
-        max_sim = scores[torch.arange(B, device=device), init_v]  # (B, N)
-
-        res = torch.zeros(B, k, dtype=torch.long, device=device)  # (B, k)
-        res[:, 0] = init_v
-
-        for i in range(1, k):
-            differences = torch.relu(scores - max_sim.unsqueeze(1))
-            row_sums = torch.sum(differences, dim=2)  # (B, N)
-            row_sums.scatter_(dim=1, index=res[:, :i], value=-torch.inf)
-            next_v = torch.argmax(row_sums, dim=1)  # (B,)
-            res[:, i] = next_v
-            new_sims = scores[torch.arange(B, device=device), next_v]  # (B, N)
-            max_sim = torch.max(max_sim, new_sims)
-
-        return res  # (B, k)
-
-    @torch.no_grad()
-    @staticmethod
-    def tile_facility_location(
-        x: torch.Tensor,
-        k: int,
-        size: Union[int, Tuple[int, int]],
-        tile_nums: Union[int, Tuple[int, int]],
-    ) -> torch.Tensor:
-        """
-        x: (B, N, C)
-        size: (h, w)
-        tile_nums: (h_tile_num, w_tile_num)
-
-        we add a sort to guard the original order of selected indices
-        """
-        if isinstance(size, int):
-            h = w = size
-        else:
-            h, w = size
-
-        if isinstance(tile_nums, int):
-            h_tile_num, w_tile_num = tile_nums, tile_nums
-        else:
-            h_tile_num, w_tile_num = tile_nums
-
-        h_tile_stride = h // h_tile_num
-        w_tile_stride = w // w_tile_num
-        k_tile = k // (h_tile_num * w_tile_num)
-
-        B, N, C = x.shape
-
-        indices = torch.arange(N, device=x.device).unsqueeze(0).expand(B, -1).reshape(B, h, w)  # (B, h, w)
-        patch_indices = indices.unfold(1, h_tile_stride, h_tile_stride).unfold(
-            2, w_tile_stride, w_tile_stride
-        )  # (B, h_tile_num, w_tile_num, h_tile_stride, w_tile_stride)
-        x_patch = (
-            x.reshape(B, h, w, C)
-            .unfold(1, h_tile_stride, h_tile_stride)
-            .unfold(2, w_tile_stride, w_tile_stride)
-            .permute(0, 1, 2, 4, 5, 3)
-        )  # (B, h_tile_num, w_tile_num, h_tile_stride, w_tile_stride, C)
-        x_batched_patch = x_patch.reshape(
-            B * h_tile_num * w_tile_num, h_tile_stride * w_tile_stride, C
-        )  # (B * h_tile_num * w_tile_num, h_tile_stride * w_tile_stride, C)
-
-        selected_x_batched_patch = ToMADitBlockHook.facility_location(
-            x_batched_patch, k_tile
-        )  # (B * h_tile_num * w_tile_num, k_tile)
-        selected_x_batched_patch_indices = torch.gather(
-            patch_indices.reshape(-1, h_tile_stride * w_tile_stride),
-            -1,
-            selected_x_batched_patch,
-        )  # (B * h_tile_num * w_tile_num, k_tile)
-
-        dst_indices = selected_x_batched_patch_indices.reshape(
-            B, -1
-        )  # (B, h_tile_num * w_tile_num * k_tile)
-        dst_indices = dst_indices[:, :k].unsqueeze(-1)  # (B, k, 1)
-        dst_indices = dst_indices.sort(dim=-2).values  # (B, k, 1)
-        return dst_indices
-
-    @torch.no_grad()
-    @staticmethod
-    def calculate_attn_tensor(x: torch.Tensor, dst_idx: torch.Tensor):
-        """
-        x: (B, N, C)
-        dst_idx: (B, k, 1)
-        """
-
-        B, N, C = x.shape
-        eps = 1e-6
-
-        dst = torch.gather(x, 1, dst_idx.expand(B, -1, C))  # (B, k, C)
-        q = dst  # (B, k, C)
-        k = x # (B, N, C)
-        A = q @ k.transpose(-1, -2) # (B, k, N)
-
-        res = torch.softmax(A, dim=-2)
-        sum = torch.sum(res, dim=-1, keepdim=True) # (B, k, 1)
-        res = res / (sum + eps)
-
-        return res, res.transpose(-1, -2)  # (B, k, N), (B, N, k)
+        x_folded = ToMADitBlockHook.fold_with_indices(x, self.h_tile_num, self.w_tile_num) # (B, tiles, tile_size, C)
+        tile_size = x_folded.shape[2]
+        
+        r = int(tile_size * (1 - ratio))
+        if r <= 0: r = 1
+        
+        x_norm = F.normalize(x_folded, p=2, dim=-1)
+        sim_matrix = x_norm @ x_norm.transpose(-1, -2)
+        
+        row_sums = torch.sum(sim_matrix, dim=-1)
+        init_v = torch.argmax(row_sums, dim=-1)
+        
+        dst_idx = torch.zeros(B, self.num_tiles, r, dtype=torch.long, device=x.device)
+        dst_idx[:, :, 0] = init_v
+        
+        max_sim = torch.gather(sim_matrix, 2, init_v.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, tile_size)).squeeze(2)
+        
+        for i in range(1, r):
+            differences = torch.relu(sim_matrix - max_sim.unsqueeze(2))
+            gain = torch.sum(differences, dim=-1)
+            mask_idx = dst_idx[:, :, :i]
+            gain.scatter_(2, mask_idx, -float('inf'))
+            next_v = torch.argmax(gain, dim=-1)
+            dst_idx[:, :, i] = next_v
+            
+            new_sim = torch.gather(sim_matrix, 2, next_v.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, tile_size)).squeeze(2)
+            max_sim = torch.max(max_sim, new_sim)
+            
+        dst_idx, _ = torch.sort(dst_idx, dim=-1)
+        
+        dst_feats = torch.gather(x_norm, 2, dst_idx.unsqueeze(-1).expand(-1, -1, -1, C)) # (B, tiles, r, C)
+        
+        scale = 1000.0
+        # shape: (B, tiles, r, tile_size)
+        attn_logits = (dst_feats @ x_norm.transpose(-1, -2)) * scale
+        A_probs = torch.softmax(attn_logits, dim=-2) 
+        count_per_dst = A_probs.sum(dim=-1, keepdim=True) # (B, tiles, r, 1)
+        A_merge = A_probs / (count_per_dst + 1e-6) 
+        A_unmerge = A_probs.transpose(-1, -2) 
+        
+        return dst_idx, A_merge, A_unmerge
 
     def _clean(self):
-        self.context_dict = {
-            "A": None,
-            "A_inv": None,
-            "dst_idx": None,
-        }
-        self.extra_context_dict = {
-            "A": None,
-            "A_inv": None,
-            "dst_idx": None,
-        }
+        self.context_dict = {"A": None, "A_inv": None, "dst_idx": None}
+        self.extra_context_dict = {"A": None, "A_inv": None, "dst_idx": None}
 
     @torch.no_grad()
     def merge(self, x: torch.Tensor, context: dict):
-        """
-        x: (B, N, C)
-        A: (B, k, N)
-        """
-        return torch.bmm(context["A"], x)
+        if context["A"] is None: return x
+        B, N, C = x.shape
+        context["original_N"] = N
+        
+        x_folded = ToMADitBlockHook.fold_with_indices(x, self.h_tile_num, self.w_tile_num)
+        x_merged = context["A"] @ x_folded 
+        return x_merged.reshape(B, -1, C)
 
     @torch.no_grad()
-    def unmerge(self, merged_x: torch.Tensor, context: dict):
-        """
-        x: (B, k, C)
-        A_inv: (B, N, k)
-        """
-        return torch.bmm(context["A_inv"], merged_x)
+    def unmerge(self, x: torch.Tensor, context: dict):
+        if context["A_inv"] is None: return x
+        B, _, C = x.shape
+        r = context["A_inv"].shape[-1]
+        
+        x_reshaped = x.reshape(B, self.num_tiles, r, C)
+        x_unmerged = context["A_inv"] @ x_reshaped
+        return ToMADitBlockHook.unfold_with_indices(x_unmerged, self.h_tile_num, self.w_tile_num, context["original_N"])
 
     def on_register_hook(self, block: nn.Module):
         if self.model_type == "wan":
             raise NotImplementedError("wan model is not supported")
-
+        
         if isinstance(block, FluxSingleTransformerBlock):
             for key in ("self-attn", "cross-attn", "ffn"):
                 if self.merge_config.get(key):
@@ -219,198 +154,107 @@ class ToMADitBlockHook(BaseDiTBlockHook):
 
     def hook_pre_norm(
         self,
-        module_name: Literal["self-attn", "cross-attn", "ffn", "parallel"],
-        hidden_states: torch.Tensor,
-        encoder_hidden_states: torch.Tensor = None,
-        image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        temb: torch.Tensor = None,
+        module_name,
+        hidden_states,
+        encoder_hidden_states=None,
+        image_rotary_emb=None,
+        temb=None,
     ):
         if module_name in ("self-attn", "parallel") and self.enable:
-            # only sample and select tokens when self-attention's start
-            def _select(x, k, size, context_dict):
-                context_dict["dst_idx"] = ToMADitBlockHook.tile_facility_location(
-                    x, k, size, self.tile_nums
-                )
-                context_dict["A"], context_dict["A_inv"] = (
-                    ToMADitBlockHook.calculate_attn_tensor(x, context_dict["dst_idx"])
-                )
-
-            def _select_image_rotary_emb(
-                image_rotary_emb, encoder_hidden_seq_len, hidden_seq_len
-            ):
-                hidden_emb, encoder_emb, extra_emb = parse_image_rotary_emb(
-                    self.model_type,
-                    image_rotary_emb,
-                    hidden_seq_len,
-                    encoder_hidden_seq_len,
-                )
-
-                def _gather_pair(rotary_pair, context_dict):
-                    if rotary_pair is None:
-                        return None
-                    return tuple(
-                        torch.gather(
-                            x,
-                            0,
-                            context_dict["dst_idx"].squeeze(0).expand(-1, x.shape[-1]),
-                        )
-                        for x in rotary_pair
-                    )
-
-                hidden_emb = _gather_pair(hidden_emb, self.context_dict)
-                if extra_emb is not None:
-                    extra_emb = _gather_pair(extra_emb, self.extra_context_dict)
-                return join_image_rotary_emb(
-                    self.model_type, hidden_emb, encoder_emb, extra_emb
-                )
+            self._clean()
+            def _gather_rope_with_tile(rope_pair, dst_idx):
+                if rope_pair is None: return None
+                res = []
+                for x in rope_pair:
+                    if x.ndim == 2: x = x.unsqueeze(0).expand(dst_idx.shape[0], -1, -1)
+                    x_folded = ToMADitBlockHook.fold_with_indices(x, self.h_tile_num, self.w_tile_num)
+                    idx_expanded = dst_idx.unsqueeze(-1).expand(-1, -1, -1, x.shape[-1])
+                    x_gathered = torch.gather(x_folded, 2, idx_expanded)
+                    res.append(x_gathered.reshape(x_gathered.shape[0], -1, x_gathered.shape[-1]))
+                return tuple(res)
 
             if global_context.hidden_extra_seq_len is not None:
-                # dual hidden states for edit task
-                if (
-                    global_context.hidden_seq_height is None
-                    or global_context.hidden_seq_width is None
-                ):
-                    raise ValueError(
-                        "hidden_seq_height and hidden_seq_width must be set in global_context"
-                    )
-                if (
-                    global_context.hidden_extra_seq_height is None
-                    or global_context.hidden_extra_seq_width is None
-                ):
-                    raise ValueError(
-                        "hidden_extra_seq_height and hidden_extra_seq_width must be set in global_context"
-                    )
-                if self.size is None:
-                    self.size = (
-                        global_context.hidden_seq_height,
-                        global_context.hidden_seq_width,
-                    )
-                    self.k = int(global_context.hidden_seq_len * (1 - self.ratio))
-                if self.extra_size is None:
-                    self.extra_size = (
-                        global_context.hidden_extra_seq_height,
-                        global_context.hidden_extra_seq_width,
-                    )
-                    self.extra_k = int(
-                        global_context.hidden_extra_seq_len * (1 - self.ratio)
-                    )
-                _select(
-                    hidden_states[:, : global_context.hidden_seq_len, :],
-                    self.k,
-                    self.size,
-                    self.context_dict,
-                )
-                _select(
-                    hidden_states[:, global_context.hidden_seq_len :, :],
-                    self.extra_k,
-                    self.extra_size,
-                    self.extra_context_dict,
-                )
+                h_img = hidden_states[:, : global_context.hidden_seq_len, :]
+                h_extra = hidden_states[:, global_context.hidden_seq_len :, :]
+
+                self.context_dict["dst_idx"], self.context_dict["A"], self.context_dict["A_inv"] = \
+                    self.compute_partition(h_img, self.ratio)
+                
+                self.extra_context_dict["dst_idx"], self.extra_context_dict["A"], self.extra_context_dict["A_inv"] = \
+                    self.compute_partition(h_extra, self.ratio)
             else:
-                # normal case
-                if (
-                    global_context.hidden_seq_height is None
-                    or global_context.hidden_seq_width is None
-                ):
-                    raise ValueError(
-                        "hidden_seq_height and hidden_seq_width must be set in global_context"
-                    )
-                if self.size is None:
-                    self.size = (
-                        global_context.hidden_seq_height,
-                        global_context.hidden_seq_width,
-                    )
-                    self.k = int(global_context.hidden_seq_len * (1 - self.ratio))
-                _select(hidden_states, self.k, self.size, self.context_dict)
+                self.context_dict["dst_idx"], self.context_dict["A"], self.context_dict["A_inv"] = \
+                    self.compute_partition(hidden_states, self.ratio)
 
             if image_rotary_emb is not None and (
                 self.merge_config.get("self-attn") or self.merge_config.get("parallel")
             ):
-                image_rotary_emb = _select_image_rotary_emb(
+                hidden_emb, encoder_emb, extra_emb = parse_image_rotary_emb(
+                    self.model_type,
                     image_rotary_emb,
-                    global_context.encoder_hidden_seq_len_gen(),
                     global_context.hidden_seq_len,
+                    global_context.encoder_hidden_seq_len_gen(),
+                )
+                hidden_emb = _gather_rope_with_tile(hidden_emb, self.context_dict["dst_idx"])
+                if extra_emb is not None:
+                    extra_emb = _gather_rope_with_tile(extra_emb, self.extra_context_dict["dst_idx"])
+                image_rotary_emb = join_image_rotary_emb(
+                    self.model_type, hidden_emb, encoder_emb, extra_emb
                 )
 
-        return super().hook_pre_norm(
-            module_name, hidden_states, encoder_hidden_states, image_rotary_emb, temb
-        )
+        return super().hook_pre_norm(module_name, hidden_states, encoder_hidden_states, image_rotary_emb, temb)
 
     def hook_after_norm(
         self,
-        module_name: Literal["self-attn", "cross-attn", "ffn", "parallel"],
-        norm_hidden_states: torch.Tensor,
-        norm_encoder_hidden_states: torch.Tensor = None,
-        image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+        module_name,
+        norm_hidden_states,
+        norm_encoder_hidden_states=None,
+        image_rotary_emb=None,
     ):
         if self.merge_config.get(module_name, False) and self.enable:
+
             if global_context.hidden_extra_seq_len is not None:
-                # dual hidden states for edit task
                 h1, h2 = norm_hidden_states.split(
-                    [
-                        global_context.hidden_seq_len,
-                        norm_hidden_states.shape[1] - global_context.hidden_seq_len,
-                    ],
-                    dim=1,
+                    [global_context.hidden_seq_len, norm_hidden_states.shape[1] - global_context.hidden_seq_len], dim=1
                 )
                 norm_hidden_states = torch.cat(
-                    [
-                        self.merge(h1, self.context_dict),
-                        self.merge(h2, self.extra_context_dict),
-                    ],
-                    dim=1,
+                    [self.merge(h1, self.context_dict), self.merge(h2, self.extra_context_dict)], dim=1
                 )
             else:
-                # normal case
                 norm_hidden_states = self.merge(norm_hidden_states, self.context_dict)
 
-        return super().hook_after_norm(
-            module_name,
-            norm_hidden_states,
-            norm_encoder_hidden_states,
-            image_rotary_emb,
-        )
+        return super().hook_after_norm(module_name, norm_hidden_states, norm_encoder_hidden_states, image_rotary_emb)
 
     def hook_after_module(
         self,
-        module_name: Literal["self-attn", "cross-attn", "ffn", "parallel"],
-        hidden_output: torch.Tensor,
-        encoder_hidden_output: torch.Tensor = None,
+        module_name,
+        hidden_output,
+        encoder_hidden_output=None,
     ):
         if self.merge_config.get(module_name, False) and self.enable:
             if global_context.hidden_extra_seq_len is not None:
-                # dual hidden states for edit task
-                hidden_seq_len = self.context_dict["dst_idx"].shape[1]
-                h1, h2 = hidden_output.split(
-                    [hidden_seq_len, hidden_output.shape[1] - hidden_seq_len], dim=1
-                )
+                r = self.context_dict["A"].shape[2]
+                split_len = self.num_tiles * r
+                
+                h1, h2 = hidden_output.split([split_len, hidden_output.shape[1] - split_len], dim=1)
                 hidden_output = torch.cat(
-                    [
-                        self.unmerge(h1, self.context_dict),
-                        self.unmerge(h2, self.extra_context_dict),
-                    ],
-                    dim=1,
+                    [self.unmerge(h1, self.context_dict), self.unmerge(h2, self.extra_context_dict)], dim=1
                 )
             else:
-                # normal case
                 hidden_output = self.unmerge(hidden_output, self.context_dict)
 
         if module_name in ("ffn", "parallel"):
-            # clear indices after ffn
             self._clean()
 
-        return super().hook_after_module(
-            module_name, hidden_output, encoder_hidden_output
-        )
-
+        return super().hook_after_module(module_name, hidden_output, encoder_hidden_output)
 
 if __name__ == "__main__":
-    model_type = "flux-dev"
+    model_type = "sd3"
     pipe, model_attrs = get_pipeline(model_type)
 
     toma_config = {
         "tile_nums": (8, 8),
-        "merged_ratio": 0.8,
+        "merged_ratio": 0.25,
         "merge_config": {
             "self-attn": True,
             "cross-attn": False,

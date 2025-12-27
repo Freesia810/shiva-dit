@@ -6,7 +6,6 @@ import sys
 import json
 import statistics
 import gc
-from typing import Optional
 
 from shiva_dit.utils.inference_utils import load_pipeline_for_inference
 from shiva_dit.utils.utils import process_quick_start
@@ -63,26 +62,31 @@ def format_metric(value, base_unit=""):
     else:
         return f"{value:.2f} {base_unit}"
 
-class FlopsMeasurer:
+class AverageFlopsMeasurer:
     def __init__(self, model):
         self.model = model
-        self.flops = None
-        self.macs = None
-        self.params = None
+        self.flops_history = []
+        self.macs_history = []
         self.hook_handle = None
+        self.is_measuring = False
 
     def enable(self):
+        self.flops_history = []
+        self.macs_history = []
+        self.is_measuring = False
         self.hook_handle = self.model.register_forward_pre_hook(self._hook_fn, with_kwargs=True)
 
-    def _hook_fn(self, module, args, kwargs):
+    def disable(self):
         if self.hook_handle:
             self.hook_handle.remove()
             self.hook_handle = None
 
-        if self.flops is not None:
+    def _hook_fn(self, module, args, kwargs):
+        if self.is_measuring:
             return
 
-        print("\n[FLOPs] Capturing input for FLOPs calculation (DiT Single Step)...")
+        self.is_measuring = True
+
         try:
             clean_kwargs = {}
             for k, v in kwargs.items():
@@ -93,6 +97,7 @@ class FlopsMeasurer:
                         clean_kwargs[k] = torch.tensor(v)
                     except:
                         pass
+            # ==========================================
             
             flops, macs, params = calculate_flops(
                 model=module,
@@ -102,16 +107,21 @@ class FlopsMeasurer:
                 output_as_string=False,
                 output_precision=4
             )
-            self.flops = flops
-            self.macs = macs
-            self.params = params
             
-            print(f"[FLOPs] Success: {format_metric(flops, 'FLOPs')}")
+            self.flops_history.append(flops)
+            self.macs_history.append(macs)
+            
+            print(".", end="", flush=True)
             
         except Exception as e:
-            print(f"[FLOPs] Failed to calculate FLOPs: {e}")
-            self.flops = "Error"
-            self.macs = "Error"
+            print(f"[FLOPs Error]: {e}")
+        finally:
+            self.is_measuring = False
+            
+    def get_averages(self):
+        if not self.flops_history:
+            return None, None
+        return statistics.mean(self.flops_history), statistics.mean(self.macs_history)
 
 class DiTProfiler:
     def __init__(self, model):
@@ -169,6 +179,13 @@ class DiTProfiler:
 def benchmark(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float16
+
+    if args.meta_config and os.path.exists(args.meta_config):
+        print(f"Found metadata config at {args.meta_config}")
+        with open(args.meta_config, "r") as f:
+            meta_config = json.load(f)
+    else:
+        meta_config = None
     
     set_seed(42)
 
@@ -180,7 +197,8 @@ def benchmark(args):
         dtype=dtype,
         gater_lut_path=args.gater_lut,
         optimize_hooks=args.optimize_hooks,
-        merge_lora=args.merge_lora
+        merge_lora=args.merge_lora,
+        meta_config=meta_config,
     )
     
     model = None
@@ -198,17 +216,40 @@ def benchmark(args):
         prompts = ["A high quality photo of a cat", "A dog playing in the park"]
         if args.limit: prompts = prompts[:args.limit]
 
-    flops_measurer = None
+    avg_flops_val = None
+    avg_macs_val = None
+
     if args.measure_flops and CALFLOPS_AVAILABLE and model:
-        flops_measurer = FlopsMeasurer(model)
-        flops_measurer.enable() 
+        print("Note: Running ONE separate inference to measure Average FLOPs/Step...")
+        flops_measurer = AverageFlopsMeasurer(model)
+        flops_measurer.enable()
+        
+        kwargs = {"prompt": prompts[0]}
+        if args.steps > 0: kwargs["num_inference_steps"] = args.steps
+        if args.height > 0: kwargs["height"] = args.height
+        if args.width > 0: kwargs["width"] = args.width
+        
+        print("Profiling steps", end="")
+        try:
+            with torch.no_grad():
+                _ = process_quick_start(pipe, **kwargs)
+        except Exception as e:
+            print(f"\nFLOPs profiling error: {e}")
+        print("\nDone.")
+        
+        avg_flops_val, avg_macs_val = flops_measurer.get_averages()
+        flops_measurer.disable()
+        del flops_measurer
+        
+        gc.collect()
+        torch.cuda.empty_cache()
     
     dit_profiler = None
     if model:
         dit_profiler = DiTProfiler(model)
 
     print("-" * 50)
-    print("Warming up (and measuring FLOPs if enabled)...")
+    print("Warming up (Clean run)...")
     warmup_steps = 4 
     _ = process_quick_start(pipe, prompt=prompts[0], num_inference_steps=warmup_steps)
     torch.cuda.synchronize()
@@ -293,10 +334,10 @@ def benchmark(args):
         print(f"Model Parameters (DiT):")
         print(f"  Total:     {total_p / 1e9:.3f} B")
     
-    if flops_measurer and flops_measurer.flops not in [None, "Error"]:
-        print(f"Computational Cost (DiT Single Forward):")
-        print(f"  FLOPs:     {format_metric(flops_measurer.flops, 'FLOPs')}")
-        print(f"  MACs:      {format_metric(flops_measurer.macs, 'MACs')}")
+    if avg_flops_val is not None:
+        print(f"Computational Cost (Average per Step):")
+        print(f"  Avg FLOPs: {format_metric(avg_flops_val, 'FLOPs')}")
+        print(f"  Avg MACs:  {format_metric(avg_macs_val, 'MACs')}")
     elif args.measure_flops:
         print("Computational Cost: Measurement failed or skipped.")
 
@@ -316,6 +357,7 @@ if __name__ == "__main__":
     parser.add_argument("--base_model_path", type=str, default=None)
     parser.add_argument("--jsonl_path", type=str, default="test/training/dataset/meta.jsonl", help="Dataset jsonl file")
     parser.add_argument("--gater_lut", type=str, default=None, help="Path to gater LUT .pt file")
+    parser.add_argument("--meta_config", type=str, default=None)
     
     parser.add_argument("--limit", type=int, default=None, help="Limit number of samples to test")
     parser.add_argument("--steps", type=int, default=-1, help="Override inference steps (default uses pipeline default)")
@@ -335,8 +377,5 @@ if __name__ == "__main__":
     parser.add_argument("--save_images", action="store_true", help="Save generated images to disk")
     
     args = parser.parse_args()
-    
-    if args.ckpt_path is None and args.model_type is None:
-        parser.error("--model_type is required when --ckpt_path is not provided.")
         
     benchmark(args)

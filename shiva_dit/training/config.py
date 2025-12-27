@@ -8,8 +8,10 @@ class LoraConfig:
     enable: bool = False
     rank: int = 8
     target_modules: Tuple[str] = ("to_q", "to_k", "to_v", "to_out.0") 
+    modules_to_save: Tuple[str] = None
     lora_alpha: int = 8
     lora_dropout: float = 0.1
+    use_dora: bool = False
 
 @dataclass
 class TrainerConfig:
@@ -18,6 +20,8 @@ class TrainerConfig:
     model_type: str = "flux-dev"
     model_path: str = None
     output_dir: str = "./checkpoints/"
+
+    enable_gradient_checkpointing: bool = False
 
     log_with_tensorboard: bool = True
     tensorboard_log_dir: str = "logs"
@@ -37,8 +41,6 @@ class TrainerConfig:
     trainable_hook_config: Tuple[type, Dict[str, Any]] = None 
     compile_model: bool = True
 
-    hook_only_steps: int = 0
-
     caption_dropout_rate: float = 0.25
 
     num_epochs: int = 10
@@ -47,16 +49,24 @@ class TrainerConfig:
 
     learning_rate: float = 1e-4
     lora_learning_rate: float = field(
-        default=1e-6, metadata={"help": "Learning rate for LoRA parameters."}
+        default=1e-4, metadata={"help": "Learning rate for LoRA parameters."}
     )
     policy_learning_rate: float = field(
         default=1e-4,
         metadata={"help": "Learning rate for policy parameters (ratio)."},
     )
+    context_learning_rate: float = field(
+        default=1e-4,
+        metadata={"help": "Learning rate for context parameters (k)."},
+    )
+    router_learning_rate: float = field(
+        default=1e-4,
+        metadata={"help": "Learning rate for router parameters."},
+    )
     optimizer: str = "AdamW" # "Adam", "AdamW", "SGD"
     weight_decay: float = 1e-2
-    lr_scheduler: str = "cosine" # "linear", "cosine", "constant"
-    scheduler_num_warmup_steps: int = None
+
+    finetune_target_modules: Optional[List[str]] = None
 
     seed: int = 42
     logging_steps: int = 50

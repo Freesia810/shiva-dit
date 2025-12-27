@@ -22,10 +22,7 @@ class SigmoidSTE(torch.autograd.Function):
 
 
 class ShivaTopkFunc(torch.autograd.Function):
-    _last_grad_probs_stats = {}
-    _last_soft_ranks_stats = {}
-    _last_z_stats = {}
-    _last_selection_probs_stats = {}
+    _stats_buffer = {}
 
     @staticmethod
     def _differentiable_rank_descending(
@@ -64,102 +61,110 @@ class ShivaTopkFunc(torch.autograd.Function):
         B, N, D = x.shape
         k_int = topk_idx.shape[1]
 
-        grad_x = None
-        grad_logits = None
-        grad_k = None
-        grad_Ts = None
-        grad_Tk = None
-
         grad_x = torch.zeros_like(x)
-        grad_x.scatter_add_(
-            1, topk_idx.unsqueeze(-1).expand_as(grad_x_selected), grad_x_selected
-        )
-        grad_x.scatter_add_(
-            1, rest_idx.unsqueeze(-1).expand_as(grad_x_rejected), grad_x_rejected
-        )
-
-        # dL/dx_sel (B, N, D)
-        grad_x_sel_scattered = torch.zeros_like(x)
-        grad_x_sel_scattered.scatter_add_(
-            1, topk_idx.unsqueeze(-1).expand_as(grad_x_selected), grad_x_selected
-        )
-
-        # dL/dx_rej (B, N, D)
-        grad_x_rej_scattered = torch.zeros_like(x)
-        if k_int < N and grad_x_rejected is not None:
-            grad_x_rej_scattered.scatter_add_(
-                1, rest_idx.unsqueeze(-1).expand_as(grad_x_rejected), grad_x_rejected
-            )
+        if grad_x_selected is not None:
+            grad_x.scatter_add_(1, topk_idx.unsqueeze(-1).expand_as(grad_x_selected), grad_x_selected)
+        if grad_x_rejected is not None:
+            grad_x.scatter_add_(1, rest_idx.unsqueeze(-1).expand_as(grad_x_rejected), grad_x_rejected)
 
         # dL/dp = (dL/dx_sel - dL/dx_rej) * x
-        grad_probs = torch.sum(
-            (grad_x_sel_scattered - grad_x_rej_scattered) * x.detach(), dim=-1
-        )
+        grad_x_sel_scattered = torch.zeros_like(x)
+        if grad_x_selected is not None:
+            grad_x_sel_scattered.scatter_add_(1, topk_idx.unsqueeze(-1).expand_as(grad_x_selected), grad_x_selected)
 
-        # --- dL/d(logits), dL/d(k), dL/d(T) ---
+        grad_x_rej_scattered = torch.zeros_like(x)
+        if k_int < N and grad_x_rejected is not None:
+            grad_x_rej_scattered.scatter_add_(1, rest_idx.unsqueeze(-1).expand_as(grad_x_rejected), grad_x_rejected)
+
+        grad_probs = torch.sum((grad_x_sel_scattered - grad_x_rej_scattered) * x.detach(), dim=-1)
+
         logits_detached = logits.detach().requires_grad_(True)
         k_detached = k_float.detach().requires_grad_(True)
-        Ts_detached = Ts
-        Tk_detached = Tk
-
+        
         with torch.enable_grad():
-            T_rank = Ts_detached
-            T_select = Tk_detached
-
             scores_for_soft_rank = torch.sigmoid(logits_detached)
             noise = torch.randn_like(logits_detached) * 1e-5
             scores_for_soft_rank = scores_for_soft_rank + noise
 
-            soft_ranks = ShivaTopkFunc._differentiable_rank_descending(
-                scores_for_soft_rank, T_rank
-            )
+            soft_ranks = ShivaTopkFunc._differentiable_rank_descending(scores_for_soft_rank, Ts)
+            N_float = float(N)
 
-            N_float = float(logits_detached.shape[1])
-            z = T_select * (k_detached.unsqueeze(-1) - soft_ranks) / N_float
-            # z = T_select * (k_detached.unsqueeze(-1) - soft_ranks)
+            dist_to_k = k_detached.unsqueeze(-1) - soft_ranks
+            z = Tk * dist_to_k / N_float 
             selection_probs = torch.sigmoid(z)
 
-            if torch.rand(1) < 0.05:
-                with torch.no_grad():
-                    ShivaTopkFunc._last_grad_probs_stats = {
-                        "norm": torch.norm(grad_probs),
-                        "mean": grad_probs.mean(),
-                        "std": grad_probs.std(),
-                        "sum": grad_probs.sum(),
-                    }
+            grads = torch.autograd.grad(
+                outputs=selection_probs,
+                inputs=[logits_detached, k_detached],
+                grad_outputs=grad_probs,
+                allow_unused=True
+            )
+            grad_logits, grad_k = grads[0], grads[1]
 
-                    ShivaTopkFunc._last_soft_ranks_stats = {
-                        "mean": soft_ranks.mean(),
-                        "std": soft_ranks.std(),
-                        "min": soft_ranks.min(),
-                        "max": soft_ranks.max(),
-                    }
 
-                    # ShivaTopkFunc._last_z_stats = {
-                    #     "mean": z.mean(),
-                    #     "std": z.std(),
-                    # }
+        if torch.rand(1) < 1e-4:
+            with torch.no_grad():
+                g_logits_norm = grad_logits.norm().item()
+                g_k_norm = grad_k.norm().item() if grad_k is not None else 0.0
+                g_k_val = grad_k.mean().item() if grad_k is not None else 0.0
+                
+                in_transition = (selection_probs > 0.1) & (selection_probs < 0.9)
+                width_mean = in_transition.float().sum(dim=1).mean().item()
+                
+                active_grads = (grad_logits.abs() > 1e-8).float().sum(dim=1).mean().item()
+                
+                rank_spread = soft_ranks.std().item()
 
-                    # sigmoid_prime = selection_probs * (1 - selection_probs)
-                    # ShivaTopkFunc._last_selection_probs_stats = {
-                    #     "grad_mean": sigmoid_prime.mean(),
-                    #     "grad_std": sigmoid_prime.std(),
-                    # }
+                ShivaTopkFunc._stats_buffer = {
+                    "grad_logits_norm": g_logits_norm,
+                    "grad_k_norm": g_k_norm,
+                    "grad_k_mean": g_k_val,
+                    "soft_boundary_width": width_mean,
+                    "active_grad_tokens": active_grads,
+                    "rank_spread": rank_spread,
+                    "Ts": Ts.item() if isinstance(Ts, torch.Tensor) else Ts,
+                    "Tk": Tk.item() if isinstance(Tk, torch.Tensor) else Tk,
+                    "k_target": k_float.item(),
+                    "N": N
+                }
 
-        grads = torch.autograd.grad(
-            outputs=selection_probs,
-            inputs=[logits_detached, k_detached],
-            grad_outputs=grad_probs,
-            allow_unused=True
-        )
+                try:
+                    if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+                        _print_console_stats(ShivaTopkFunc._stats_buffer)
+                except:
+                    _print_console_stats(ShivaTopkFunc._stats_buffer)
 
-        grad_logits = grads[0]
-        grad_k = grads[1]
+        return grad_x, grad_logits, grad_k, None, None
 
-        if grad_k is not None:
-            grad_k = grad_k * 2
-
-        return grad_x, grad_logits, grad_k, grad_Ts, grad_Tk
+def _print_console_stats(stats):
+    """Auxiliary function for beautiful printing"""
+    print(f"\n{'-'*30} [TopK Autograd Monitor] {'-'*30}")
+    
+    # 1. Gradient Health
+    print(f"  > Gradient Health:")
+    print(f"    Grad Logits Norm : {stats['grad_logits_norm']:.4f}")
+    print(f"    Grad K (Mean)    : {stats['grad_k_mean']:.4f} (Norm: {stats['grad_k_norm']:.4f})")
+    
+    # 2. Temperature & Selection Analysis
+    width = stats['soft_boundary_width']
+    active = stats['active_grad_tokens']
+    N = stats['N']
+    
+    print(f"  > Softness & Participation (N={N}, k~={stats['k_target']:.1f}):")
+    print(f"    Ts (Rank Temp)   : {stats['Ts']:.2f}")
+    print(f"    Tk (Sel Temp)    : {stats['Tk']:.2f}")
+    print(f"    Boundary Width   : {width:.1f} tokens ({width/N*100:.1f}%) [Tokens with 0.1<p<0.9]")
+    print(f"    Active Gradients : {active:.1f} tokens ({active/N*100:.1f}%) [Tokens with |g|>1e-8]")
+    
+    # 3. Diagnosis
+    if active < 2.0:
+        print(f"    ⚠️  Gradient Vanishing! (Too Hard? Decrease Ts/Tk or check upstream)")
+    elif active > N * 0.9:
+        print(f"    ⚠️  All Tokens Updating! (Too Soft? Increase Ts/Tk to enforce sparsity)")
+    else:
+        print(f"    ✅  Healthy Sparsity.")
+        
+    print(f"{'-'*83}")
 
 ceil_ste = CeilSTE.apply
 sigmoid_ste = SigmoidSTE.apply

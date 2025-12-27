@@ -1,9 +1,12 @@
 __pycache__
 .vscode/
 acm-data/
-checkpoints/
+checkpoints*/
 wandb/
 mlruns/
 *.log
 shiva_env/
 *.pt
+*.ttf
+*.pdf
+*.csv

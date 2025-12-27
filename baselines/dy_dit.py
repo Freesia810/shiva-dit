@@ -57,9 +57,9 @@ class TokenSelect_baesd_on_x_t_text(nn.Module):
         self.full_dim_in = dim_in
         self.router = nn.Linear(dim_in, 1, bias=True)
 
-        nn.init.constant_(self.router.weight, 5.0)
+        nn.init.xavier_uniform_(self.router.weight)
         if self.router.bias is not None:
-            nn.init.constant_(self.router.bias, 0.0)
+            nn.init.constant_(self.router.bias, 5.0)
 
         self.is_hard = is_hard
         self.threshold = threshold
@@ -122,9 +122,6 @@ class DynamicDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         if hidden_dim is None or encoder_hidden_dim is None:
             raise ValueError("hidden_dim and encoder_hidden_dim must be set in global_context")
 
-        # Timestep-wise Dynamic Width
-        # todo: source code not released yet
-
         # Spatial-wise Dynamic Token
         if self.config["dynamic_token"]["enable"]:
             self.dynamic_token_selector = TokenSelect_baesd_on_x_t_text(
@@ -175,8 +172,8 @@ class DynamicDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
                 ## for original DyFlux's implement, they didn't consider the case that batch > 1
                 ## so we only select tokens that masked as 1 in all batch
-                token_mask_2d_hard = original_differentiable_mask.squeeze(-1) > 0.5
-                aligned_mask = token_mask_2d_hard.all(dim=0)  # (N,)
+                token_mask_2d_hard = original_differentiable_mask.squeeze(-1) > self.dynamic_token_selector.threshold
+                aligned_mask = token_mask_2d_hard.any(dim=0)  # (N,)
                 token_mask_for_indexing = (
                     aligned_mask.unsqueeze(0)
                     .unsqueeze(-1)

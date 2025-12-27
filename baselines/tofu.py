@@ -45,16 +45,16 @@ class ToFuDitBlockHook(ToMeSDDitBlockHook):
         )
 
 if __name__ == "__main__":
-    model_type = "flux-dev"
+    model_type = "sd3"
     pipe, model_attrs = get_pipeline(model_type)
 
     tofu_config = {
         "stride": (2, 2),
-        "merged_ratio": 0.5,
+        "merged_ratio": 0.2,
         "merge_config": {
             "self-attn": True,
             "cross-attn": False,
-            "ffn": False,
+            "ffn": True,
             "parallel": False,
         },
         "generator": torch.Generator("cuda").manual_seed(0),

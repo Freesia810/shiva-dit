@@ -33,6 +33,7 @@ from .single_file_utils import (
     convert_chroma_transformer_checkpoint_to_diffusers,
     convert_controlnet_checkpoint,
     convert_cosmos_transformer_checkpoint_to_diffusers,
+    convert_flux2_transformer_checkpoint_to_diffusers,
     convert_flux_transformer_checkpoint_to_diffusers,
     convert_hidream_transformer_to_diffusers,
     convert_hunyuan_video_transformer_to_diffusers,
@@ -159,6 +160,10 @@ SINGLE_FILE_LOADABLE_CLASSES = {
     },
     "QwenImageTransformer2DModel": {
         "checkpoint_mapping_fn": lambda x: x,
+        "default_subfolder": "transformer",
+    },
+    "Flux2Transformer2DModel": {
+        "checkpoint_mapping_fn": convert_flux2_transformer_checkpoint_to_diffusers,
         "default_subfolder": "transformer",
     },
 }
@@ -325,7 +330,11 @@ class FromOriginalModelMixin:
                 user_agent=user_agent,
             )
         if quantization_config is not None:
-            raise NotImplementedError("Quantization is not supported yet")
+            raise ValueError("Quantization is not supported for single file models")
+            # hf_quantizer = DiffusersAutoQuantizer.from_config(quantization_config)
+            # hf_quantizer.validate_environment()
+            # torch_dtype = hf_quantizer.update_torch_dtype(torch_dtype)
+
         else:
             hf_quantizer = None
 
