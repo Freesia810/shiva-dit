@@ -58,6 +58,8 @@ def main(args):
 
     try:
         num_channels_latents = pipe.transformer.config.in_channels
+        if pipe.__class__.__name__ == "FluxPipeline":
+            num_channels_latents = num_channels_latents // 4
     except AttributeError:
         if hasattr(pipe, "unet"):
             num_channels_latents = pipe.unet.config.in_channels
@@ -101,6 +103,8 @@ def main(args):
                         generator=generator,
                         latents=None
                     )
+                    if pipe.__class__.__name__ == "FluxPipeline":
+                        latent = latent[0]
                 
                 torch.save(latent.clone(), save_path)
             
