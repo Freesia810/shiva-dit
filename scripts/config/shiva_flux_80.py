@@ -20,17 +20,16 @@ hook_config = {
 
 lora_config = {
     "enable": True,
-    "rank": 32,
-    "lora_alpha": 32,
+    "rank": 64,
+    "lora_alpha": 128,
     "target_modules": [
-        "norm1.linear", "norm1_context.linear", "norm.linear",
         "to_q", "to_k", "to_v", "to_out.0",
         "add_q_proj", "add_k_proj", "add_v_proj", "to_add_out",
         "net.0.proj", "net.2",
         "single_transformer_blocks.proj_mlp", "single_transformer_blocks.proj_out",
         "proj_out",
     ],
-    "use_dora": False,
+    "use_dora": False
 }
 
 trainer_config = {
@@ -44,7 +43,7 @@ trainer_config = {
     "trainable_hook_config": (HookType, hook_config),
     "caption_dropout_rate": 0.1,
     "enable_gradient_checkpointing": False,
-    "num_epochs": 30,
+    "num_epochs": 50,
     "train_batch_size": 1,
     "gradient_accumulation_steps": 2,
     "optimizer": "AdamW",
@@ -90,10 +89,10 @@ trainer_config = {
                 "weights": {
                     "ratio": [0.0, 0.0, 1.0],
                     "gate": 0.0,
-                    "distill": [0.1, 0.0],
+                    "distill": [1.0, 0.0],
                 },
                 "lr": {
-                    "lora": 5e-5,
+                    "lora": 1e-4,
                     "router": 1e-6,
                     "image_ratio_policy": 1e-4,
                 },
@@ -107,10 +106,10 @@ trainer_config = {
                 "weights": {
                     "ratio": [0.0, 0.0, 1.0],
                     "gate": 0.0,
-                    "distill": [0.1, 0.0],
+                    "distill": [1.0, 0.0],
                 },
                 "lr": {
-                    "lora": 5e-5,
+                    "lora": 1e-4,
                     "router": 1e-6,
                     "image_ratio_policy": 1e-4,
                 },
@@ -123,13 +122,13 @@ trainer_config = {
                 "weights": {
                     "ratio": [0.0, 0.0, 0.0], 
                     "gate": 0.0, 
-                    "distill": [0.1, 1.0]
+                    "distill": [2.0, 0.0]
                 },
                 "lr": {
-                    "lora": 1e-5,
+                    "lora": 1e-4,
                     "router": 1e-5,
                 },
-                "temp": [15.0, 15.0, 30.0, 100.0],
+                "temp": [15.0, 15.0, 30.0, 33.0],
             },
         ],
     },
