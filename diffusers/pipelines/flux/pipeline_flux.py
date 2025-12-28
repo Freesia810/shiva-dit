@@ -238,8 +238,9 @@ class FluxPipeline(
         prompt = [prompt] if isinstance(prompt, str) else prompt
         batch_size = len(prompt)
 
-        # if isinstance(self, TextualInversionLoaderMixin):
-        #     prompt = self.maybe_convert_prompt(prompt, self.tokenizer_2)
+        self.tokenizer_2.model_max_length = 1024
+        if isinstance(self, TextualInversionLoaderMixin):
+            prompt = self.maybe_convert_prompt(prompt, self.tokenizer_2)
 
         text_inputs = self.tokenizer_2(
             prompt,

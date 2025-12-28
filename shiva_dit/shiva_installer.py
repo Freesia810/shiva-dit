@@ -218,7 +218,7 @@ if __name__ == "__main__":
     shiva_config = {
         "shiva_mode": "context",
 
-        "fixed_context_ratio": 1.0,
+        "fixed_context_ratio": 0.4,
         "context_num_groups": 57,
         "context_pruner_mode": "free",
         "context_pool_size": 2,
