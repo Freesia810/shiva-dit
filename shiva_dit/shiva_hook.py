@@ -219,21 +219,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         # --- Metadata Preparation ---
         layer_id_tensor = self.layer_id_tensor.expand(B)
 
-        def get_t_scalar():
-            current_t = global_context.current_timestep
-            if current_t is None:
-                raise ValueError("global_context.current_timestep is None")
-            t_val = current_t.to(dtype)
-            t_val = t_val / 1000.0  # normalize
-            if t_val.numel() == 1:
-                t_scalar = t_val.view(1, 1).expand(B, 1)
-            elif t_val.shape[0] == B:
-                t_scalar = t_val.view(B, 1)
-            else:
-                raise ValueError(f"t_val.shape: {t_val.shape}")
-            
-            return t_scalar
-
         # --- Context Pruning Logic ---
         ctx_sel = encoder_hidden_states
         ctx_rej = None

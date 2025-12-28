@@ -132,8 +132,8 @@ class ShivaContextPruner(nn.Module):
     def forward(self, hidden_states, encoder_hidden_states, k, H=None, W=None):
         original_dtype = hidden_states.dtype
 
-        h_in = hidden_states.to(torch.float32)
-        e_in = encoder_hidden_states.to(torch.float32)
+        h_in = hidden_states
+        e_in = encoder_hidden_states
 
         if self.mode == "learned":
             q_pooled_raw = self._apply_pooling(h_in, H, W)  # (B, M, Dim_in)
@@ -154,18 +154,11 @@ class ShivaContextPruner(nn.Module):
 
             ops = self.free_ops
             with torch.no_grad():
+                num_heads = ops.get("num_heads", 1)
                 if "to_q" in ops:
                     q_full = ops["to_q"](h_in)
                     if "norm_q" in ops:
-                        q_full = ops["norm_q"](q_full)
-
-                    num_heads = ops.get("num_heads", 1)
-                    if num_heads > 1:
-                        B, N, C = q_full.shape
-                        head_dim = C // num_heads
-                        q_full = q_full.view(B, N, num_heads, head_dim)
-                    else:
-                        q_full = q_full.unsqueeze(2)  # (B, N, 1, D)
+                        q_full = ops["norm_q"](q_full.unflatten(-1, (num_heads, -1)))
                 else:
                     q_full = h_in.unsqueeze(2)  # Fallback: (B, N, 1, D)
 
@@ -176,16 +169,7 @@ class ShivaContextPruner(nn.Module):
                 if "to_k" in ops:
                     k_full = ops["to_k"](e_in)
                     if "norm_k" in ops:
-                        k_full = ops["norm_k"](k_full)
-
-                    # Reshape: (B, L, Heads, HeadDim)
-                    num_heads = ops.get("num_heads", 1)
-                    if num_heads > 1:
-                        B, L, C = k_full.shape
-                        head_dim = C // num_heads
-                        k_full = k_full.view(B, L, num_heads, head_dim)
-                    else:
-                        k_full = k_full.unsqueeze(2)
+                        k_full = ops["norm_k"](k_full.unflatten(-1, (num_heads, -1)))
                     k_proj = k_full
                 else:
                     k_proj = e_in.unsqueeze(2)
