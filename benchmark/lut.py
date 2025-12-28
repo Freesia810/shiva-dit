@@ -32,6 +32,8 @@ def generate_lut(args):
         if hasattr(pipe, "transformer"):
             # Flux / SD3
             total_layers = pipe.transformer.config.num_layers
+            if hasattr(pipe.transformer.config, "num_single_layers"):
+                total_layers += pipe.transformer.config.num_single_layers
         elif hasattr(pipe, "dit"):
             # PixArt / DiT
             total_layers = pipe.dit.config.depth
