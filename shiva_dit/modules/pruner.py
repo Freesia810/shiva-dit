@@ -6,6 +6,7 @@ import numpy as np
 
 from shiva_dit.utils.ste import ShivaTopkFunc
 from shiva_dit.utils import global_context
+from shiva_dit.hook.hook_manager import HookManager
 
 SAVE_DIR = 'evolution_data'
 
@@ -46,6 +47,10 @@ class ShivaContextPruner(nn.Module):
             self.k_proj = None
             self.logit_scale = None
 
+            # scheduled shared context configs
+            self.shared_spatial_config = HookManager.get_global("shiva_context_shared_spatial", None)
+            self.shared_temporal_config = HookManager.get_global("shiva_context_shared_temporal", None)
+
         # ================== Thresholds (Buffer) ==================
         self.register_buffer("Ts", torch.tensor(float(init_Ts)), persistent=False)
         self.register_buffer("Tk", torch.tensor(float(init_Tk)), persistent=False)
@@ -76,16 +81,16 @@ class ShivaContextPruner(nn.Module):
                 ops["norm_q"] = attn.norm_q
 
             ops["num_heads"] = attn.heads
-        
+
         elif hasattr(attn, "to_k") and hasattr(attn, "to_q"):            
             ops["to_k"] = attn.to_k
             ops["to_q"] = attn.to_q
-            
+
             if hasattr(attn, "norm_k"):
                 ops["norm_k"] = attn.norm_k
             if hasattr(attn, "norm_q"):
                 ops["norm_q"] = attn.norm_q
-                
+
             ops["num_heads"] = attn.heads
         else:
             raise RuntimeError(
@@ -160,11 +165,11 @@ class ShivaContextPruner(nn.Module):
     def _get_feature_image(self, h_in, H, W):
         if H is None or W is None or H * W != h_in.shape[0]:
             return None
-        
+
         # 1. Normalize features
         x = h_in.float()
         x = (x - x.mean(dim=0)) / (x.std(dim=0) + 1e-5)
-        
+
         # 2. PCA Projection (Project to top 3 components)
         if x.shape[0] > 3 and x.shape[1] > 3:
             _, _, V = torch.pca_lowrank(x, q=3, center=False, niter=2)
@@ -177,10 +182,100 @@ class ShivaContextPruner(nn.Module):
         rgb_min = rgb.min(dim=0, keepdim=True).values
         rgb_max = rgb.max(dim=0, keepdim=True).values
         rgb = (rgb - rgb_min) / (rgb_max - rgb_min + 1e-5)
-        
+
         # 4. Reshape to Image
         img = rgb.view(H, W, 3).cpu().numpy()
         return img
+
+    def _get_active_policy(self, current_iter):
+        active_spatial_group = 1
+        active_temporal_interval = 1
+
+        if self.shared_spatial_config:
+            if current_iter < self.shared_spatial_config["spatial_step_thresh"]:
+                active_spatial_group = self.shared_spatial_config["spatial_group_size"]
+
+        if self.shared_temporal_config:
+            if self.layer_id < self.shared_temporal_config["temporal_layer_thresh"]:
+                active_temporal_interval = self.shared_temporal_config["temporal_interval"]
+
+        return active_spatial_group, active_temporal_interval
+
+    def _process_attn(self, h_in, e_in, H, W):
+        if self.free_ops is None:
+            raise RuntimeError(
+                "Pruner is in 'free' mode but 'on_register' was never called to bind model layers."
+            )
+
+        ops = self.free_ops
+        with torch.no_grad():
+            num_heads = ops.get("num_heads", 1)
+            if "to_q" in ops:
+                q_full = ops["to_q"](h_in)
+                if "norm_q" in ops:
+                    q_full = ops["norm_q"](q_full.unflatten(-1, (num_heads, -1)))
+            else:
+                q_full = h_in.unsqueeze(2)  # Fallback: (B, N, 1, D)
+
+            # Apply Pooling: (B, N, H, D) -> (B, M, H, D)
+            q = self._apply_pooling(q_full, H, W)
+
+            # --- Extract Text K (Retain Heads) ---
+            if "to_k" in ops:
+                k_full = ops["to_k"](e_in)
+                if "norm_k" in ops:
+                    k_full = ops["norm_k"](k_full.unflatten(-1, (num_heads, -1)))
+                k_proj = k_full
+            else:
+                k_proj = e_in.unsqueeze(2)
+
+            scale = 1.0 / math.sqrt(h_in.shape[-1] // num_heads)
+            attn_map_heads = torch.einsum("bmhd,blhd->bmhl", q, k_proj) * scale # Einsum: (B, M, H, D) @ (B, L, H, D) -> (B, M, H, L)
+            attn_map = attn_map_heads.mean(dim=2) # (B, M, L)
+
+        return attn_map
+
+    def _forward_learned(self, h_in, e_in, H, W):
+        q_pooled_raw = self._apply_pooling(h_in, H, W)  # (B, M, Dim_in)
+        q = self.q_proj(q_pooled_raw)  # (B, M, Proj_Dim)
+        k_proj = self.k_proj(e_in)  # (B, L, Proj_Dim)
+
+        q = F.normalize(q, p=2, dim=-1)
+        k_proj = F.normalize(k_proj, p=2, dim=-1)
+        scale = self.logit_scale.exp()
+
+        # MatMul: (B, M, D) @ (B, L, D)^T -> (B, M, L)
+        attn_map = torch.matmul(q, k_proj.transpose(-2, -1)) * scale
+        scores = attn_map.max(dim=1).values  # (B, L)
+
+        return scores
+
+    def _forward_free(self, h_in, e_in, H, W, current_iter):
+        active_spatial_group, active_temporal_interval = self._get_active_policy(current_iter)
+
+        if active_spatial_group > 1:
+            leader_id = (self.layer_id // active_spatial_group) * active_spatial_group
+        else:
+            leader_id = self.layer_id
+
+        cache = HookManager.get_global("SHIVA_SCORE_CACHE", {})
+        if self.layer_id != leader_id:
+            leader_data = cache.get(leader_id)
+            if leader_data is not None:
+                return leader_data["score"]
+
+        elif active_temporal_interval > 1 and current_iter % active_temporal_interval != 0:
+            my_data = cache.get(self.layer_id)
+            if my_data is not None:
+                return my_data["score"]
+
+        attn_map = self._process_attn(h_in, e_in, H, W)
+        scores = attn_map.max(dim=1).values  # (B, L)
+        if self.layer_id == leader_id:
+            cache[self.layer_id] = {"score": scores.detach(), "step": current_iter}
+            HookManager.set_global("SHIVA_SCORE_CACHE", cache)
+
+        return scores
 
     def forward(self, hidden_states, encoder_hidden_states, k):
         original_dtype = hidden_states.dtype
@@ -189,54 +284,15 @@ class ShivaContextPruner(nn.Module):
         e_in = encoder_hidden_states
         H, W = global_context.hidden_seq_height, global_context.hidden_seq_width
 
-        if self.mode == "learned":
-            q_pooled_raw = self._apply_pooling(h_in, H, W)  # (B, M, Dim_in)
-            q = self.q_proj(q_pooled_raw)  # (B, M, Proj_Dim)
-            k_proj = self.k_proj(e_in)  # (B, L, Proj_Dim)
-
-            q = F.normalize(q, p=2, dim=-1)
-            k_proj = F.normalize(k_proj, p=2, dim=-1)
-            scale = self.logit_scale.exp()
-
-            # MatMul: (B, M, D) @ (B, L, D)^T -> (B, M, L)
-            attn_map = torch.matmul(q, k_proj.transpose(-2, -1)) * scale
-        else:
-            if self.free_ops is None:
-                raise RuntimeError(
-                    "Pruner is in 'free' mode but 'on_register' was never called to bind model layers."
-                )
-
-            ops = self.free_ops
-            with torch.no_grad():
-                num_heads = ops.get("num_heads", 1)
-                if "to_q" in ops:
-                    q_full = ops["to_q"](h_in)
-                    if "norm_q" in ops:
-                        q_full = ops["norm_q"](q_full.unflatten(-1, (num_heads, -1)))
-                else:
-                    q_full = h_in.unsqueeze(2)  # Fallback: (B, N, 1, D)
-
-                # Apply Pooling: (B, N, H, D) -> (B, M, H, D)
-                q = self._apply_pooling(q_full, H, W)
-
-                # --- Extract Text K (Retain Heads) ---
-                if "to_k" in ops:
-                    k_full = ops["to_k"](e_in)
-                    if "norm_k" in ops:
-                        k_full = ops["norm_k"](k_full.unflatten(-1, (num_heads, -1)))
-                    k_proj = k_full
-                else:
-                    k_proj = e_in.unsqueeze(2)
-
-                scale = 1.0 / math.sqrt(h_in.shape[-1] // num_heads)
-                attn_map_heads = torch.einsum("bmhd,blhd->bmhl", q, k_proj) * scale # Einsum: (B, M, H, D) @ (B, L, H, D) -> (B, M, H, L)
-                attn_map = attn_map_heads.mean(dim=2) # (B, M, L)
-
-        scores = attn_map.max(dim=1).values # (B, L)
-
-        self.last_scores = scores.detach()
+        scores = (
+            self._forward_learned(h_in, e_in, H, W)
+            if self.mode == "learned"
+            else self._forward_free(h_in, e_in, H, W, global_context.current_iteration)
+        )
 
         # self._save_full_score_trajectory(scores[0])
+
+        self.last_scores = scores.detach()
 
         if not isinstance(k, torch.Tensor):
             k = torch.tensor(k, device=hidden_states.device, dtype=torch.float32)

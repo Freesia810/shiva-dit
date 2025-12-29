@@ -38,6 +38,7 @@ def install_shiva_hooks(
     context_pruner_mode = kwargs.pop("context_pruner_mode", "learned")
     context_pool_size = kwargs.pop("context_pool_size", None)
     context_proj_dim = kwargs.pop("context_proj_dim", 128)
+    context_shared_config = kwargs.pop("context_shared_config", {})
 
     # Common Configs
     init_Ts = kwargs.pop("init_Ts", 30.0)
@@ -85,7 +86,6 @@ def install_shiva_hooks(
     shared_pruner_expert = None
     shared_fuse_expert = None
     grouped_routers = None
-    context_grouped_routers = None
 
     if shiva_mode in ["image", "both"]:
         print("  > Instantiating Image Pruning Modules...")
@@ -132,8 +132,52 @@ def install_shiva_hooks(
             ).to(device, dtype)
             assert False, "Adaptive context ratio is not implemented yet."
         elif context_ratio_mode == 'linear':
-            print(f"  > Instantiating Linear Schedule Context Pruning Modules... {fixed_context_ratio[0]} -> {fixed_context_ratio[1]}")
+            assert context_pruner_mode == 'free', "Linear context ratio scheduling only supports 'free' pruner mode."
 
+            spatial_step_thresh = spatial_group_size = None
+            temporal_layer_thresh = temporal_interval = None
+            if (
+                "spatial_step_thresh" in context_shared_config
+                or "spatial_group_size" in context_shared_config
+            ):
+                spatial_step_thresh = context_shared_config["spatial_step_thresh"]
+                spatial_group_size = context_shared_config["spatial_group_size"]
+                assert (
+                    0 < spatial_step_thresh <= 1.0
+                ), "'spatial_step_thresh' must be in (0, 1]."
+
+            if (
+                "temporal_layer_thresh" in context_shared_config
+                or "temporal_interval" in context_shared_config
+            ):
+                temporal_layer_thresh = context_shared_config["temporal_layer_thresh"]
+                temporal_interval = context_shared_config["temporal_interval"]
+                if temporal_layer_thresh <= 1.0:
+                    temporal_layer_thresh = int(temporal_layer_thresh * num_layers)
+                assert (
+                    0 < temporal_layer_thresh <= num_layers
+                ), f"'temporal_layer_thresh' must be in (0, {num_layers}]."
+
+            if spatial_step_thresh and spatial_group_size:
+                print(f"    - Spatial Linear Scheduling: {spatial_step_thresh} steps with group size {spatial_group_size}")
+                HookManager.set_global(
+                    "shiva_context_shared_spatial",
+                    {
+                        "spatial_step_thresh": spatial_step_thresh,
+                        "spatial_group_size": spatial_group_size,
+                    },
+                )
+            if temporal_layer_thresh and temporal_interval:
+                print(f"    - Temporal Linear Scheduling: {temporal_thresh*100:.1f}% layers with interval {temporal_interval}")
+                HookManager.set_global(
+                    "shiva_context_shared_temporal",
+                    {
+                        "temporal_layer_thresh": temporal_layer_thresh,
+                        "temporal_interval": temporal_interval,
+                    },
+                )
+
+            print(f"  > Instantiating Linear Schedule Context Pruning Modules... {fixed_context_ratio[0]} -> {fixed_context_ratio[1]}")
 
     layers_per_group = num_layers // num_router_groups if num_router_groups > 0 else num_layers
 
@@ -147,13 +191,13 @@ def install_shiva_hooks(
         if i in skip_layer_indices:
             skipped += 1
             continue
-        
+
         # Image Router
         injected_router = None
         if grouped_routers is not None:
             router_group_id = min(i // layers_per_group, num_router_groups - 1)
             injected_router = grouped_routers[router_group_id]
-        
+
         # Context Router, per layer
         injected_context_router = None
         if shiva_mode in ["context", "both"]:
@@ -212,13 +256,16 @@ if __name__ == "__main__":
 
     shiva_config = {
         "shiva_mode": "context",
-
         "context_ratio_mode": "linear",
-
         "fixed_context_ratio": (0.8, 0.01),
         "context_pruner_mode": "free",
         "context_pool_size": 64,
-
+        "context_shared_config": {
+            "spatial_step_thresh": 0.5,
+            "spatial_group_size": 2,
+            "temporal_layer_thresh": 20,
+            "temporal_interval": 2,
+        },
         "init_Ts": 10.0,
         "init_Tk": 10.0,
     }
