@@ -38,7 +38,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         # --- Context Pruning Components ---
         shared_context_pruner: ShivaContextPruner = None,
         shared_context_ratio_policy: ShivaRatioPolicy = None,
-        fixed_context_ratio: float = 1.0,
+        fixed_context_ratio: float | tuple = 1.0,
         # --- LuT Settings ---
         use_gater_lut: bool = False,
         shared_gater_cache: torch.Tensor = None,
@@ -101,6 +101,12 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.context_aux_loss_accumulator = []
 
         self.capture_mask_for_viz = capture_mask_for_viz
+
+    def register_name(self, model_type:str, layer_name: str):
+        super().register_name(model_type, layer_name)
+
+        # register index for context pruner
+        self.context_pruner.on_register_layer_idx(self.layer_idx)
 
     def _get_stratified_ratio_val(self, device):
         step_idx = getattr(global_context, "train_step_idx", 0)
@@ -272,9 +278,19 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                         ctx_ratio = ctx_ratio_pred
                 else:
                     # Fixed Ratio
-                    ctx_ratio = torch.tensor(
-                        self.fixed_context_ratio, device=device, dtype=dtype
-                    )
+                    if isinstance(self.fixed_context_ratio, float):
+                        ctx_ratio = torch.tensor(
+                            self.fixed_context_ratio, device=device, dtype=dtype
+                        )
+                    else:
+                        # linear schedule
+                        start_ratio, end_ratio = self.fixed_context_ratio
+                        total_steps = global_context.num_inference_steps
+                        current_iter = global_context.current_iteration
+                        
+                        progress = current_iter / float(total_steps) if total_steps > 0 else 0.0
+                        current_ratio_val = start_ratio + (end_ratio - start_ratio) * progress
+                        ctx_ratio = torch.tensor(current_ratio_val, device=device, dtype=dtype)
 
             # Safety clamp
             ctx_ratio = ctx_ratio.clamp(min=0.01, max=1.0)

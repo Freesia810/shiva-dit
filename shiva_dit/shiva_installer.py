@@ -35,7 +35,6 @@ def install_shiva_hooks(
     # Context Configs
     context_ratio_mode = kwargs.pop("context_ratio_mode", "fixed")
     fixed_context_ratio = kwargs.pop("fixed_context_ratio", 1.0)
-    context_num_groups = kwargs.pop("context_num_groups", 1)
     context_pruner_mode = kwargs.pop("context_pruner_mode", "learned")
     context_pool_size = kwargs.pop("context_pool_size", None)
     context_proj_dim = kwargs.pop("context_proj_dim", 128)
@@ -122,33 +121,21 @@ def install_shiva_hooks(
         ]).to(device, dtype)
 
     # --- 2. Context Pruning Modules ---
-    shared_context_pruner = None
     shared_context_ratio_policy = None
 
     if shiva_mode in ["context", "both"]:
         print("  > Instantiating Context Modules...")
-        context_grouped_routers = nn.ModuleList(
-            [
-                ShivaContextPruner(
-                    mode=context_pruner_mode,
-                    pool_size=context_pool_size,
-                    img_dim=model_dim,
-                    txt_dim=prompt_embed_dim,
-                    proj_dim=context_proj_dim,
-                    init_Ts=init_Ts,
-                    init_Tk=init_Tk,
-                )
-                for _ in range(context_num_groups)
-            ]
-        ).to(device, dtype)
 
         if context_ratio_mode == "adaptive":
             shared_context_ratio_policy = ShivaRatioPolicy(
                 total_layers=num_layers, ratio_bottleneck_dim=ratio_bottleneck_dim, init_ratio=fixed_context_ratio
             ).to(device, dtype)
+            assert False, "Adaptive context ratio is not implemented yet."
+        elif context_ratio_mode == 'linear':
+            print(f"  > Instantiating Linear Schedule Context Pruning Modules... {fixed_context_ratio[0]} -> {fixed_context_ratio[1]}")
+
 
     layers_per_group = num_layers // num_router_groups if num_router_groups > 0 else num_layers
-    context_layers_per_group = num_layers // context_num_groups if context_num_groups > 0 else num_layers
 
     if skip_layer_indices is None:
         skip_layer_indices = []
@@ -166,11 +153,19 @@ def install_shiva_hooks(
         if grouped_routers is not None:
             router_group_id = min(i // layers_per_group, num_router_groups - 1)
             injected_router = grouped_routers[router_group_id]
-        # Context Router
+        
+        # Context Router, per layer
         injected_context_router = None
-        if context_grouped_routers is not None:
-            context_router_group_id = min(i // context_layers_per_group, context_num_groups - 1)
-            injected_context_router = context_grouped_routers[context_router_group_id]
+        if shiva_mode in ["context", "both"]:
+            injected_context_router = ShivaContextPruner(
+                mode=context_pruner_mode,
+                pool_size=context_pool_size,
+                img_dim=model_dim,
+                txt_dim=prompt_embed_dim,
+                proj_dim=context_proj_dim,
+                init_Ts=init_Ts,
+                init_Tk=init_Tk,
+            ).to(device, dtype)
 
         hook_kwargs = {
             "shiva_mode": shiva_mode,
@@ -218,16 +213,14 @@ if __name__ == "__main__":
     shiva_config = {
         "shiva_mode": "context",
 
-        "fixed_context_ratio": 0.4,
-        "context_num_groups": 57,
+        "context_ratio_mode": "linear",
+
+        "fixed_context_ratio": (0.8, 0.01),
         "context_pruner_mode": "free",
-        "context_pool_size": 2,
-        "context_proj_dim": None,
+        "context_pool_size": 64,
 
         "init_Ts": 10.0,
         "init_Tk": 10.0,
-
-        "skip_layer_indices": list(range(19, 57)),
     }
 
     HookManager.configure_hooks(

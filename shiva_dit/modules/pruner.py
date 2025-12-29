@@ -1,10 +1,13 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.nn.utils.parametrizations as parametrizations
 import numpy as np
 
 from shiva_dit.utils.ste import ShivaTopkFunc
+from shiva_dit.utils import global_context
+
+SAVE_DIR = 'evolution_data'
 
 class ShivaPrunerExpert(torch.nn.Module):
     def __init__(self, init_Ts, init_Tk):
@@ -47,10 +50,15 @@ class ShivaContextPruner(nn.Module):
         self.register_buffer("Ts", torch.tensor(float(init_Ts)), persistent=False)
         self.register_buffer("Tk", torch.tensor(float(init_Tk)), persistent=False)
 
+    def on_register_layer_idx(self, layer_id):
+        self.layer_id = layer_id
+
     def on_register(self, block: nn.Module):
         if self.mode != "free":
             return
 
+        # free mode
+        self.eval()
         attn = block.attn if hasattr(block, "attn") else block
 
         ops = {}
@@ -67,6 +75,17 @@ class ShivaContextPruner(nn.Module):
             if hasattr(attn, "norm_q"):
                 ops["norm_q"] = attn.norm_q
 
+            ops["num_heads"] = attn.heads
+        
+        elif hasattr(attn, "to_k") and hasattr(attn, "to_q"):            
+            ops["to_k"] = attn.to_k
+            ops["to_q"] = attn.to_q
+            
+            if hasattr(attn, "norm_k"):
+                ops["norm_k"] = attn.norm_k
+            if hasattr(attn, "norm_q"):
+                ops["norm_q"] = attn.norm_q
+                
             ops["num_heads"] = attn.heads
         else:
             raise RuntimeError(
@@ -129,11 +148,46 @@ class ShivaContextPruner(nn.Module):
 
         return q_pooled
 
-    def forward(self, hidden_states, encoder_hidden_states, k, H=None, W=None):
+    def _save_full_score_trajectory(self, scores):
+        import os
+        step_idx = global_context.current_iteration
+        # evolution_data/step_001/
+        step_dir = os.path.join(SAVE_DIR, f"step_{step_idx:03d}")
+        os.makedirs(step_dir, exist_ok=True)
+        save_path = os.path.join(step_dir, f"layer_{self.layer_id:03d}.npy")
+        np.save(save_path, scores.detach().cpu().float().numpy())
+
+    def _get_feature_image(self, h_in, H, W):
+        if H is None or W is None or H * W != h_in.shape[0]:
+            return None
+        
+        # 1. Normalize features
+        x = h_in.float()
+        x = (x - x.mean(dim=0)) / (x.std(dim=0) + 1e-5)
+        
+        # 2. PCA Projection (Project to top 3 components)
+        if x.shape[0] > 3 and x.shape[1] > 3:
+            _, _, V = torch.pca_lowrank(x, q=3, center=False, niter=2)
+            rgb = torch.matmul(x, V) # (N, 3)
+        else:
+            # Fallback: simple slice
+            rgb = x[:, :3]
+
+        # 3. Normalize RGB to [0, 1] for visualization
+        rgb_min = rgb.min(dim=0, keepdim=True).values
+        rgb_max = rgb.max(dim=0, keepdim=True).values
+        rgb = (rgb - rgb_min) / (rgb_max - rgb_min + 1e-5)
+        
+        # 4. Reshape to Image
+        img = rgb.view(H, W, 3).cpu().numpy()
+        return img
+
+    def forward(self, hidden_states, encoder_hidden_states, k):
         original_dtype = hidden_states.dtype
 
         h_in = hidden_states
         e_in = encoder_hidden_states
+        H, W = global_context.hidden_seq_height, global_context.hidden_seq_width
 
         if self.mode == "learned":
             q_pooled_raw = self._apply_pooling(h_in, H, W)  # (B, M, Dim_in)
@@ -174,17 +228,15 @@ class ShivaContextPruner(nn.Module):
                 else:
                     k_proj = e_in.unsqueeze(2)
 
-                # Normalize per head
-                q = F.normalize(q, p=2, dim=-1)
-                k_proj = F.normalize(k_proj, p=2, dim=-1)
+                scale = 1.0 / math.sqrt(h_in.shape[-1] // num_heads)
+                attn_map_heads = torch.einsum("bmhd,blhd->bmhl", q, k_proj) * scale # Einsum: (B, M, H, D) @ (B, L, H, D) -> (B, M, H, L)
+                attn_map = attn_map_heads.mean(dim=2) # (B, M, L)
 
-                # Einsum: (B, M, H, D) @ (B, L, H, D) -> (B, M, H, L)
-                attn_map = torch.einsum("bmhd,blhd->bmhl", q, k_proj)
-                attn_map = attn_map.mean(dim=2)
-
-        scores = attn_map.max(dim=1).values
+        scores = attn_map.max(dim=1).values # (B, L)
 
         self.last_scores = scores.detach()
+
+        # self._save_full_score_trajectory(scores[0])
 
         if not isinstance(k, torch.Tensor):
             k = torch.tensor(k, device=hidden_states.device, dtype=torch.float32)
