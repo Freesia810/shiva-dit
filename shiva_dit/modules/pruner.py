@@ -187,12 +187,12 @@ class ShivaContextPruner(nn.Module):
         img = rgb.view(H, W, 3).cpu().numpy()
         return img
 
-    def _get_active_policy(self, current_iter):
+    def _get_active_policy(self, current_iter, num_inference_steps):
         active_spatial_group = 1
         active_temporal_interval = 1
 
         if self.shared_spatial_config:
-            if current_iter < self.shared_spatial_config["spatial_step_thresh"]:
+            if current_iter < self.shared_spatial_config["spatial_step_thresh"] * num_inference_steps:
                 active_spatial_group = self.shared_spatial_config["spatial_group_size"]
 
         if self.shared_temporal_config:
@@ -250,8 +250,8 @@ class ShivaContextPruner(nn.Module):
 
         return scores
 
-    def _forward_free(self, h_in, e_in, H, W, current_iter):
-        active_spatial_group, active_temporal_interval = self._get_active_policy(current_iter)
+    def _forward_free(self, h_in, e_in, H, W, current_iter, num_inference_steps):
+        active_spatial_group, active_temporal_interval = self._get_active_policy(current_iter, num_inference_steps)
 
         if active_spatial_group > 1:
             leader_id = (self.layer_id // active_spatial_group) * active_spatial_group
@@ -269,6 +269,7 @@ class ShivaContextPruner(nn.Module):
             if my_data is not None:
                 return my_data["score"]
 
+        # print(current_iter, self.layer_id, leader_id, active_spatial_group, active_temporal_interval)
         attn_map = self._process_attn(h_in, e_in, H, W)
         scores = attn_map.max(dim=1).values  # (B, L)
         if self.layer_id == leader_id:
@@ -287,7 +288,7 @@ class ShivaContextPruner(nn.Module):
         scores = (
             self._forward_learned(h_in, e_in, H, W)
             if self.mode == "learned"
-            else self._forward_free(h_in, e_in, H, W, global_context.current_iteration)
+            else self._forward_free(h_in, e_in, H, W, global_context.current_iteration, global_context.num_inference_steps)
         )
 
         # self._save_full_score_trajectory(scores[0])

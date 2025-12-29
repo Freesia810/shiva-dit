@@ -168,7 +168,7 @@ def install_shiva_hooks(
                     },
                 )
             if temporal_layer_thresh and temporal_interval:
-                print(f"    - Temporal Linear Scheduling: {temporal_thresh*100:.1f}% layers with interval {temporal_interval}")
+                print(f"    - Temporal Linear Scheduling: {temporal_layer_thresh} layers with interval {temporal_interval}")
                 HookManager.set_global(
                     "shiva_context_shared_temporal",
                     {
@@ -257,14 +257,14 @@ if __name__ == "__main__":
     shiva_config = {
         "shiva_mode": "context",
         "context_ratio_mode": "linear",
-        "fixed_context_ratio": (0.8, 0.01),
+        "fixed_context_ratio": (0.42, 1e-3),
         "context_pruner_mode": "free",
-        "context_pool_size": 64,
+        "context_pool_size": None,
         "context_shared_config": {
-            "spatial_step_thresh": 0.5,
-            "spatial_group_size": 2,
-            "temporal_layer_thresh": 20,
-            "temporal_interval": 2,
+            "spatial_step_thresh": 1.0,
+            "spatial_group_size": 57,
+            "temporal_layer_thresh": 57,
+            "temporal_interval": 50,
         },
         "init_Ts": 10.0,
         "init_Tk": 10.0,

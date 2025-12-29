@@ -293,7 +293,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                         ctx_ratio = torch.tensor(current_ratio_val, device=device, dtype=dtype)
 
             # Safety clamp
-            ctx_ratio = ctx_ratio.clamp(min=0.01, max=1.0)
+            ctx_ratio = ctx_ratio.clamp(min=1e-4, max=1.0)
             self.current_context_ratio_for_loss = ctx_ratio
 
             if self.training:
