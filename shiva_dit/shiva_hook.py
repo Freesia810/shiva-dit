@@ -301,9 +301,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             if self.training:
                 k_ctx = ceil_ste(ctx_ratio * L)
             else:
-                # with torch.no_grad():
-                #     k_ctx = torch.ceil(ctx_ratio * L)
-                
                 if 'ctx_ratio_float' in locals():
                     k_ctx = int(math.ceil(ctx_ratio_float * L))
                 else:

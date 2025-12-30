@@ -1,4 +1,3 @@
-import torch
 import torch.nn as nn
 from typing import Type, Optional, List
 
@@ -245,25 +244,30 @@ def install_shiva_hooks(
         hook_manager_cls._weak_blocks[hook_name] = module
         injected += 1
 
+        if context_pruner_mode == "free":
+            hook.eval()
+
     print(f"[ShivaInstaller] Injected {injected} shared hooks.")
 
 if __name__ == "__main__":
     from shiva_dit.utils import get_pipeline, process_quick_start
+    from PIL import Image
 
-    model_type = "flux-dev"
+    model_type = "qwen-image-edit"
     pipe, model_attrs = get_pipeline(model_type)
-    prompt = 'A close-up of a fluffy gray cat with a white muzzle and long, delicate white whiskers dominates the frame, its head tilted slightly upward in a confident pose that conveys both curiosity and nonchalance. The cat’s fur, rendered with hyper-realistic texture, exhibits subtle variations in tone—darker gray along the crown and cheeks, transitioning to silvery strands near the jawline, each hair catching light with individual precision. Its large, round eyes, visible through oversized blue-tinted sunglasses with metallic gold frames, reflect a distorted cityscape and the faint glow of distant explosions, the lenses’ curvature distorting the background into a kaleidoscope of light and shadow. The sunglasses’ thick rims cast a narrow shadow over the bridge of the cat’s pink nose, which sits above a closed mouth that hints at a smug expression. The cat wears a weathered blue denim hoodie, the fabric textured with subtle fraying along the zipper line and a faded rectangular patch on the left shoulder bearing indistinct lettering, suggesting wear from urban adventures. The hoodie’s hood rests loosely around its neck, the fabric’s weave and slight creases emphasizing its tactile realism. Behind the cat, a stormy cityscape stretches into the distance, skyscrapers shrouded in mist and falling snowflakes that catch the light like scattered diamonds, their silhouettes blurred by atmospheric perspective to emphasize the foreground subject. The sky churns with dark, ominous clouds, pierced by a faint glow of diffused sunlight from the upper left, while a fiery explosion erupts near the horizon on the right, its orange glow contrasting sharply with the dominant cool tones and casting a warm reflection on the cat’s shoulder. The depth of field isolates the cat sharply against the background, where the city’s architecture dissolves into soft bokeh, hinting at towering structures without defining their details. Dramatic lighting originates from the upper left, casting sharp highlights on the cat’s fur and the metallic frames of its sunglasses while plunging the right side of its face into cool, diffused shadow. The blue-toned illumination creates a cinematic contrast between the warm pink of its nose and the cool grays of its fur, with subsurface scattering visible along the inner edges of its ears, where the light from the stormy sky diffuses through the thin tissue to create a delicate pink halo. The snowflakes, suspended in midair, refract light into tiny prisms, adding a layer of dynamic texture to the scene. Rendered in a hyper-realistic digital painting style, the image employs meticulous attention to textural detail, from the individual strands of the cat’s fur to the grainy texture of the denim, with a color palette dominated by deep blues and silvers that evoke a moody, futuristic noir aesthetic. The brushwork, though invisible in its smoothness, suggests a blend of digital airbrushing and fine detailing, particularly in the fur’s gradient transitions and the subtle wear on the hoodie. A faint film grain overlays the entire composition, enhancing the cinematic quality, while the color grading leans into cool, desaturated tones with strategic warm accents from the explosion and the cat’s nose, creating a visual tension that draws the eye to the subject’s expressive gaze. The overall effect is a meticulously crafted fusion of whimsy and grit, balancing anthropomorphic charm with a dystopian urban atmosphere.'
+    prompt = "Change the rabbit's color to purple, with a flash light background."
+    image = Image.open("rabbitfeatured.jpg").convert("RGB")
 
     shiva_config = {
         "shiva_mode": "context",
         "context_ratio_mode": "linear",
-        "fixed_context_ratio": (0.42, 1e-3),
+        "fixed_context_ratio": (1.0, 0.3),
         "context_pruner_mode": "free",
         "context_pool_size": None,
         "context_shared_config": {
             "spatial_step_thresh": 1.0,
-            "spatial_group_size": 57,
-            "temporal_layer_thresh": 57,
+            "spatial_group_size": 60,
+            "temporal_layer_thresh": 60,
             "temporal_interval": 50,
         },
         "init_Ts": 10.0,
@@ -279,7 +283,7 @@ if __name__ == "__main__":
         HookManager.inject_hooks(
             model_type=model_type, pipe=pipe, model_attrs=model_attrs
         )
-        res = process_quick_start(pipe, prompt=prompt, max_sequence_length=1024, height=512, width=512)
+        res = process_quick_start(pipe, prompt=prompt, max_sequence_length=1024, image=image)
         res.save(f"{model_type}_shiva.png")
 
     print(global_context)

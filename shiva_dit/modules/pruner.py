@@ -258,7 +258,7 @@ class ShivaContextPruner(nn.Module):
         else:
             leader_id = self.layer_id
 
-        cache = HookManager.get_global("SHIVA_SCORE_CACHE", {})
+        cache = HookManager.get_global(f"SHIVA_SCORE_CACHE_{global_context.encoder_flag}", {})
         if self.layer_id != leader_id:
             leader_data = cache.get(leader_id)
             if leader_data is not None:
@@ -274,7 +274,7 @@ class ShivaContextPruner(nn.Module):
         scores = attn_map.max(dim=1).values  # (B, L)
         if self.layer_id == leader_id:
             cache[self.layer_id] = {"score": scores.detach(), "step": current_iter}
-            HookManager.set_global("SHIVA_SCORE_CACHE", cache)
+            HookManager.set_global(f"SHIVA_SCORE_CACHE_{global_context.encoder_flag}", cache)
 
         return scores
 
