@@ -2,22 +2,14 @@ import torch
 import time
 import argparse
 import os
-import sys
 import json
 import statistics
 import gc
 
+from fvcore.nn import FlopCountAnalysis
 from shiva_dit.utils.inference_utils import load_pipeline_for_inference
 from shiva_dit.utils.utils import process_quick_start
 from accelerate.utils import set_seed
-
-try:
-    from calflops import calculate_flops
-    CALFLOPS_AVAILABLE = True
-except ImportError:
-    CALFLOPS_AVAILABLE = False
-    print("Warning: 'calflops' not found. FLOPs measurement will be skipped.")
-    print("Install via: pip install calflops")
 
 def load_prompts(jsonl_path, limit=None):
     prompts = []
@@ -50,7 +42,7 @@ def format_metric(value, base_unit=""):
         return "N/A"
     if isinstance(value, str):
         return value
-        
+
     if value >= 1e12:
         return f"{value / 1e12:.2f} T{base_unit}"
     elif value >= 1e9:
@@ -66,62 +58,80 @@ class AverageFlopsMeasurer:
     def __init__(self, model):
         self.model = model
         self.flops_history = []
-        self.macs_history = []
         self.hook_handle = None
         self.is_measuring = False
 
     def enable(self):
         self.flops_history = []
-        self.macs_history = []
         self.is_measuring = False
-        self.hook_handle = self.model.register_forward_pre_hook(self._hook_fn, with_kwargs=True)
+        self.hook_handle = self.model.register_forward_pre_hook(
+            self._hook_fn, with_kwargs=True
+        )
 
     def disable(self):
         if self.hook_handle:
             self.hook_handle.remove()
             self.hook_handle = None
 
+    def _attention_flop_jit(self, inputs, outputs):
+        # inputs: (query, key, value, ...)
+        q = inputs[0]
+
+        def get_shape(t):
+            return t.type().sizes() if hasattr(t, "type") else t.shape
+
+        q_shape = get_shape(q)
+
+        if len(q_shape) == 4:
+            b, h, n, d = q_shape[0], q_shape[1], q_shape[2], q_shape[3]
+            return 4 * b * h * (n**2) * d
+        else:
+            return 0
+
     def _hook_fn(self, module, args, kwargs):
         if self.is_measuring:
             return
-
         self.is_measuring = True
 
         try:
-            clean_kwargs = {}
-            for k, v in kwargs.items():
-                if isinstance(v, torch.Tensor):
-                    clean_kwargs[k] = v
-                elif isinstance(v, (int, float)) and not isinstance(v, bool):
-                    try:
-                        clean_kwargs[k] = torch.tensor(v)
-                    except:
-                        pass
-            # ==========================================
-            
-            flops, macs, params = calculate_flops(
-                model=module,
-                args=args,
-                kwargs=clean_kwargs,
-                print_results=False, 
-                output_as_string=False,
-                output_precision=4
+            class ModelWrapper(torch.nn.Module):
+                def __init__(self, inner_model):
+                    super().__init__()
+                    self.inner_model = inner_model
+
+                def forward(self, input_bundle):
+                    a, k = input_bundle
+                    return self.inner_model(*a, **k)
+
+            input_bundle = (args, kwargs)
+            wrapper = ModelWrapper(module)
+
+            flops_analyzer = FlopCountAnalysis(wrapper, (input_bundle,))
+
+            flops_analyzer.set_op_handle(
+                "aten::scaled_dot_product_attention", self._attention_flop_jit
             )
-            
+
+            flops_analyzer.uncalled_modules_warnings(False)
+            flops_analyzer.unsupported_ops_warnings(False)
+
+            flops = flops_analyzer.total()
             self.flops_history.append(flops)
-            self.macs_history.append(macs)
-            
+
             print(".", end="", flush=True)
-            
+
         except Exception as e:
-            print(f"[FLOPs Error]: {e}")
+            print(f"\n[fvcore Error]: {e}")
         finally:
             self.is_measuring = False
-            
+
     def get_averages(self):
         if not self.flops_history:
             return None, None
-        return statistics.mean(self.flops_history), statistics.mean(self.macs_history)
+        avg_flops = statistics.mean(self.flops_history)
+
+        return avg_flops, avg_flops / 2
+
 
 class DiTProfiler:
     def __init__(self, model):
