@@ -228,6 +228,7 @@ def benchmark(args):
         if args.steps > 0: kwargs["num_inference_steps"] = args.steps
         if args.height > 0: kwargs["height"] = args.height
         if args.width > 0: kwargs["width"] = args.width
+        if args.max_sequence_length > 0: kwargs["max_sequence_length"] = args.max_sequence_length
         
         print("Profiling steps", end="")
         try:
@@ -363,6 +364,7 @@ if __name__ == "__main__":
     parser.add_argument("--steps", type=int, default=-1, help="Override inference steps (default uses pipeline default)")
     parser.add_argument("--height", type=int, default=1024)
     parser.add_argument("--width", type=int, default=1024)
+    parser.add_argument("--max_sequence_length", type=int, default=512)
     parser.add_argument("--dtype", type=str, default="bf16", choices=["bf16", "fp16", "fp32"])
     
     parser.add_argument("--optimize_hooks", action="store_true", default=True, help="Enable Shiva optimizations (e.g. skip layer 0)")
