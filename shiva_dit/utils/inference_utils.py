@@ -57,9 +57,6 @@ def load_pipeline_for_inference(
                 model_type = meta_config['model_type']
             else:
                 raise ValueError("Meta Config mode: 'model_type' required.")
-            print(f"Loading Meta Pipeline for: {model_type}")
-            pipe, model_attrs = get_pipeline(model_type, model_path=base_model_path, dtype=dtype)
-            pipe.to(device)
     else:
         if not os.path.exists(ckpt_path):
             raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
