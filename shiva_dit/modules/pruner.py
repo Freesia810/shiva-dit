@@ -295,13 +295,13 @@ class ShivaContextPruner(nn.Module):
 
         self.last_scores = scores.detach()
 
-        if not isinstance(k, torch.Tensor):
-            k = torch.tensor(k, device=hidden_states.device, dtype=torch.float32)
+        if isinstance(k, torch.Tensor):
+            k_int = int(k.item())
         else:
-            k = k.to(dtype=torch.float32)
-
-        x_sel, x_rej, sel_idx, rej_idx = ShivaTopkFunc.apply(
-            e_in, scores, k, self.Ts, self.Tk
+            k_int = int(k)
+        
+        x_sel, x_rej, sel_idx, rej_idx = ShivaTopkFunc.fast_forward(
+            e_in, scores, k_int
         )
 
         return x_sel.to(original_dtype), x_rej.to(original_dtype), sel_idx, rej_idx

@@ -279,7 +279,24 @@ if __name__ == "__main__":
         HookManager.inject_hooks(
             model_type=model_type, pipe=pipe, model_attrs=model_attrs
         )
-        res = process_quick_start(pipe, prompt=prompt, max_sequence_length=1024)
+        res = process_quick_start(pipe, prompt=prompt, max_sequence_length=1024, height=512, width=512)
         res.save(f"{model_type}_shiva.png")
 
     print(global_context)
+
+    # print("\n" + "="*40)
+    # print("       SHIVA PERFORMANCE PROFILING (DETAILED)       ")
+    # print("="*40)
+    # stats = ShivaDitBlockHook.profiler_stats
+    # count = stats["count"]
+    # if count > 0:
+    #     print(f"Total Calls           : {count}")
+    #     print(f"[Prep] Bind Args      : {stats['prep_bind']:.4f}s")
+    #     print(f"[Prep] Pruner (Cache?): {stats['prep_prune']:.4f}s  <-- 关注这个")
+    #     print(f"[Prep] RoPE Slice     : {stats['prep_rope']:.4f}s   <-- 关注这个")
+    #     print(f"[Fwd ] Attention      : {stats['fwd_stage']:.4f}s")
+    #     print(f"[Post] Scatter        : {stats['post_stage']:.4f}s")
+    #     print("-" * 40)
+    #     total = stats['prep_bind'] + stats['prep_prune'] + stats['prep_rope'] + stats['fwd_stage'] + stats['post_stage']
+    #     print(f"Total Tracked Time    : {total:.4f}s")
+    # print("="*40 + "\n")

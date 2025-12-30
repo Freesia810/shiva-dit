@@ -1,4 +1,5 @@
 import inspect
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -14,6 +15,8 @@ from shiva_dit.modules.gater import ShivaGaterPolicy, ShivaRatioPolicy
 from shiva_dit.modules.pruner import ShivaContextPruner, ShivaPrunerExpert
 from shiva_dit.modules.fuser import ShivaFuserExpert
 
+import time
+
 RANDOM_STAGE = 0
 RATIO_STAGE = 1
 GATER_STAGE = 99
@@ -22,6 +25,15 @@ GATER_STAGE = 99
 ACCUMULATION_STEPS = 2
 
 class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
+
+    profiler_stats = {
+        "prep_bind": 0.0,    # 参数绑定耗时
+        "prep_prune": 0.0,   # Pruner.forward 耗时 (含缓存查找 + TopK)
+        "prep_rope": 0.0,    # RoPE 切片耗时
+        "fwd_stage": 0.0,    # Block 前向
+        "post_stage": 0.0,   # Scatter 恢复
+        "count": 0
+    }
 
     def __init__(
         self,
@@ -163,9 +175,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             rej_idx_ctx,
             # Meta
             sel_rope,
-            pure_temb,
-            layer_id_tensor,
-            pooled_encoder_states,
             N,
             L,
         ) = self._prepare_inputs(func, module_self, *args, **kwargs)
@@ -179,7 +188,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 final_topk_states = self._forward_train_image(x_sel, x_rej, N)
             else:
                 final_topk_states = self._forward_eval_image(
-                    x_sel, x_rej, pure_temb, layer_id_tensor
+                    x_sel, x_rej
                 )
 
         # 2. Context Pruning Forward (Text)
@@ -204,6 +213,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         return processed_output
 
     def _prepare_inputs(self, func, module_self, *args, **kwargs):
+        # torch.cuda.synchronize()
+        # t_start = time.time()
+        
         sig = inspect.signature(func)
         bound = sig.bind_partial(module_self, *args, **kwargs)
         bound.apply_defaults()
@@ -224,6 +236,10 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         # --- Metadata Preparation ---
         layer_id_tensor = self.layer_id_tensor.expand(B)
+
+        # torch.cuda.synchronize()
+        # t_bind = time.time()
+        # ShivaDitBlockHook.profiler_stats["prep_bind"] += (t_bind - t_start)
 
         # --- Context Pruning Logic ---
         ctx_sel = encoder_hidden_states
@@ -291,6 +307,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                         progress = current_iter / float(total_steps) if total_steps > 0 else 0.0
                         current_ratio_val = start_ratio + (end_ratio - start_ratio) * progress
                         ctx_ratio = torch.tensor(current_ratio_val, device=device, dtype=dtype)
+                        ctx_ratio_float = current_ratio_val
 
             # Safety clamp
             ctx_ratio = ctx_ratio.clamp(min=1e-4, max=1.0)
@@ -299,8 +316,13 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             if self.training:
                 k_ctx = ceil_ste(ctx_ratio * L)
             else:
-                with torch.no_grad():
-                    k_ctx = torch.ceil(ctx_ratio * L)
+                # with torch.no_grad():
+                #     k_ctx = torch.ceil(ctx_ratio * L)
+                
+                if 'ctx_ratio_float' in locals():
+                    k_ctx = int(math.ceil(ctx_ratio_float * L))
+                else:
+                    k_ctx = int(math.ceil(ctx_ratio.item() * L))
 
             # Execute Context Pruning
             if k_ctx < L:
@@ -311,14 +333,15 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                     D,
                 )
 
-        if ctx_sel is not None:
-            pooled_encoder_vector = ctx_sel.mean(dim=1)
-        elif encoder_hidden_states is not None:
-            pooled_encoder_vector = encoder_hidden_states.mean(dim=1)
+        if self.shiva_mode in ["image", "both"] and self.router is not None:
+            if ctx_sel is not None:
+                pooled_encoder_vector = ctx_sel.mean(dim=1)
+            elif encoder_hidden_states is not None:
+                pooled_encoder_vector = encoder_hidden_states.mean(dim=1)
 
         # --- Image Pruning Logic ---
         x_sel = hidden_states
-        x_rej = torch.empty((B, 0, D), device=hidden_states.device, dtype=dtype)
+        x_rej = None
         sel_idx = None
         rej_idx = None
 
@@ -406,8 +429,17 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 hidden_states, token_scores_logits, k_float, D
             )
 
+        # torch.cuda.synchronize()
+        # t_prune = time.time()
+        # ShivaDitBlockHook.profiler_stats["prep_prune"] += (t_prune - t_bind)
+        # ShivaDitBlockHook.profiler_stats["count"] += 1 # 计数
+
         # --- RoPE Gathering ---
         sel_rope = self._gather_rope(image_rotary_emb, sel_idx, sel_idx_ctx)
+
+        # torch.cuda.synchronize()
+        # t_rope = time.time()
+        # ShivaDitBlockHook.profiler_stats["prep_rope"] += (t_rope - t_prune)
 
         return (
             bound,
@@ -423,9 +455,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             rej_idx_ctx,
             # Meta
             sel_rope,
-            pure_temb,
-            layer_id_tensor,
-            pooled_encoder_vector,
             N,
             L,
         )
@@ -476,9 +505,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         )
         return final_topk_states
 
-    def _forward_eval_image(self, x_sel, x_rej, pure_temb, layer_id_tensor):
-        dtype = x_sel.dtype
-
+    def _forward_eval_image(self, x_sel, x_rej):
         if getattr(self, "is_validating", False):
             self._collect_training_metrics_image(
                 load_balancing_loss=torch.tensor(0.0, device=x_sel.device),
@@ -487,13 +514,13 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 N=x_sel.shape[1] + x_rej.shape[1],
             )
 
-        decision = 0
-        if self.use_gater_lut:
-            current_t_index = global_context.current_iteration
-            decision = self.gater_cache[self.layer_idx, current_t_index].item()
-        else:
-            gater_logits = self.current_gate_logits_for_loss
-            decision = torch.argmax(gater_logits[0], dim=-1).item()
+        # decision = 0
+        # if self.use_gater_lut:
+        #     current_t_index = global_context.current_iteration
+        #     decision = self.gater_cache[self.layer_idx, current_t_index].item()
+        # else:
+        #     gater_logits = self.current_gate_logits_for_loss
+        #     decision = torch.argmax(gater_logits[0], dim=-1).item()
 
         decision = 0
         if decision == 0:
@@ -522,7 +549,13 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         bound.arguments["image_rotary_emb"] = sel_rope
         bound.arguments["encoder_hidden_states"] = final_topk_context
 
+        # torch.cuda.synchronize()
+        # t_fwd_start = time.time()
+
         processed_output = func(*bound.args, **bound.kwargs)
+
+        # torch.cuda.synchronize()
+        # t_fwd_end = time.time()
 
         if isinstance(processed_output, tuple):
             processed_encoder_states, processed_hidden_states = processed_output
@@ -565,6 +598,12 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 )
         else:
             final_encoder_states = processed_encoder_states
+        
+        # torch.cuda.synchronize()
+        # t_post_end = time.time()
+
+        # ShivaDitBlockHook.profiler_stats["fwd_stage"] += (t_fwd_end - t_fwd_start)
+        # ShivaDitBlockHook.profiler_stats["post_stage"] += (t_post_end - t_fwd_end)
 
         if isinstance(processed_output, tuple):
             return final_encoder_states, final_hidden_states
@@ -595,22 +634,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             k=k,
         )
 
-        if self.training and hasattr(self.context_pruner, "get_aux_loss"):
-            aux_loss = self.context_pruner.get_aux_loss()
-            self.context_aux_loss_accumulator.append(aux_loss)
-
-        if getattr(self, "capture_mask_for_viz", False) and self.training:
-            B, L, _ = encoder_hidden_states.shape
-            mask = torch.zeros((B, L), device=encoder_hidden_states.device)
-            mask.scatter_(1, sel_idx.long(), 1.0)
-            self.last_context_mask = mask.detach().cpu()
-
-            if hasattr(self.context_pruner, "last_scores"):
-                self.context_score_accumulator.append(
-                    self.context_pruner.last_scores.detach()
-                )
-
-        # Logic Update: Do NOT scatter here. Return pieces to be scattered in process_outputs.
         return ctx_sel, ctx_rej, sel_idx, rej_idx
 
     def _gather_rope(

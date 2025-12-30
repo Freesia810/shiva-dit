@@ -39,6 +39,23 @@ class ShivaTopkFunc(torch.autograd.Function):
 
         soft_ranks = 1 + soft_comparisons_masked.sum(dim=2)
         return soft_ranks
+    
+
+    @staticmethod
+    def fast_forward(x, logits, k_int):
+        B, N, D = x.shape
+        idx_sorted = torch.argsort(logits, dim=-1, descending=True)
+        k_int = max(1, min(k_int, N))
+
+        x_sorted = torch.gather(x, 1, idx_sorted.unsqueeze(-1).expand(B, N, D))
+
+        x_selected = x_sorted[:, :k_int]
+        x_rejected = x_sorted[:, k_int:]
+
+        topk_idx = idx_sorted[:, :k_int]
+        rest_idx = idx_sorted[:, k_int:]
+
+        return x_selected, x_rejected, topk_idx.detach(), rest_idx.detach()
 
     @staticmethod
     def forward(ctx, x, logits, k_float, Ts, Tk):
