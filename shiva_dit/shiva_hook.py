@@ -15,8 +15,6 @@ from shiva_dit.modules.gater import ShivaGaterPolicy, ShivaRatioPolicy
 from shiva_dit.modules.pruner import ShivaContextPruner, ShivaPrunerExpert
 from shiva_dit.modules.fuser import ShivaFuserExpert
 
-import time
-
 RANDOM_STAGE = 0
 RATIO_STAGE = 1
 GATER_STAGE = 99
@@ -25,15 +23,6 @@ GATER_STAGE = 99
 ACCUMULATION_STEPS = 2
 
 class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
-
-    profiler_stats = {
-        "prep_bind": 0.0,    # 参数绑定耗时
-        "prep_prune": 0.0,   # Pruner.forward 耗时 (含缓存查找 + TopK)
-        "prep_rope": 0.0,    # RoPE 切片耗时
-        "fwd_stage": 0.0,    # Block 前向
-        "post_stage": 0.0,   # Scatter 恢复
-        "count": 0
-    }
 
     def __init__(
         self,
@@ -237,10 +226,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         # --- Metadata Preparation ---
         layer_id_tensor = self.layer_id_tensor.expand(B)
 
-        # torch.cuda.synchronize()
-        # t_bind = time.time()
-        # ShivaDitBlockHook.profiler_stats["prep_bind"] += (t_bind - t_start)
-
         # --- Context Pruning Logic ---
         ctx_sel = encoder_hidden_states
         ctx_rej = None
@@ -429,17 +414,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 hidden_states, token_scores_logits, k_float, D
             )
 
-        # torch.cuda.synchronize()
-        # t_prune = time.time()
-        # ShivaDitBlockHook.profiler_stats["prep_prune"] += (t_prune - t_bind)
-        # ShivaDitBlockHook.profiler_stats["count"] += 1 # 计数
-
         # --- RoPE Gathering ---
         sel_rope = self._gather_rope(image_rotary_emb, sel_idx, sel_idx_ctx)
-
-        # torch.cuda.synchronize()
-        # t_rope = time.time()
-        # ShivaDitBlockHook.profiler_stats["prep_rope"] += (t_rope - t_prune)
 
         return (
             bound,
@@ -598,12 +574,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 )
         else:
             final_encoder_states = processed_encoder_states
-        
-        # torch.cuda.synchronize()
-        # t_post_end = time.time()
-
-        # ShivaDitBlockHook.profiler_stats["fwd_stage"] += (t_fwd_end - t_fwd_start)
-        # ShivaDitBlockHook.profiler_stats["post_stage"] += (t_post_end - t_fwd_end)
 
         if isinstance(processed_output, tuple):
             return final_encoder_states, final_hidden_states
