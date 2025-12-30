@@ -229,7 +229,7 @@ def benchmark(args):
     avg_flops_val = None
     avg_macs_val = None
 
-    if args.measure_flops and CALFLOPS_AVAILABLE and model:
+    if args.measure_flops and model:
         print("Note: Running ONE separate inference to measure Average FLOPs/Step...")
         flops_measurer = AverageFlopsMeasurer(model)
         flops_measurer.enable()

@@ -133,7 +133,7 @@ class IBTMDiTBlockHook(BaseDiTBlockHook):
         src_pool_indices_orig = pool_indices[src_indices_in_pool]  # (pool_size - N_dst,)
 
         pool_mask = torch.zeros(N, device=x.device, dtype=torch.bool)
-        pool_mask.scatter_(dim=0, index=pool_indices, value=True)
+        pool_mask.scatter_(dim=0, index=pool_indices, value=1)
         unimportant_indices_orig = (~pool_mask).nonzero(as_tuple=True)[0]  # (N - pool_size,)
 
         src_indices_orig = torch.cat(
@@ -149,18 +149,6 @@ class IBTMDiTBlockHook(BaseDiTBlockHook):
         coords_src = coords[src_indices_orig].unsqueeze(0).expand(B, -1, -1)
         dists = torch.cdist(coords_src, coords_dst, p=2) 
         sim = -dists
-
-        # x_dst = x.gather(
-        #     dim=1, index=dst_indices_orig.unsqueeze(0).unsqueeze(-1).expand(B, -1, C)
-        # ) # (B, N_dst, C)
-        # x_src = x.gather(
-        #     dim=1, index=src_indices_orig.unsqueeze(0).unsqueeze(-1).expand(B, -1, C)
-        # ) # (B, N - N_dst, C)
-
-        # x_src_norm = F.normalize(x_src, dim=-1)
-        # x_dst_norm = F.normalize(x_dst, dim=-1)
-        # sim = x_src_norm @ x_dst_norm.transpose(-2, -1) # (B, N - N_dst, N_dst)
-        
         
         sim_max, sim_idx = sim.max(dim=-1)  # (B, N - N_dst)
 
@@ -178,7 +166,7 @@ class IBTMDiTBlockHook(BaseDiTBlockHook):
         ) # (pool_size - N_dst,)
         if N_ind > 0:
             ind_mask_in_src_pool.scatter_(
-                dim=0, index=ind_indices_in_src_pool, value=True
+                dim=0, index=ind_indices_in_src_pool, value=1
             )
 
         merge_indices_in_src_pool = (~ind_mask_in_src_pool).nonzero(as_tuple=True)[0]

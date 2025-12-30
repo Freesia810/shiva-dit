@@ -6,6 +6,7 @@ clip==0.2.0
 datasets>=2.21,<3.0
 fairscale==0.4.13
 ftfy==6.3.1
+fvcore==0.1.5.post20221221
 httpx==0.28.1
 imageio-ffmpeg==0.6.0
 image-reward==1.5
