@@ -363,6 +363,10 @@ def main(args):
                     kwargs["height"] = args.height
                 if args.width > 0:
                     kwargs["width"] = args.width
+                if args.input_image: 
+                    kwargs["image"] = Image.open(args.input_image).convert("RGB")
+                if args.max_sequence_length: 
+                    kwargs["max_sequence_length"] = args.max_sequence_length
                 
                 # [MODIFIED] Inject latents if available
                 if latents is not None:
@@ -443,6 +447,8 @@ if __name__ == "__main__":
     parser.add_argument("--steps", type=int, default=-1)
     parser.add_argument("--height", type=int, default=1024)
     parser.add_argument("--width", type=int, default=1024)
+    parser.add_argument("--input_image", type=str, default=None)
+    parser.add_argument("--max_sequence_length", type=int, default=None)
     parser.add_argument("--dtype", type=str, default="bf16")
 
     # Shiva

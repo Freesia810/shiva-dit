@@ -6,6 +6,7 @@ import json
 import statistics
 import gc
 
+from PIL import Image
 from fvcore.nn import FlopCountAnalysis
 from shiva_dit.utils.inference_utils import load_pipeline_for_inference
 from shiva_dit.utils.utils import process_quick_start
@@ -238,7 +239,8 @@ def benchmark(args):
         if args.steps > 0: kwargs["num_inference_steps"] = args.steps
         if args.height > 0: kwargs["height"] = args.height
         if args.width > 0: kwargs["width"] = args.width
-        if args.max_sequence_length > 0: kwargs["max_sequence_length"] = args.max_sequence_length
+        if args.input_image: kwargs["image"] = Image.open(args.input_image).convert("RGB")
+        if args.max_sequence_length: kwargs["max_sequence_length"] = args.max_sequence_length
         
         print("Profiling steps", end="")
         try:
@@ -262,7 +264,9 @@ def benchmark(args):
     print("-" * 50)
     print("Warming up (Clean run)...")
     warmup_steps = 4 
-    _ = process_quick_start(pipe, prompt=prompts[0], num_inference_steps=warmup_steps, height=args.height, width=args.width, max_sequence_length=args.max_sequence_length)
+    warmup_kwargs = kwargs.copy()
+    warmup_kwargs["num_inference_steps"] = warmup_steps
+    _ = process_quick_start(pipe, **warmup_kwargs)
     torch.cuda.synchronize()
 
     if dit_profiler:
@@ -297,7 +301,9 @@ def benchmark(args):
             kwargs["height"] = args.height
         if args.width > 0:
             kwargs["width"] = args.width
-        if args.max_sequence_length > 0:
+        if args.input_image:
+            kwargs["image"] = Image.open(args.input_image).convert("RGB")
+        if args.max_sequence_length:
             kwargs["max_sequence_length"] = args.max_sequence_length
             
         if dit_profiler:
@@ -340,6 +346,7 @@ def benchmark(args):
         print(f"Model Type:   {args.model_type}")
     print(f"Optimization: Merge LoRA={args.merge_lora}, Skip Layer0={args.optimize_hooks}")
     print(f"Resolution:   {args.height}x{args.width}")
+    print(f"Input Image Path:  {args.input_image}" if args.input_image else "")
     print(f"Max Seq Length: {args.max_sequence_length}")
     print(f"Steps:        {args.steps if args.steps > 0 else 'Default'}")
     print("-" * 50)
@@ -377,7 +384,8 @@ if __name__ == "__main__":
     parser.add_argument("--steps", type=int, default=-1, help="Override inference steps (default uses pipeline default)")
     parser.add_argument("--height", type=int, default=1024)
     parser.add_argument("--width", type=int, default=1024)
-    parser.add_argument("--max_sequence_length", type=int, default=512)
+    parser.add_argument("--input_image", type=str, default=None)
+    parser.add_argument("--max_sequence_length", type=int, default=None)
     parser.add_argument("--dtype", type=str, default="bf16", choices=["bf16", "fp16", "fp32"])
     
     parser.add_argument("--optimize_hooks", action="store_true", default=True, help="Enable Shiva optimizations (e.g. skip layer 0)")
