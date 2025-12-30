@@ -252,7 +252,7 @@ def benchmark(args):
     print("-" * 50)
     print("Warming up (Clean run)...")
     warmup_steps = 4 
-    _ = process_quick_start(pipe, prompt=prompts[0], num_inference_steps=warmup_steps)
+    _ = process_quick_start(pipe, prompt=prompts[0], num_inference_steps=warmup_steps, height=args.height, width=args.width, max_sequence_length=args.max_sequence_length)
     torch.cuda.synchronize()
 
     if dit_profiler:
@@ -284,9 +284,11 @@ def benchmark(args):
         if args.steps > 0:
             kwargs["num_inference_steps"] = args.steps
         if args.height > 0:
-             kwargs["height"] = args.height
+            kwargs["height"] = args.height
         if args.width > 0:
-             kwargs["width"] = args.width
+            kwargs["width"] = args.width
+        if args.max_sequence_length > 0:
+            kwargs["max_sequence_length"] = args.max_sequence_length
             
         if dit_profiler:
             dit_profiler.reset()
@@ -328,6 +330,7 @@ def benchmark(args):
         print(f"Model Type:   {args.model_type}")
     print(f"Optimization: Merge LoRA={args.merge_lora}, Skip Layer0={args.optimize_hooks}")
     print(f"Resolution:   {args.height}x{args.width}")
+    print(f"Max Seq Length: {args.max_sequence_length}")
     print(f"Steps:        {args.steps if args.steps > 0 else 'Default'}")
     print("-" * 50)
     
