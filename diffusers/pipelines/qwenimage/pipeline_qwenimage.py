@@ -172,7 +172,7 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         # QwenImage latents are turned into 2x2 patches and packed. This means the latent width and height has to be divisible
         # by the patch size. So the vae scale factor is multiplied by the patch size to account for this
         self.image_processor = VaeImageProcessor(vae_scale_factor=self.vae_scale_factor * 2)
-        self.tokenizer_max_length = 1024
+        self.tokenizer_max_length = 4096
         self.prompt_template_encode = "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
         self.prompt_template_encode_start_idx = 34
         self.default_sample_size = 128
@@ -324,8 +324,8 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                 "If `negative_prompt_embeds` are provided, `negative_prompt_embeds_mask` also have to be passed. Make sure to generate `negative_prompt_embeds_mask` from the same text encoder that was used to generate `negative_prompt_embeds`."
             )
 
-        if max_sequence_length is not None and max_sequence_length > 1024:
-            raise ValueError(f"`max_sequence_length` cannot be greater than 1024 but is {max_sequence_length}")
+        # if max_sequence_length is not None and max_sequence_length > 1024:
+        #     raise ValueError(f"`max_sequence_length` cannot be greater than 1024 but is {max_sequence_length}")
 
     @staticmethod
     def _pack_latents(latents, batch_size, num_channels_latents, height, width):

@@ -253,15 +253,19 @@ if __name__ == "__main__":
     from shiva_dit.utils import get_pipeline, process_quick_start
     from PIL import Image
 
-    model_type = "qwen-image-edit"
+    model_type = "qwen-image"
     pipe, model_attrs = get_pipeline(model_type)
-    prompt = "Change the rabbit's color to purple, with a flash light background."
-    image = Image.open("rabbitfeatured.jpg").convert("RGB")
+    # prompt = "Change the rabbit's color to purple, with a flash light background."
+    # image = Image.open("rabbitfeatured.jpg").convert("RGB")
+
+    prompt = ""
+    image = None
+    max_sequence_length = 4096
 
     shiva_config = {
         "shiva_mode": "context",
         "context_ratio_mode": "linear",
-        "fixed_context_ratio": (1.0, 0.3),
+        "fixed_context_ratio": (1.0, 1e-4),
         "context_pruner_mode": "free",
         "context_pool_size": None,
         "context_shared_config": {
@@ -283,7 +287,10 @@ if __name__ == "__main__":
         HookManager.inject_hooks(
             model_type=model_type, pipe=pipe, model_attrs=model_attrs
         )
-        res = process_quick_start(pipe, prompt=prompt, max_sequence_length=1024, image=image)
+        if model_type == "qwen-image-edit":
+            res = process_quick_start(pipe, prompt=prompt, max_sequence_length=max_sequence_length, image=image)
+        else:
+            res = process_quick_start(pipe, prompt=prompt, max_sequence_length=max_sequence_length, num_images_per_prompt=4)
         res.save(f"{model_type}_shiva.png")
 
     print(global_context)

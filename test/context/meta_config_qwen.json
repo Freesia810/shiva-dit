@@ -1,0 +1,22 @@
+{
+    "training_mode": "hook_only",
+    "model_type": "qwen-image",
+    "hook_info": {
+        "class_name": "ShivaDitBlockHook",
+        "config": {
+            "shiva_mode": "context",
+            "context_ratio_mode": "linear",
+            "fixed_context_ratio": [1.0, 1e-4],
+            "context_pruner_mode": "free",
+            "context_pool_size": null,
+            "context_shared_config": {
+                "spatial_step_thresh": 1.0,
+                "spatial_group_size": 60,
+                "temporal_layer_thresh": 60,
+                "temporal_interval": 50
+            },
+            "init_Ts": 10.0,
+            "init_Tk": 10.0
+        }
+    }
+}

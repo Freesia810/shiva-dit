@@ -10,6 +10,7 @@ from PIL import Image
 from fvcore.nn import FlopCountAnalysis
 from shiva_dit.utils.inference_utils import load_pipeline_for_inference
 from shiva_dit.utils.utils import process_quick_start
+from shiva_dit.utils import global_context
 from accelerate.utils import set_seed
 
 def load_prompts(jsonl_path, limit=None):
@@ -241,6 +242,7 @@ def benchmark(args):
         if args.width > 0: kwargs["width"] = args.width
         if args.input_image: kwargs["image"] = Image.open(args.input_image).convert("RGB")
         if args.max_sequence_length: kwargs["max_sequence_length"] = args.max_sequence_length
+        if args.num_images_per_prompt: kwargs["num_images_per_prompt"] = args.num_images_per_prompt
         
         print("Profiling steps", end="")
         try:
@@ -305,6 +307,8 @@ def benchmark(args):
             kwargs["image"] = Image.open(args.input_image).convert("RGB")
         if args.max_sequence_length:
             kwargs["max_sequence_length"] = args.max_sequence_length
+        if args.num_images_per_prompt: 
+            kwargs["num_images_per_prompt"] = args.num_images_per_prompt
             
         if dit_profiler:
             dit_profiler.reset()
@@ -367,6 +371,7 @@ def benchmark(args):
     print(f"  End-to-End Latency: {avg_latency:.2f} ms ({avg_latency/1000:.2f} s)")
     print(f"  DiT Latency:       {avg_dit_latency:.2f} ms ({avg_dit_latency/1000:.2f} s)")
     print("=" * 58)
+    print(global_context)
 
     if dit_profiler:
         dit_profiler.disable()
@@ -386,6 +391,7 @@ if __name__ == "__main__":
     parser.add_argument("--width", type=int, default=1024)
     parser.add_argument("--input_image", type=str, default=None)
     parser.add_argument("--max_sequence_length", type=int, default=None)
+    parser.add_argument("--num_images_per_prompt", type=int, default=1)
     parser.add_argument("--dtype", type=str, default="bf16", choices=["bf16", "fp16", "fp32"])
     
     parser.add_argument("--optimize_hooks", action="store_true", default=True, help="Enable Shiva optimizations (e.g. skip layer 0)")
