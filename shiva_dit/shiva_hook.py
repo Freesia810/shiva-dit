@@ -3,8 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from shiva_dit.hook.delegate import BaseDelegator
-from shiva_dit.hook.block_hook import BaseDiTBlockHook
+from shiva_dit.hook import BaseDelegator, BaseDiTBlockHook
 from shiva_dit.utils import global_context
 from shiva_dit.utils.ste import ceil_ste
 from shiva_dit.utils import parse_image_rotary_emb, join_image_rotary_emb
