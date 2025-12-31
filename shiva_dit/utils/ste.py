@@ -42,9 +42,12 @@ class ShivaTopkFunc(torch.autograd.Function):
     
 
     @staticmethod
-    def fast_forward(x, logits, k_int):
+    def fast_forward(x, logits, k_int, idx_sorted=None):
         B, N, D = x.shape
-        idx_sorted = torch.argsort(logits, dim=-1, descending=True)
+
+        if idx_sorted is None:
+            idx_sorted = torch.argsort(logits, dim=-1, descending=True)
+
         k_int = max(1, min(k_int, N))
 
         x_sorted = torch.gather(x, 1, idx_sorted.unsqueeze(-1).expand(B, N, D))

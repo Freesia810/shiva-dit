@@ -262,21 +262,26 @@ class ShivaContextPruner(nn.Module):
         if self.layer_id != leader_id:
             leader_data = cache.get(leader_id)
             if leader_data is not None:
-                return leader_data["score"]
+                return leader_data["score"], leader_data.get("idx_sorted")
 
         elif active_temporal_interval > 1 and current_iter % active_temporal_interval != 0:
             my_data = cache.get(self.layer_id)
             if my_data is not None:
-                return my_data["score"]
+                return my_data["score"], my_data.get("idx_sorted")
 
         # print(current_iter, self.layer_id, leader_id, active_spatial_group, active_temporal_interval)
         attn_map = self._process_attn(h_in, e_in, H, W)
         scores = attn_map.max(dim=1).values  # (B, L)
+        idx_sorted = torch.argsort(scores, dim=-1, descending=True)
         if self.layer_id == leader_id:
-            cache[self.layer_id] = {"score": scores.detach(), "step": current_iter}
+            cache[self.layer_id] = {
+                "score": scores.detach(), 
+                "idx_sorted": idx_sorted.detach(),
+                "step": current_iter
+            }
             HookManager.set_global(f"SHIVA_SCORE_CACHE_{global_context.encoder_flag}", cache)
 
-        return scores
+        return scores, idx_sorted
 
     def forward(self, hidden_states, encoder_hidden_states, k):
         original_dtype = hidden_states.dtype
@@ -285,11 +290,11 @@ class ShivaContextPruner(nn.Module):
         e_in = encoder_hidden_states
         H, W = global_context.hidden_seq_height, global_context.hidden_seq_width
 
-        scores = (
-            self._forward_learned(h_in, e_in, H, W)
-            if self.mode == "learned"
-            else self._forward_free(h_in, e_in, H, W, global_context.current_iteration, global_context.num_inference_steps)
-        )
+        if self.mode == "learned":
+            scores = self._forward_learned(h_in, e_in, H, W)
+            idx_sorted = None
+        else:
+            scores, idx_sorted = self._forward_free(h_in, e_in, H, W, global_context.current_iteration, global_context.num_inference_steps)
 
         # self._save_full_score_trajectory(scores[0])
 
@@ -301,7 +306,7 @@ class ShivaContextPruner(nn.Module):
             k_int = int(k)
         
         x_sel, x_rej, sel_idx, rej_idx = ShivaTopkFunc.fast_forward(
-            e_in, scores, k_int
+            e_in, scores, k_int, idx_sorted=idx_sorted
         )
 
         return x_sel.to(original_dtype), x_rej.to(original_dtype), sel_idx, rej_idx
