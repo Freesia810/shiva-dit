@@ -102,9 +102,36 @@ class ShivaContextPruner(nn.Module):
             f"[ShivaContextPruner] Registered free ops from {type(block).__name__}. Keys: {list(ops.keys())}"
         )
 
-    def _apply_pooling(self, q, H=None, W=None):
+    def _get_spatial_importance(self, H, W, device, dtype):
+        last_cfg = global_context.last_cfg_hidden_state
+        if last_cfg is None:
+            assert False, "No last_cfg_hidden_state found in global_context."
+
+        with torch.no_grad():
+            importance = last_cfg.mean(dim=1, keepdim=True)
+            if importance.shape[-1] != W or importance.shape[-2] != H:
+                importance = F.interpolate(
+                    importance, size=(H, W), mode="bilinear", align_corners=False
+                )
+
+            importance_flat = importance.flatten(2).transpose(1, 2)
+            importance_flat = importance_flat / (importance_flat.mean() + 1e-6)
+
+            return importance_flat.to(device=device, dtype=dtype)
+
+    def _apply_pooling(self, q, H=None, W=None, importance_map=None):
+        if importance_map is not None:
+            # q: (B, N, Heads, D) or (B, N, D)
+            # importance_map: (1, N, 1)
+            if q.dim() == 4:
+                weight = importance_map.unsqueeze(-1)  # (1, N, 1, 1)
+            else:
+                weight = importance_map  # (1, N, 1)
+
+            q = q * weight
+
         if self.pool_size is None or self.pool_size <= 1:
-            return q.mean(dim=1, keepdim=True)
+            return q.max(dim=1, keepdim=True).values
 
         is_4d = q.dim() == 4
         if is_4d:
@@ -129,9 +156,7 @@ class ShivaContextPruner(nn.Module):
 
         if H is not None and W is not None and H * W == N:
             q_2d = q_in.view(-1, D, H, W)
-            q_out_2d = F.adaptive_avg_pool2d(
-                q_2d, pool_sz
-            )
+            q_out_2d = F.adaptive_max_pool2d(q_2d, pool_sz)
             q_pooled = q_out_2d.flatten(2)  # (Batch_Eff, D, M)
 
         if q_pooled is None:
@@ -141,7 +166,7 @@ class ShivaContextPruner(nn.Module):
                 if isinstance(pool_sz, tuple)
                 else pool_sz * pool_sz
             )
-            q_pooled = F.adaptive_avg_pool1d(q_in, target_size)  # (Batch_Eff, D, M)
+            q_pooled = F.adaptive_max_pool1d(q_in, target_size)  # (Batch_Eff, D, M)
 
         if is_4d:
             # (B*Heads, D, M) -> (B, Heads, D, M) -> (B, Heads, M, D) -> (B, M, Heads, D)
@@ -210,6 +235,7 @@ class ShivaContextPruner(nn.Module):
         ops = self.free_ops
         with torch.no_grad():
             num_heads = ops.get("num_heads", 1)
+            importance_map = self._get_spatial_importance(H, W, h_in.device, h_in.dtype)
             if "to_q" in ops:
                 q_full = ops["to_q"](h_in)
                 if "norm_q" in ops:
@@ -218,7 +244,7 @@ class ShivaContextPruner(nn.Module):
                 q_full = h_in.unsqueeze(2)  # Fallback: (B, N, 1, D)
 
             # Apply Pooling: (B, N, H, D) -> (B, M, H, D)
-            q = self._apply_pooling(q_full, H, W)
+            q = self._apply_pooling(q_full, H, W, importance_map=importance_map)
 
             # --- Extract Text K (Retain Heads) ---
             if "to_k" in ops:
@@ -304,7 +330,7 @@ class ShivaContextPruner(nn.Module):
             k_int = int(k.item())
         else:
             k_int = int(k)
-        
+
         x_sel, x_rej, sel_idx, rej_idx = ShivaTopkFunc.fast_forward(
             e_in, scores, k_int, idx_sorted=idx_sorted
         )

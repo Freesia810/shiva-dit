@@ -130,7 +130,7 @@ def install_shiva_hooks(
                 total_layers=num_layers, ratio_bottleneck_dim=ratio_bottleneck_dim, init_ratio=fixed_context_ratio
             ).to(device, dtype)
             assert False, "Adaptive context ratio is not implemented yet."
-        elif context_ratio_mode == 'linear':
+        elif context_ratio_mode == 'linear' or context_ratio_mode == 'cosine':
             assert context_pruner_mode == 'free', "Linear context ratio scheduling only supports 'free' pruner mode."
 
             spatial_step_thresh = spatial_group_size = None
@@ -225,6 +225,7 @@ def install_shiva_hooks(
             "shared_context_pruner": injected_context_router,
             "shared_context_ratio_policy": shared_context_ratio_policy,
             "fixed_context_ratio": fixed_context_ratio,
+            "context_ratio_mode": context_ratio_mode,
             # LuT
             "shared_gater_cache": shared_gater_cache,
             "shared_ratio_cache": shared_ratio_cache,

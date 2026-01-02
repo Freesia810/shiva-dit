@@ -40,6 +40,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         shared_context_pruner: ShivaContextPruner = None,
         shared_context_ratio_policy: ShivaRatioPolicy = None,
         fixed_context_ratio: float | tuple = 1.0,
+        context_ratio_mode: str = "fixed",
         # --- LuT Settings ---
         use_gater_lut: bool = False,
         shared_gater_cache: torch.Tensor = None,
@@ -66,6 +67,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.context_pruner = shared_context_pruner
         self.context_ratio_policy = shared_context_ratio_policy
         self.fixed_context_ratio = fixed_context_ratio
+        self.context_ratio_mode = context_ratio_mode    
 
         # Gater LUT
         self.use_gater_lut = use_gater_lut
@@ -113,27 +115,45 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         step_idx = getattr(global_context, "train_step_idx", 0)
         if step_idx is None:
             step_idx = 0
-            
+
         accum_steps = ACCUMULATION_STEPS
-        
+
         cycle_idx = step_idx // accum_steps
         step_in_cycle = step_idx % accum_steps
-        
+
         g = torch.Generator(device=device)
         seed = int(cycle_idx) * 1000 + int(self.layer_idx) + 2024
         g.manual_seed(seed)
         min_r = 0.2 
         max_r = 0.9
-        
+
         span = (max_r - min_r) / accum_steps
         bases = torch.linspace(min_r, max_r - span, accum_steps, device=device)
-        
+
         offsets = torch.rand(accum_steps, generator=g, device=device) * span
         ratios = bases + offsets
-        
+
         ratios = ratios[torch.randperm(accum_steps, generator=g, device=device)]
-        
+
         return ratios[step_in_cycle].item()
+
+    def _get_scheduled_ratio(self, start_ratio, end_ratio, mode="cosine"):
+        total_steps = global_context.num_inference_steps
+        current_iter = global_context.current_iteration
+
+        if total_steps is None or total_steps <= 0:
+            return start_ratio
+
+        t = current_iter / float(total_steps)
+        t = min(max(t, 0.0), 1.0)
+
+        if mode == "linear":
+            return start_ratio + (end_ratio - start_ratio) * t
+        elif mode == "cosine":
+            cosine_factor = 0.5 * (1 + math.cos(t * math.pi))
+            return end_ratio + (start_ratio - end_ratio) * cosine_factor
+
+        return start_ratio
 
     def on_register_hook(self, block: nn.Module):
         self.register_buffer(
@@ -204,7 +224,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
     def _prepare_inputs(self, func, module_self, *args, **kwargs):
         # torch.cuda.synchronize()
         # t_start = time.time()
-        
+
         sig = inspect.signature(func)
         bound = sig.bind_partial(module_self, *args, **kwargs)
         bound.apply_defaults()
@@ -284,15 +304,14 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                             self.fixed_context_ratio, device=device, dtype=dtype
                         )
                     else:
-                        # linear schedule
                         start_ratio, end_ratio = self.fixed_context_ratio
-                        total_steps = global_context.num_inference_steps
-                        current_iter = global_context.current_iteration
-                        
-                        progress = current_iter / float(total_steps) if total_steps > 0 else 0.0
-                        current_ratio_val = start_ratio + (end_ratio - start_ratio) * progress
-                        ctx_ratio = torch.tensor(current_ratio_val, device=device, dtype=dtype)
-                        ctx_ratio_float = current_ratio_val
+                        ctx_ratio_val = self._get_scheduled_ratio(
+                            start_ratio, end_ratio, mode=self.context_ratio_modedule_mode
+                        )
+                        ctx_ratio = torch.tensor(
+                            ctx_ratio_val, device=device, dtype=dtype
+                        )
+                        ctx_ratio_float = ctx_ratio_val
 
             # Safety clamp
             ctx_ratio = ctx_ratio.clamp(min=1e-4, max=1.0)
@@ -445,13 +464,13 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         current_stage = getattr(global_context, "current_stage_idx", -1)
         is_gater_active = (self.training and current_stage == GATER_STAGE)
         logits = self.current_gate_logits_for_loss
-        
+
         if is_gater_active and self.training:
             noise = torch.randn_like(logits) * 1.0 
             logits = logits + noise
-        
+
         gating_weights = F.softmax(logits, dim=-1).to(dtype)
-        
+
         raw_g_prune = gating_weights[:, 0].unsqueeze(-1).unsqueeze(-1)
         raw_g_fuse = gating_weights[:, 1].unsqueeze(-1).unsqueeze(-1)
 
@@ -460,17 +479,17 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             g_prune = torch.ones_like(raw_g_prune)
             empty_discarded = x_rej[:, :0, :] 
             output_fuse = self.fuse_expert(x_sel.to(dtype), empty_discarded.to(dtype))
-            
+
             load_balancing_loss = torch.tensor(0.0, device=device, dtype=dtype)
-            
+
             with torch.no_grad():
                 avg_fuse_prob = torch.zeros_like(gating_weights[:, 1].mean())
         else:
             g_prune = raw_g_prune
             g_fuse = raw_g_fuse
-            
+
             output_fuse = self.fuse_expert(x_sel.to(dtype), x_rej.to(dtype))
-            
+
             avg_fuse_prob = gating_weights[:, 1].mean()
             load_balancing_loss = torch.tensor(0.0, device=device, dtype=dtype)
 
