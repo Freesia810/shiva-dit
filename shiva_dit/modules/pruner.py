@@ -269,7 +269,7 @@ class ShivaContextPruner(nn.Module):
             if my_data is not None:
                 return my_data["score"], my_data.get("idx_sorted")
 
-        # print(current_iter, self.layer_id, leader_id, active_spatial_group, active_temporal_interval)
+        # print(current_iter, self.layer_id, leader_id, active_spatial_group, active_temporal_interval, global_context.encoder_flag)
         attn_map = self._process_attn(h_in, e_in, H, W)
         scores = attn_map.max(dim=1).values  # (B, L)
         idx_sorted = torch.argsort(scores, dim=-1, descending=True)

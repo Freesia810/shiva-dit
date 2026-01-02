@@ -307,13 +307,19 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                     k_ctx = int(math.ceil(ctx_ratio.item() * L))
 
             # Execute Context Pruning
-            if k_ctx < L:
-                ctx_sel, ctx_rej, sel_idx_ctx, rej_idx_ctx = self._select_topk_context(
-                    hidden_states.detach().to(dtype),
-                    encoder_hidden_states.to(dtype),
-                    k_ctx,
-                    D,
-                )
+            ctx_sel, ctx_rej, sel_idx_ctx, rej_idx_ctx = self._select_topk_context(
+                hidden_states.detach().to(dtype),
+                encoder_hidden_states.to(dtype),
+                k_ctx,
+                D,
+            )
+            # if k_ctx < L:
+            #     ctx_sel, ctx_rej, sel_idx_ctx, rej_idx_ctx = self._select_topk_context(
+            #         hidden_states.detach().to(dtype),
+            #         encoder_hidden_states.to(dtype),
+            #         k_ctx,
+            #         D,
+            #     )
 
         if self.shiva_mode in ["image", "both"] and self.router is not None:
             if ctx_sel is not None:
