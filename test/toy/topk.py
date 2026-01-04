@@ -188,10 +188,6 @@ def experiment_unified():
             fontproperties=bold_prop,
         )
 
-        ax1.set_title(
-            "Joint Learning of Sorting and Budgeting", fontproperties=title_prop, pad=12
-        )
-
         lines = [line1, line2, line_gt]
         labels = [l.get_label() for l in lines]
 
@@ -312,13 +308,6 @@ def experiment_3_gradient_consistency():
         ax.spines["bottom"].set_linewidth(1.0)
 
         ax.grid(axis="y", linestyle=":", alpha=0.4, zorder=0)
-
-        ax.set_title(
-            "Distribution of Gradient Consistency",
-            fontproperties=prop,
-            fontsize=14,
-            pad=12,
-        )
         ax.set_xlabel("Cosine Similarity", fontproperties=prop, fontsize=12)
         ax.set_ylabel("Probability Density", fontproperties=prop, fontsize=12)
 
