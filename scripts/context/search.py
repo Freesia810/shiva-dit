@@ -15,11 +15,11 @@ from shiva_dit.hook.hook_manager import HookManager
 from shiva_dit.shiva_hook import ShivaDitBlockHook
 
 SEARCH_SPACE = {
-    "context_pool_size": [64, 32, 16, 8, 4, 2, None],
-    "fixed_context_ratio": [(1.0, 0.1), (1.0, 0.05), (0.8, 0.1), (0.8, 0.05)],
-    "context_schedule_mode": ["cosine", "linear"],
-    "temporal_interval": [1, 2, 5, 10, 25, 50],
-    "spatial_group_size": [1, 2, 3, 6, 10, 15, 20, 30, 60],
+    "context_pool_size": [64, 16, 4, None],
+    "fixed_context_ratio": [(1.0, 0.1), (1.0, 0.05)],
+    "context_ratio_mode": ["cosine", "linear"],
+    "temporal_interval": [1, 10, 25, 50],
+    "spatial_group_size": [1],
 }
 
 BASE_SHIVA_CONFIG = {
@@ -221,10 +221,10 @@ def run_search():
         shared_cfg = current_shiva_config["context_shared_config"].copy()
         if "spatial_group_size" in cfg:
             shared_cfg["spatial_group_size"] = cfg["spatial_group_size"]
+            del current_shiva_config["spatial_group_size"]
         if "temporal_interval" in cfg:
             shared_cfg["temporal_interval"] = cfg["temporal_interval"]
-        if "context_schedule_mode" in cfg:
-            shared_cfg["context_schedule_mode"] = cfg["context_schedule_mode"]
+            del current_shiva_config["temporal_interval"]
         current_shiva_config["context_shared_config"] = shared_cfg
 
         HookManager.configure_hooks(
@@ -278,10 +278,12 @@ def run_search():
                 latencies.append(end_t - start_t)
 
                 try:
-                    pred_img = lpips.im2tensor(lpips.load_image(res)).to(args.device)
-                    gt_img = lpips.im2tensor(lpips.load_image(Image.open(gt_path))).to(
+                    pred_img = lpips.im2tensor(np.array(res)).to(args.device)
+                    
+                    gt_img = lpips.im2tensor(lpips.load_image(gt_path)).to(
                         args.device
                     )
+                    
                     dist = loss_fn_alex(pred_img, gt_img).item()
                     lpips_scores.append(dist)
                 except Exception as e:

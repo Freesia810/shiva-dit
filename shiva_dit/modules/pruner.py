@@ -102,21 +102,49 @@ class ShivaContextPruner(nn.Module):
             f"[ShivaContextPruner] Registered free ops from {type(block).__name__}. Keys: {list(ops.keys())}"
         )
 
-    def _get_spatial_importance(self, H, W, device, dtype):
-        last_cfg = global_context.last_cfg_hidden_state
-        if last_cfg is None:
-            assert False, "No last_cfg_hidden_state found in global_context."
+    def _get_spatial_importance(self, batch_size, H, W, device, dtype):
+        if global_context.current_iteration == 0:
+            return torch.ones(batch_size, H * W, 1, device=device, dtype=dtype)
 
+        last_cfg = getattr(global_context, "last_cfg_hidden_state", None)
+        if last_cfg is None:
+            raise RuntimeError(
+                f"No last_cfg_hidden_state found at iter {global_context.current_iteration}."
+            )
+        
         with torch.no_grad():
-            importance = last_cfg.mean(dim=1, keepdim=True)
-            if importance.shape[-1] != W or importance.shape[-2] != H:
-                importance = F.interpolate(
-                    importance, size=(H, W), mode="bilinear", align_corners=False
+            if last_cfg.dim() == 3:
+                # Case 1: Sequence format (B, S, D)
+                importance = last_cfg.mean(dim=-1, keepdim=True) # (B, S, 1)
+
+                B, S, _ = importance.shape
+                if H * W == S:
+                    importance_flat = importance
+                else:
+                    side = int(math.sqrt(S))
+                    importance_2d = importance.permute(0, 2, 1).view(B, 1, side, side)
+                    importance_2d = F.interpolate(
+                        importance_2d, size=(H, W), mode="bilinear", align_corners=False
+                    )
+                    importance_flat = importance_2d.flatten(2).transpose(1, 2)
+
+            elif last_cfg.dim() == 4:
+                # Case 2: Image format (B, C, H, W)
+                importance = last_cfg.mean(dim=1, keepdim=True) # (B, 1, H_src, W_src)
+
+                if importance.shape[-1] != W or importance.shape[-2] != H:
+                    importance = F.interpolate(
+                        importance, size=(H, W), mode="bilinear", align_corners=False
+                    )
+                importance_flat = importance.flatten(2).transpose(1, 2)
+            
+            else:
+                raise RuntimeError(
+                    f"Unknown last_cfg_hidden_state shape: {last_cfg.shape}"
                 )
 
-            importance_flat = importance.flatten(2).transpose(1, 2)
             importance_flat = importance_flat / (importance_flat.mean() + 1e-6)
-
+            
             return importance_flat.to(device=device, dtype=dtype)
 
     def _apply_pooling(self, q, H=None, W=None, importance_map=None):
@@ -235,7 +263,7 @@ class ShivaContextPruner(nn.Module):
         ops = self.free_ops
         with torch.no_grad():
             num_heads = ops.get("num_heads", 1)
-            importance_map = self._get_spatial_importance(H, W, h_in.device, h_in.dtype)
+            importance_map = self._get_spatial_importance(h_in.shape[0], H, W, h_in.device, h_in.dtype)
             if "to_q" in ops:
                 q_full = ops["to_q"](h_in)
                 if "norm_q" in ops:

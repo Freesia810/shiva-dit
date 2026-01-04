@@ -306,7 +306,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                     else:
                         start_ratio, end_ratio = self.fixed_context_ratio
                         ctx_ratio_val = self._get_scheduled_ratio(
-                            start_ratio, end_ratio, mode=self.context_ratio_modedule_mode
+                            start_ratio, end_ratio, mode=self.context_ratio_mode
                         )
                         ctx_ratio = torch.tensor(
                             ctx_ratio_val, device=device, dtype=dtype
