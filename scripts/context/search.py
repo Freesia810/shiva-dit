@@ -9,26 +9,20 @@ import time
 import torch.distributed as dist
 from PIL import Image
 from tqdm import tqdm
-from itertools import product
+import itertools
 
 from shiva_dit.utils import get_pipeline, process_quick_start
 from shiva_dit.hook.hook_manager import HookManager
 from shiva_dit.shiva_hook import ShivaDitBlockHook
 
-# SEARCH_SPACE = {
-#     "context_pool_size": [64, 16, 4, None],
-#     "fixed_context_ratio": [(1.0, 0.1), (1.0, 0.05)],
-#     "context_ratio_mode": ["cosine", "linear"],
-#     "temporal_interval": [1, 10, 25, 50],
-#     "spatial_group_size": [1],
-# }
-
 SEARCH_SPACE = {
-    "context_pool_size": [48, 32], # 64, 16
+    "context_pool_size": [64, 32, 16],
     "fixed_context_ratio": [(1.0, 0.1)],
     "context_ratio_mode": ["cosine"],
-    "temporal_interval": [2, 4, 6, 8], # 1, 10
-    "spatial_group_size": [1, 2, 3],
+    "temporal_layer_thresh": [20, 40, 60],
+    "temporal_interval": [1, 2, 4, 8],
+    "spatial_step_thresh": [0.2, 0.5],
+    "spatial_group_size": [1, 2],
 }
 
 BASE_SHIVA_CONFIG = {
@@ -111,9 +105,32 @@ def generate_ground_truth(pipe, prompts, args, gt_dir):
         res.save(save_path)
 
 def build_config_combinations(search_space):
-    keys = search_space.keys()
-    values = search_space.values()
-    return [dict(zip(keys, v)) for v in product(*values)]
+    keys = list(search_space.keys())
+    values = list(search_space.values())
+
+    default_spatial_thresh = search_space["spatial_step_thresh"][0]
+    default_temporal_thresh = search_space["temporal_layer_thresh"][0]
+
+    full_combinations = list(itertools.product(*values))
+    print(f"[Config] All: {len(full_combinations)}")
+
+    final_combinations = []
+    
+    for v in full_combinations:
+        cfg = dict(zip(keys, v))
+        
+        if cfg["spatial_group_size"] == 1:
+            if cfg["spatial_step_thresh"] != default_spatial_thresh:
+                continue
+
+        if cfg["temporal_interval"] == 1:
+            if cfg["temporal_layer_thresh"] != default_temporal_thresh:
+                continue
+        
+        final_combinations.append(cfg)
+
+    print(f"[Config] Actual: {len(final_combinations)}")
+    return final_combinations
 
 def main():
     dist.init_process_group(backend="nccl")
@@ -166,9 +183,15 @@ def main():
         current_shiva_config.update(cfg)
         
         shared_cfg = current_shiva_config["context_shared_config"].copy()
+        if "spatial_step_thresh" in cfg:
+            shared_cfg["spatial_step_thresh"] = cfg["spatial_step_thresh"]
+            del current_shiva_config["spatial_step_thresh"]
         if "spatial_group_size" in cfg:
             shared_cfg["spatial_group_size"] = cfg["spatial_group_size"]
             del current_shiva_config["spatial_group_size"]
+        if "temporal_layer_thresh" in cfg:
+            shared_cfg["temporal_layer_thresh"] = cfg["temporal_layer_thresh"]
+            del current_shiva_config["temporal_layer_thresh"]
         if "temporal_interval" in cfg:
             shared_cfg["temporal_interval"] = cfg["temporal_interval"]
             del current_shiva_config["temporal_interval"]
