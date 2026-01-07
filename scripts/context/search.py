@@ -6,7 +6,7 @@ import pandas as pd
 import lpips
 import argparse
 import time
-import torch.multiprocessing as mp
+import torch.distributed as dist
 from PIL import Image
 from tqdm import tqdm
 from itertools import product
@@ -47,118 +47,52 @@ BASE_SHIVA_CONFIG = {
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Shiva-DiT Hyperparameter Search Script"
-    )
-
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        required=True,
-        help="Path to input jsonl file (e.g., test/dataset/context_qwen.jsonl)",
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default="search_results",
-        help="Directory to save results and images",
-    )
-    parser.add_argument(
-        "--image_root",
-        type=str,
-        default="",
-        help="Root directory for input images (required for qwen-image-edit task)",
-    )
-
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="qwen-image",
-        choices=["qwen-image", "qwen-image-edit", "flux", "sd3"],
-        help="Model type",
-    )
-    parser.add_argument(
-        "--max_seq_len",
-        type=int,
-        default=4096,
-        help="Max sequence length for model input",
-    )
-    parser.add_argument(
-        "--height", type=int, default=1024, help="Image height (default: 1024)"
-    )
-    parser.add_argument(
-        "--width", type=int, default=1024, help="Image width (default: 1024)"
-    )
-    parser.add_argument(
-        "--num_images_per_prompt",
-        type=int,
-        default=1,
-        help="Number of images per prompt (default: 1)",
-    )
-    parser.add_argument("--device", type=str, default="cuda", help="Device to use")
-
-    parser.add_argument(
-        "--num_prompts",
-        type=int,
-        default=10,
-        help="Number of prompts to use for evaluation (default: 10)",
-    )
-    parser.add_argument(
-        "--seed", type=int, default=42, help="Random seed for generation"
-    )
-
+    parser = argparse.ArgumentParser(description="Shiva-DiT Hyperparameter Search Script (Torchrun)")
+    parser.add_argument("--dataset", type=str, required=True, help="Path to input jsonl file")
+    parser.add_argument("--output_dir", type=str, default="search_results", help="Directory to save results")
+    parser.add_argument("--image_root", type=str, default="", help="Root directory for input images")
+    parser.add_argument("--model", type=str, default="qwen-image", choices=["qwen-image", "qwen-image-edit", "flux", "sd3"])
+    parser.add_argument("--max_seq_len", type=int, default=4096)
+    parser.add_argument("--height", type=int, default=1024)
+    parser.add_argument("--width", type=int, default=1024)
+    parser.add_argument("--num_images_per_prompt", type=int, default=1)
+    parser.add_argument("--num_prompts", type=int, default=10)
+    parser.add_argument("--seed", type=int, default=42)
     return parser.parse_args()
-
 
 def load_prompts(dataset_path, limit=None):
     if not os.path.exists(dataset_path):
         raise FileNotFoundError(f"Dataset file not found: {dataset_path}")
-
-    print(f"[Data] Loading prompts from {dataset_path}")
+    
     prompts = []
     with open(dataset_path, "r") as f:
         for line in f:
             if line.strip():
                 try:
                     item = json.loads(line)
-                    if "text" in item:
-                        item["prompt"] = item["text"]
-
+                    if "text" in item: item["prompt"] = item["text"]
                     if "id" not in item:
-                        if "file_name" in item and item["file_name"]:
-                            item["id"] = os.path.splitext(item["file_name"])[0]
-                        else:
-                            item["id"] = str(hash(item.get("prompt", "")))[:8]
+                        item["id"] = os.path.splitext(item["file_name"])[0] if item.get("file_name") else str(hash(item.get("prompt", "")))[:8]
                     prompts.append(item)
                 except json.JSONDecodeError:
                     continue
-
-    if limit:
-        print(f"[Data] Limiting to first {limit} prompts.")
-        return prompts[:limit]
-    return prompts
-
+    return prompts[:limit] if limit else prompts
 
 def get_gt_path(gt_dir, prompt_id):
     return os.path.join(gt_dir, f"{prompt_id}.png")
 
-
 def generate_ground_truth(pipe, prompts, args, gt_dir):
-    print(f"\n=== Checking Ground Truth in {gt_dir} ===")
-
     HookManager.disable()
-    generator = torch.Generator(device=args.device)
-
-    generated_count = 0
-    for idx, item in enumerate(tqdm(prompts, desc="Checking GT")):
+    generator = torch.Generator(device=pipe.device)
+    
+    for idx, item in enumerate(tqdm(prompts, desc="[Rank 0] Checking GT")):
         p_id = str(item["id"])
         save_path = get_gt_path(gt_dir, p_id)
-
-        generator.manual_seed(args.seed + idx)
-
+        
         if os.path.exists(save_path):
             continue
 
+        generator.manual_seed(args.seed + idx)
         kwargs = {
             "prompt": item["prompt"],
             "max_sequence_length": args.max_seq_len,
@@ -169,59 +103,65 @@ def generate_ground_truth(pipe, prompts, args, gt_dir):
         }
 
         if args.model == "qwen-image-edit":
-            if not args.image_root:
-                raise ValueError("For qwen-image-edit, you must provide --image_root")
-
-            file_name = item.get("file_name")
-            if not file_name:
-                raise ValueError(f"Item {p_id} missing 'file_name' for edit task")
-
-            img_input = os.path.join(args.image_root, file_name)
+            img_input = os.path.join(args.image_root, item.get("file_name"))
             kwargs["image"] = Image.open(img_input).convert("RGB")
 
         with torch.no_grad():
             res = process_quick_start(pipe, **kwargs)
-
         res.save(save_path)
-        generated_count += 1
-
-    if generated_count > 0:
-        print(f"[GT] Generated {generated_count} missing ground truth images.")
-    else:
-        print("[GT] All ground truth images exist.")
-
 
 def build_config_combinations(search_space):
     keys = search_space.keys()
     values = search_space.values()
-    combinations = []
-    for v in product(*values):
-        combinations.append(dict(zip(keys, v)))
-    return combinations
+    return [dict(zip(keys, v)) for v in product(*values)]
 
-def worker(rank, world_size, args, configs, prompts, gt_dir):
-    device = torch.device(f"cuda:{rank}")
-    print(f"[Worker {rank}] Started. Processing on {device}")
+def main():
+    dist.init_process_group(backend="nccl")
     
-    print(f"[Worker {rank}] Loading Model...")
-    pipe, model_attrs = get_pipeline(args.model)
-    pipe.to(device)
+    rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
     
+    torch.cuda.set_device(local_rank)
+    device = torch.device(f"cuda:{local_rank}")
+    
+    args = parse_args()
+
+    gt_dir = os.path.join(args.output_dir, "ground_truth", args.model)
+    if rank == 0:
+        os.makedirs(gt_dir, exist_ok=True)
+        os.makedirs(os.path.join(args.output_dir, "predictions", args.model), exist_ok=True)
+    
+    dist.barrier()
+
+    prompts = load_prompts(args.dataset, limit=args.num_prompts)
+    configs = build_config_combinations(SEARCH_SPACE)
+
+    if rank == 0:
+        print(f"[Init] Rank 0 generating Ground Truth...")
+        gt_pipe, _ = get_pipeline(args.model, device=device)
+        generate_ground_truth(gt_pipe, prompts, args, gt_dir)
+        
+        del gt_pipe
+        torch.cuda.empty_cache()
+        print("[Init] GT Check Done. Releasing memory.")
+    
+    dist.barrier()
+
+    print(f"[Rank {rank}] Loading Model for evaluation...")
+    pipe, model_attrs = get_pipeline(args.model, device=device)
     loss_fn_alex = lpips.LPIPS(net="alex").to(device)
 
     my_configs = configs[rank::world_size]
-    print(f"[Worker {rank}] Assigned {len(my_configs)} configs out of {len(configs)} total.")
+    print(f"[Rank {rank}] Assigned {len(my_configs)} configs.")
 
     results = []
-
     generator = torch.Generator(device=device)
-    
-    for idx, cfg in enumerate(my_configs):
-        original_idx = configs.index(cfg) 
+
+    for cfg in my_configs:
+        original_idx = configs.index(cfg)
         config_name = f"cfg_{original_idx:03d}"
         
-        print(f"\n[Worker {rank}] >>> Running Config {config_name}: {cfg}")
-
         current_shiva_config = BASE_SHIVA_CONFIG.copy()
         current_shiva_config.update(cfg)
         
@@ -245,7 +185,7 @@ def worker(rank, world_size, args, configs, prompts, gt_dir):
         with HookManager.enabled():
             HookManager.inject_hooks(model_type=args.model, pipe=pipe, model_attrs=model_attrs)
 
-            for p_idx, item in enumerate(tqdm(prompts, desc=f"[W{rank}] Eval {config_name}", position=rank)):
+            for p_idx, item in enumerate(tqdm(prompts, desc=f"[R{rank}] {config_name}", position=local_rank)):
                 p_id = str(item["id"])
                 gt_path = get_gt_path(gt_dir, p_id)
                 generator.manual_seed(args.seed + p_idx)
@@ -259,8 +199,7 @@ def worker(rank, world_size, args, configs, prompts, gt_dir):
                 }
                 
                 if args.model == "qwen-image-edit":
-                    file_name = item.get("file_name")
-                    img_input = os.path.join(args.image_root, file_name)
+                    img_input = os.path.join(args.image_root, item.get("file_name"))
                     kwargs["image"] = Image.open(img_input).convert("RGB")
 
                 torch.cuda.synchronize(device)
@@ -270,12 +209,12 @@ def worker(rank, world_size, args, configs, prompts, gt_dir):
                 latencies.append(time.time() - start_t)
 
                 try:
-                    pred_img = lpips.im2tensor(np.array(res)).to(device) # device
-                    gt_img = lpips.im2tensor(lpips.load_image(gt_path)).to(device) # device
-                    dist = loss_fn_alex(pred_img, gt_img).item()
-                    lpips_scores.append(dist)
+                    pred_img = lpips.im2tensor(np.array(res)).to(device)
+                    gt_img = lpips.im2tensor(lpips.load_image(gt_path)).to(device)
+                    dist_val = loss_fn_alex(pred_img, gt_img).item()
+                    lpips_scores.append(dist_val)
                 except Exception as e:
-                    print(f"[Worker {rank} Error] {e}")
+                    print(f"[Rank {rank} Error] {e}")
                     lpips_scores.append(1.0)
 
         avg_lpips = np.mean(lpips_scores) if lpips_scores else 1.0
@@ -290,64 +229,32 @@ def worker(rank, world_size, args, configs, prompts, gt_dir):
         df = pd.DataFrame(results)
         csv_path = os.path.join(args.output_dir, f"search_results_{args.model}_rank{rank}.csv")
         df.to_csv(csv_path, index=False)
-        print(f"[Worker {rank}] Saved partial results to {csv_path}")
-
-def run_search():
-    args = parse_args()
+        print(f"[Rank {rank}] Saved results to {csv_path}")
     
-    gt_dir = os.path.join(args.output_dir, "ground_truth", args.model)
-    pred_dir_base = os.path.join(args.output_dir, "predictions", args.model)
-    os.makedirs(gt_dir, exist_ok=True)
-    os.makedirs(pred_dir_base, exist_ok=True)
+    dist.barrier()
 
-    prompts = load_prompts(args.dataset, limit=args.num_prompts)
-    
-    print(f"[Init] Checking Ground Truth on Master Process...")
-    temp_pipe, _ = get_pipeline(args.model)
-    temp_pipe.to("cuda:0") 
-    generate_ground_truth(temp_pipe, prompts, args, gt_dir)
-    del temp_pipe
-    torch.cuda.empty_cache()
-    print("[Init] GT Check Done. Releasing memory for workers.")
-
-    configs = build_config_combinations(SEARCH_SPACE)
-    print(f"\n[Search] Start Grid Search over {len(configs)} configurations.")
-
-    world_size = torch.cuda.device_count()
-    if world_size < 1:
-        raise RuntimeError("No CUDA devices available!")
-    
-    print(f"[System] Spawning {world_size} workers...")
-    mp.spawn(
-        worker,
-        args=(world_size, args, configs, prompts, gt_dir),
-        nprocs=world_size,
-        join=True
-    )
-
-    print("\n[Merge] All workers finished. Merging results...")
-    all_results = []
-    for rank in range(world_size):
-        part_csv = os.path.join(args.output_dir, f"search_results_{args.model}_rank{rank}.csv")
-        if os.path.exists(part_csv):
-            df_part = pd.read_csv(part_csv)
-            all_results.append(df_part)
-    
-    if all_results:
-        final_df = pd.concat(all_results, ignore_index=True)
-        final_df = final_df.sort_values("config_id")
+    if rank == 0:
+        print("\n[Merge] Merging results from all ranks...")
+        all_dfs = []
+        for r in range(world_size):
+            p_csv = os.path.join(args.output_dir, f"search_results_{args.model}_rank{r}.csv")
+            if os.path.exists(p_csv):
+                all_dfs.append(pd.read_csv(p_csv))
+                # os.remove(p_csv)
         
-        final_csv_path = os.path.join(args.output_dir, f"search_results_{args.model}.csv")
-        final_df.to_csv(final_csv_path, index=False)
-        print(f"Saved merged results to {final_csv_path}")
-        
-        best_acc = final_df.sort_values("avg_lpips").iloc[0]
-        print(f"Best Accuracy Config:\n{best_acc}")
-        
-        # for rank in range(world_size):
-        #     os.remove(os.path.join(args.output_dir, f"search_results_{args.model}_rank{rank}.csv"))
-    else:
-        print("[Warning] No results collected.")
+        if all_dfs:
+            final_df = pd.concat(all_dfs, ignore_index=True)
+            final_df = final_df.sort_values("config_id")
+            final_csv = os.path.join(args.output_dir, f"search_results_{args.model}.csv")
+            final_df.to_csv(final_csv, index=False)
+            
+            best_cfg = final_df.sort_values("avg_lpips").iloc[0]
+            print(f"Saved merged results to {final_csv}")
+            print(f"Best Config:\n{best_cfg}")
+        else:
+            print("[Warning] No results found.")
+
+    dist.destroy_process_group()
 
 if __name__ == "__main__":
-    run_search()
+    main()
