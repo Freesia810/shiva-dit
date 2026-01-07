@@ -6,6 +6,7 @@ import pandas as pd
 import lpips
 import argparse
 import time
+import torch.multiprocessing as mp
 from PIL import Image
 from tqdm import tqdm
 from itertools import product
@@ -14,12 +15,20 @@ from shiva_dit.utils import get_pipeline, process_quick_start
 from shiva_dit.hook.hook_manager import HookManager
 from shiva_dit.shiva_hook import ShivaDitBlockHook
 
+# SEARCH_SPACE = {
+#     "context_pool_size": [64, 16, 4, None],
+#     "fixed_context_ratio": [(1.0, 0.1), (1.0, 0.05)],
+#     "context_ratio_mode": ["cosine", "linear"],
+#     "temporal_interval": [1, 10, 25, 50],
+#     "spatial_group_size": [1],
+# }
+
 SEARCH_SPACE = {
-    "context_pool_size": [64, 16, 4, None],
-    "fixed_context_ratio": [(1.0, 0.1), (1.0, 0.05)],
-    "context_ratio_mode": ["cosine", "linear"],
-    "temporal_interval": [1, 10, 25, 50],
-    "spatial_group_size": [1],
+    "context_pool_size": [48, 32], # 64, 16
+    "fixed_context_ratio": [(1.0, 0.1)],
+    "context_ratio_mode": ["cosine"],
+    "temporal_interval": [2, 4, 6, 8], # 1, 10
+    "spatial_group_size": [1, 2, 3],
 }
 
 BASE_SHIVA_CONFIG = {
@@ -138,12 +147,14 @@ def generate_ground_truth(pipe, prompts, args, gt_dir):
     print(f"\n=== Checking Ground Truth in {gt_dir} ===")
 
     HookManager.disable()
-    generator = torch.Generator(device=args.device).manual_seed(args.seed)
+    generator = torch.Generator(device=args.device)
 
     generated_count = 0
-    for item in tqdm(prompts, desc="Checking GT"):
+    for idx, item in enumerate(tqdm(prompts, desc="Checking GT")):
         p_id = str(item["id"])
         save_path = get_gt_path(gt_dir, p_id)
+
+        generator.manual_seed(args.seed + idx)
 
         if os.path.exists(save_path):
             continue
@@ -188,36 +199,32 @@ def build_config_combinations(search_space):
         combinations.append(dict(zip(keys, v)))
     return combinations
 
-
-def run_search():
-    args = parse_args()
-
-    gt_dir = os.path.join(args.output_dir, "ground_truth", args.model)
-    pred_dir_base = os.path.join(args.output_dir, "predictions", args.model)
-    os.makedirs(gt_dir, exist_ok=True)
-    os.makedirs(pred_dir_base, exist_ok=True)
-
-    print(f"[Init] Loading Model: {args.model}...")
+def worker(rank, world_size, args, configs, prompts, gt_dir):
+    device = torch.device(f"cuda:{rank}")
+    print(f"[Worker {rank}] Started. Processing on {device}")
+    
+    print(f"[Worker {rank}] Loading Model...")
     pipe, model_attrs = get_pipeline(args.model)
+    pipe.to(device)
+    
+    loss_fn_alex = lpips.LPIPS(net="alex").to(device)
 
-    prompts = load_prompts(args.dataset, limit=args.num_prompts)
-    generate_ground_truth(pipe, prompts, args, gt_dir)
-
-    print("[Init] Loading LPIPS metric...")
-    loss_fn_alex = lpips.LPIPS(net="alex").to(args.device)
-
-    configs = build_config_combinations(SEARCH_SPACE)
-    print(f"\n[Search] Start Grid Search over {len(configs)} configurations.")
+    my_configs = configs[rank::world_size]
+    print(f"[Worker {rank}] Assigned {len(my_configs)} configs out of {len(configs)} total.")
 
     results = []
 
-    for idx, cfg in enumerate(configs):
-        config_name = f"cfg_{idx:03d}"
-        print(f"\n>>> Running Config {idx+1}/{len(configs)}: {cfg}")
+    generator = torch.Generator(device=device)
+    
+    for idx, cfg in enumerate(my_configs):
+        original_idx = configs.index(cfg) 
+        config_name = f"cfg_{original_idx:03d}"
+        
+        print(f"\n[Worker {rank}] >>> Running Config {config_name}: {cfg}")
 
         current_shiva_config = BASE_SHIVA_CONFIG.copy()
         current_shiva_config.update(cfg)
-
+        
         shared_cfg = current_shiva_config["context_shared_config"].copy()
         if "spatial_group_size" in cfg:
             shared_cfg["spatial_group_size"] = cfg["spatial_group_size"]
@@ -235,17 +242,13 @@ def run_search():
         lpips_scores = []
         latencies = []
 
-        generator = torch.Generator(device=args.device).manual_seed(args.seed)
-
         with HookManager.enabled():
-            HookManager.inject_hooks(
-                model_type=args.model, pipe=pipe, model_attrs=model_attrs
-            )
+            HookManager.inject_hooks(model_type=args.model, pipe=pipe, model_attrs=model_attrs)
 
-            for item in tqdm(prompts, desc=f"Eval {config_name}"):
+            for p_idx, item in enumerate(tqdm(prompts, desc=f"[W{rank}] Eval {config_name}", position=rank)):
                 p_id = str(item["id"])
                 gt_path = get_gt_path(gt_dir, p_id)
-
+                generator.manual_seed(args.seed + p_idx)
                 kwargs = {
                     "prompt": item["prompt"],
                     "max_sequence_length": args.max_seq_len,
@@ -254,71 +257,97 @@ def run_search():
                     "width": args.width,
                     "num_images_per_prompt": args.num_images_per_prompt,
                 }
-
+                
                 if args.model == "qwen-image-edit":
-                    if not args.image_root:
-                        raise ValueError(
-                            "For qwen-image-edit, you must provide --image_root"
-                        )
-
                     file_name = item.get("file_name")
-                    if not file_name:
-                        raise ValueError(f"Item {p_id} missing 'file_name' for edit task")
-
                     img_input = os.path.join(args.image_root, file_name)
                     kwargs["image"] = Image.open(img_input).convert("RGB")
 
-                torch.cuda.synchronize()
+                torch.cuda.synchronize(device)
                 start_t = time.time()
-
                 res = process_quick_start(pipe, **kwargs)
-
-                torch.cuda.synchronize()
-                end_t = time.time()
-                latencies.append(end_t - start_t)
+                torch.cuda.synchronize(device)
+                latencies.append(time.time() - start_t)
 
                 try:
-                    pred_img = lpips.im2tensor(np.array(res)).to(args.device)
-                    
-                    gt_img = lpips.im2tensor(lpips.load_image(gt_path)).to(
-                        args.device
-                    )
-                    
+                    pred_img = lpips.im2tensor(np.array(res)).to(device) # device
+                    gt_img = lpips.im2tensor(lpips.load_image(gt_path)).to(device) # device
                     dist = loss_fn_alex(pred_img, gt_img).item()
                     lpips_scores.append(dist)
                 except Exception as e:
-                    print(f"[Error] Failed to calc LPIPS for {p_id}: {e}")
+                    print(f"[Worker {rank} Error] {e}")
                     lpips_scores.append(1.0)
-
-                # res.save(os.path.join(pred_dir_base, f"{p_id}_{config_name}.png"))
 
         avg_lpips = np.mean(lpips_scores) if lpips_scores else 1.0
         avg_latency = np.mean(latencies) if latencies else 0.0
-
         record = {k: v for k, v in cfg.items()}
         record["config_id"] = config_name
         record["avg_lpips"] = avg_lpips
         record["avg_latency"] = avg_latency
         results.append(record)
 
-        print(f"    [Result] LPIPS: {avg_lpips:.4f} | Latency: {avg_latency:.4f}s")
-
-        df = pd.DataFrame(results)
-        csv_path = os.path.join(args.output_dir, f"search_results_{args.model}.csv")
-        df.to_csv(csv_path, index=False)
-
-    print("\n=== Search Complete ===")
     if results:
         df = pd.DataFrame(results)
-        best_acc = df.sort_values("avg_lpips").iloc[0]
+        csv_path = os.path.join(args.output_dir, f"search_results_{args.model}_rank{rank}.csv")
+        df.to_csv(csv_path, index=False)
+        print(f"[Worker {rank}] Saved partial results to {csv_path}")
+
+def run_search():
+    args = parse_args()
+    
+    gt_dir = os.path.join(args.output_dir, "ground_truth", args.model)
+    pred_dir_base = os.path.join(args.output_dir, "predictions", args.model)
+    os.makedirs(gt_dir, exist_ok=True)
+    os.makedirs(pred_dir_base, exist_ok=True)
+
+    prompts = load_prompts(args.dataset, limit=args.num_prompts)
+    
+    print(f"[Init] Checking Ground Truth on Master Process...")
+    temp_pipe, _ = get_pipeline(args.model)
+    temp_pipe.to("cuda:0") 
+    generate_ground_truth(temp_pipe, prompts, args, gt_dir)
+    del temp_pipe
+    torch.cuda.empty_cache()
+    print("[Init] GT Check Done. Releasing memory for workers.")
+
+    configs = build_config_combinations(SEARCH_SPACE)
+    print(f"\n[Search] Start Grid Search over {len(configs)} configurations.")
+
+    world_size = torch.cuda.device_count()
+    if world_size < 1:
+        raise RuntimeError("No CUDA devices available!")
+    
+    print(f"[System] Spawning {world_size} workers...")
+    mp.spawn(
+        worker,
+        args=(world_size, args, configs, prompts, gt_dir),
+        nprocs=world_size,
+        join=True
+    )
+
+    print("\n[Merge] All workers finished. Merging results...")
+    all_results = []
+    for rank in range(world_size):
+        part_csv = os.path.join(args.output_dir, f"search_results_{args.model}_rank{rank}.csv")
+        if os.path.exists(part_csv):
+            df_part = pd.read_csv(part_csv)
+            all_results.append(df_part)
+    
+    if all_results:
+        final_df = pd.concat(all_results, ignore_index=True)
+        final_df = final_df.sort_values("config_id")
+        
+        final_csv_path = os.path.join(args.output_dir, f"search_results_{args.model}.csv")
+        final_df.to_csv(final_csv_path, index=False)
+        print(f"Saved merged results to {final_csv_path}")
+        
+        best_acc = final_df.sort_values("avg_lpips").iloc[0]
         print(f"Best Accuracy Config:\n{best_acc}")
-
-        best_config_path = os.path.join(
-            args.output_dir, f"best_config_{args.model}.json"
-        )
-        best_acc.to_json(best_config_path)
-        print(f"Saved best config to {best_config_path}")
-
+        
+        # for rank in range(world_size):
+        #     os.remove(os.path.join(args.output_dir, f"search_results_{args.model}_rank{rank}.csv"))
+    else:
+        print("[Warning] No results collected.")
 
 if __name__ == "__main__":
     run_search()
