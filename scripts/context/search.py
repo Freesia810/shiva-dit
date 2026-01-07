@@ -6,6 +6,7 @@ import pandas as pd
 import lpips
 import argparse
 import time
+import copy
 import torch.distributed as dist
 from PIL import Image
 from tqdm import tqdm
@@ -133,14 +134,17 @@ def build_config_combinations(search_space):
     return final_combinations
 
 def main():
-    dist.init_process_group(backend="nccl")
-    
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     
     torch.cuda.set_device(local_rank)
     device = torch.device(f"cuda:{local_rank}")
+
+    dist.init_process_group(
+        backend="nccl", 
+        device_id=torch.device(f"cuda:{local_rank}")
+    )
     
     args = parse_args()
 
@@ -179,7 +183,7 @@ def main():
         original_idx = configs.index(cfg)
         config_name = f"cfg_{original_idx:03d}"
         
-        current_shiva_config = BASE_SHIVA_CONFIG.copy()
+        current_shiva_config = copy.deepcopy(BASE_SHIVA_CONFIG)
         current_shiva_config.update(cfg)
         
         shared_cfg = current_shiva_config["context_shared_config"].copy()
@@ -196,6 +200,8 @@ def main():
             shared_cfg["temporal_interval"] = cfg["temporal_interval"]
             del current_shiva_config["temporal_interval"]
         current_shiva_config["context_shared_config"] = shared_cfg
+
+        print(f"[Rank {rank}] Config_name: {config_name}, Config: {current_shiva_config}" )
 
         HookManager.configure_hooks(
             model_type=args.model,
@@ -232,7 +238,8 @@ def main():
                 latencies.append(time.time() - start_t)
 
                 try:
-                    pred_img = lpips.im2tensor(np.array(res)).to(device)
+                    pred_np = np.array(res).astype(np.float32) / 255.0 * 2.0 - 1.0
+                    pred_img = torch.from_numpy(pred_np).permute(2, 0, 1).unsqueeze(0).to(device) # (1, C, H, W)
                     gt_img = lpips.im2tensor(lpips.load_image(gt_path)).to(device)
                     dist_val = loss_fn_alex(pred_img, gt_img).item()
                     lpips_scores.append(dist_val)

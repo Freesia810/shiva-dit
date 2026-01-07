@@ -312,15 +312,19 @@ class ShivaContextPruner(nn.Module):
         else:
             leader_id = self.layer_id
 
+        if active_temporal_interval > 1:
+            anchor_step = current_iter - (current_iter % active_temporal_interval)
+        else:
+            anchor_step = current_iter
+
         cache = HookManager.get_global(f"SHIVA_SCORE_CACHE_{global_context.encoder_flag}", {})
         if self.layer_id != leader_id:
             leader_data = cache.get(leader_id)
-            if leader_data is not None:
+            if leader_data is not None and leader_data["step"] == anchor_step:
                 return leader_data["score"], leader_data.get("idx_sorted")
-
-        elif active_temporal_interval > 1 and current_iter % active_temporal_interval != 0:
+        elif active_temporal_interval > 1 and current_iter != anchor_step:
             my_data = cache.get(self.layer_id)
-            if my_data is not None:
+            if my_data is not None and my_data["step"] == anchor_step:
                 return my_data["score"], my_data.get("idx_sorted")
 
         # print(current_iter, self.layer_id, leader_id, active_spatial_group, active_temporal_interval, global_context.encoder_flag)
