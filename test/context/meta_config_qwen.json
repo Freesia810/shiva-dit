@@ -5,7 +5,7 @@
         "class_name": "ShivaDitBlockHook",
         "config": {
             "shiva_mode": "context",
-            "context_ratio_mode": "linear",
+            "context_ratio_mode": "cosine",
             "fixed_context_ratio": [1.0, 0.1],
             "context_pruner_mode": "free",
             "context_pool_size": 16,
