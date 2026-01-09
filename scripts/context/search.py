@@ -11,6 +11,7 @@ import torch.distributed as dist
 from PIL import Image
 from tqdm import tqdm
 import itertools
+from datetime import timedelta
 
 from shiva_dit.utils import get_pipeline, process_quick_start
 from shiva_dit.hook.hook_manager import HookManager
@@ -20,10 +21,10 @@ SEARCH_SPACE = {
     "context_pool_size": [64, 32, 16],
     "fixed_context_ratio": [(1.0, 0.1)],
     "context_ratio_mode": ["cosine"],
-    "temporal_layer_thresh": [20, 40, 60],
-    "temporal_interval": [1, 2, 4, 8],
-    "spatial_step_thresh": [0.2, 0.5],
-    "spatial_group_size": [1, 2],
+    "temporal_layer_thresh": [60],
+    "temporal_interval": [4],
+    "spatial_step_thresh": [0.2],
+    "spatial_group_size": [2],
 }
 
 BASE_SHIVA_CONFIG = {
@@ -143,7 +144,8 @@ def main():
 
     dist.init_process_group(
         backend="nccl", 
-        device_id=torch.device(f"cuda:{local_rank}")
+        device_id=torch.device(f"cuda:{local_rank}"),
+        timeout=timedelta(hours=5)
     )
     
     args = parse_args()
