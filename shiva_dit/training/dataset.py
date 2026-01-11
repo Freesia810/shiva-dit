@@ -270,7 +270,8 @@ class QwenImageProcessor(BaseItemProcessor):
             image_processor=image_processor,
             pipe=pipe,
         )
-        self.tokenizer_max_length = kwargs.get("tokenizer_max_length", 1024)
+        self.tokenizer_max_length = kwargs.get("tokenizer_max_length", 4096)
+        print(f"QwenImageProcessor tokenizer_max_length: {self.tokenizer_max_length}")
         self.prompt_template_encode = kwargs.get(
             "prompt_template_encode",
             "<|im_start|>system\nDescribe the image by detailing the color, shape, size, texture, quantity, text, spatial relationships of the objects and background:<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n",

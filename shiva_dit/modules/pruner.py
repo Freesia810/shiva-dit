@@ -58,12 +58,8 @@ class ShivaContextPruner(nn.Module):
     def on_register_layer_idx(self, layer_id):
         self.layer_id = layer_id
 
-    def on_register(self, block: nn.Module):
-        if self.mode != "free":
-            return
-
-        # free mode
-        self.eval()
+    @staticmethod
+    def _get_free_ops(block: nn.Module):
         attn = block.attn if hasattr(block, "attn") else block
 
         ops = {}
@@ -96,21 +92,28 @@ class ShivaContextPruner(nn.Module):
             raise RuntimeError(
                 "Pruner in 'free' mode expects the module to have 'add_k_proj' method."
             )
+        
+        return ops
 
-        self.free_ops = ops
+    def on_register(self, block: nn.Module):
+        if self.mode != "free":
+            return
+
+        # free mode
+        self.eval()
+        self.free_ops = ShivaContextPruner._get_free_ops(block)
         print(
-            f"[ShivaContextPruner] Registered free ops from {type(block).__name__}. Keys: {list(ops.keys())}"
+            f"[ShivaContextPruner] Registered free ops from {type(block).__name__}. Keys: {list(self.free_ops.keys())}"
         )
 
-    def _get_spatial_importance(self, batch_size, H, W, device, dtype):
+    @staticmethod
+    def _get_spatial_importance(batch_size, H, W, device, dtype):
         if global_context.current_iteration == 0:
-            return torch.ones(batch_size, H * W, 1, device=device, dtype=dtype)
+            return None
 
         last_cfg = getattr(global_context, "last_cfg_hidden_state", None)
         if last_cfg is None:
-            raise RuntimeError(
-                f"No last_cfg_hidden_state found at iter {global_context.current_iteration}."
-            )
+            return None
         
         with torch.no_grad():
             if last_cfg.dim() == 3:
@@ -147,18 +150,24 @@ class ShivaContextPruner(nn.Module):
             
             return importance_flat.to(device=device, dtype=dtype)
 
-    def _apply_pooling(self, q, H=None, W=None, importance_map=None):
+    def _apply_pooling(q, H=None, W=None, pool_size=None, importance_map=None):
         if importance_map is not None:
-            # q: (B, N, Heads, D) or (B, N, D)
-            # importance_map: (1, N, 1)
-            if q.dim() == 4:
-                weight = importance_map.unsqueeze(-1)  # (1, N, 1, 1)
+            dims_to_add = q.dim() - importance_map.dim()
+            weight = importance_map.view(*importance_map.shape, *(1,) * dims_to_add)
+
+            # (Sequence Length Alignment)
+            q_len = q.size(1)
+            w_len = weight.size(1)
+
+            if q_len != w_len:
+                if q_len > w_len:
+                    q[:, :w_len, ...] *= weight
+                else:
+                    q *= weight[:, :q_len, ...]
             else:
-                weight = importance_map  # (1, N, 1)
+                q = q * weight
 
-            q = q * weight
-
-        if self.pool_size is None or self.pool_size <= 1:
+        if pool_size is None or pool_size <= 1:
             return q.max(dim=1, keepdim=True).values
 
         is_4d = q.dim() == 4
@@ -175,17 +184,27 @@ class ShivaContextPruner(nn.Module):
         q_in = q_working.transpose(1, 2)  # (Batch_Eff, D, N)
 
         pool_sz = (
-            (self.pool_size, self.pool_size)
-            if isinstance(self.pool_size, int)
-            else self.pool_size
+            (pool_size, pool_size)
+            if isinstance(pool_size, int)
+            else pool_size
         )
 
         q_pooled = None
+        
+        if H is not None and W is not None and q_in.shape[1] >= H * W:
+            num_spatial = H * W
+            q_spatial = q_in[:, :num_spatial, :] # (B_eff, H*W, D)
+            q_extra = q_in[:, num_spatial:, :]   # (B_eff, N-H*W, D)
 
-        if H is not None and W is not None and H * W == N:
-            q_2d = q_in.view(-1, D, H, W)
-            q_out_2d = F.adaptive_max_pool2d(q_2d, pool_sz)
-            q_pooled = q_out_2d.flatten(2)  # (Batch_Eff, D, M)
+            q_2d = q_spatial.transpose(1, 2).view(-1, D, H, W)
+            q_out_2d = F.adaptive_max_pool2d(q_2d, pool_sz) 
+            q_pooled_spatial = q_out_2d.flatten(2) # (B_eff, D, M)
+
+            if q_extra.size(1) > 0:
+                q_extra_mean = q_extra.mean(dim=1, keepdim=True).transpose(1, 2)
+                q_pooled = torch.cat([q_pooled_spatial, q_extra_mean], dim=2)
+            else:
+                q_pooled = q_pooled_spatial
 
         if q_pooled is None:
             # 1D Pooling Fallback
@@ -254,16 +273,20 @@ class ShivaContextPruner(nn.Module):
 
         return active_spatial_group, active_temporal_interval
 
-    def _process_attn(self, h_in, e_in, H, W):
-        if self.free_ops is None:
+    @staticmethod
+    def _process_attn(h_in, e_in, H, W, free_ops, pool_size, enable_importance=True):
+        if free_ops is None:
             raise RuntimeError(
                 "Pruner is in 'free' mode but 'on_register' was never called to bind model layers."
             )
 
-        ops = self.free_ops
+        ops = free_ops
         with torch.no_grad():
             num_heads = ops.get("num_heads", 1)
-            importance_map = self._get_spatial_importance(h_in.shape[0], H, W, h_in.device, h_in.dtype)
+            if enable_importance:
+                importance_map = ShivaContextPruner._get_spatial_importance(h_in.shape[0], H, W, h_in.device, h_in.dtype)
+            else:
+                importance_map = None
             if "to_q" in ops:
                 q_full = ops["to_q"](h_in)
                 if "norm_q" in ops:
@@ -272,7 +295,7 @@ class ShivaContextPruner(nn.Module):
                 q_full = h_in.unsqueeze(2)  # Fallback: (B, N, 1, D)
 
             # Apply Pooling: (B, N, H, D) -> (B, M, H, D)
-            q = self._apply_pooling(q_full, H, W, importance_map=importance_map)
+            q = ShivaContextPruner._apply_pooling(q_full, H, W, pool_size=pool_size, importance_map=importance_map)
 
             # --- Extract Text K (Retain Heads) ---
             if "to_k" in ops:
@@ -290,11 +313,11 @@ class ShivaContextPruner(nn.Module):
         return attn_map
 
     def _forward_learned(self, h_in, e_in, H, W):
-        q_pooled_raw = self._apply_pooling(h_in, H, W)  # (B, M, Dim_in)
-        q = self.q_proj(q_pooled_raw)  # (B, M, Proj_Dim)
+        q_full = self.q_proj(h_in)
+        q_pooled = ShivaContextPruner._apply_pooling(q_full, H, W, pool_size=self.pool_size)  # (B, M, Dim_in)
         k_proj = self.k_proj(e_in)  # (B, L, Proj_Dim)
 
-        q = F.normalize(q, p=2, dim=-1)
+        q = F.normalize(q_pooled, p=2, dim=-1)
         k_proj = F.normalize(k_proj, p=2, dim=-1)
         scale = self.logit_scale.exp()
 
@@ -328,7 +351,7 @@ class ShivaContextPruner(nn.Module):
                 return my_data["score"], my_data.get("idx_sorted")
 
         # print(current_iter, self.layer_id, leader_id, active_spatial_group, active_temporal_interval, global_context.encoder_flag)
-        attn_map = self._process_attn(h_in, e_in, H, W)
+        attn_map = ShivaContextPruner._process_attn(h_in, e_in, H, W, self.free_ops, self.pool_size)
         scores = attn_map.max(dim=1).values  # (B, L)
         idx_sorted = torch.argsort(scores, dim=-1, descending=True)
         if self.layer_id == leader_id:
@@ -368,8 +391,3 @@ class ShivaContextPruner(nn.Module):
         )
 
         return x_sel.to(original_dtype), x_rej.to(original_dtype), sel_idx, rej_idx
-
-    def get_aux_loss(self):
-        if not hasattr(self, "last_scores"):
-            return torch.tensor(0.0)
-        return -torch.var(self.last_scores)

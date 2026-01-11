@@ -39,8 +39,8 @@ class TrainerConfig:
     training_mode: TrainingMode = "hook_only" # "hook_only" "finetune" "lora"
     lora_config: LoraConfig = field(default_factory=LoraConfig)
     trainable_hook_config: Tuple[type, Dict[str, Any]] = None 
-    compile_model: bool = True
 
+    tokenizer_max_length: int = 512
     caption_dropout_rate: float = 0.25
 
     num_epochs: int = 10

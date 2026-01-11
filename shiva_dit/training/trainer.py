@@ -426,6 +426,7 @@ class DiffusionModelTrainer:
             image_processor=self.pipe.image_processor,
             tokenizers=self.tokenizers,
             pipe=self.pipe,
+            tokenizer_max_length=config.tokenizer_max_length,
         )
         self.train_dataloader = DataLoader(
             self.train_dataset,
@@ -448,6 +449,7 @@ class DiffusionModelTrainer:
                     image_processor=self.pipe.image_processor,
                     tokenizers=self.tokenizers,
                     pipe=self.pipe,
+                    tokenizer_max_length=config.tokenizer_max_length,
                 )
                 val_batch_size = (
                     config.val_batch_size

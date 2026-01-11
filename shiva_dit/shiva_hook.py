@@ -222,8 +222,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         return processed_output
 
     def _prepare_inputs(self, func, module_self, *args, **kwargs):
-        # torch.cuda.synchronize()
-        # t_start = time.time()
+
 
         sig = inspect.signature(func)
         bound = sig.bind_partial(module_self, *args, **kwargs)
