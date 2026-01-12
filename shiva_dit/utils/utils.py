@@ -11,6 +11,7 @@ from diffusers.pipelines import (
     QwenImagePipeline,
     FluxKontextPipeline,
     QwenImageEditPipeline,
+    OmniGenPipeline,
     WanPipeline,
 )
 
@@ -21,10 +22,11 @@ default_model_config = {
     "qwen-image": ("../Qwen-Image", torch.bfloat16, QwenImagePipeline),
     "flux-kontext": ("../FLUX.1-Kontext-dev", torch.bfloat16, FluxKontextPipeline),
     "qwen-image-edit": ("../Qwen-Image-Edit", torch.bfloat16, QwenImageEditPipeline),
+    "omnigen": ("../OmniGen-v1-diffusers", torch.bfloat16, OmniGenPipeline),
     "wan": ("../Wan2.2-T2V-A14B-Diffusers", torch.bfloat16, WanPipeline),
 }
 
-def get_pipeline(model_type: Literal["sd3", "flux-dev", "pixart-sigma", "qwen-image", "flux-kontext", "qwen-image-edit", "wan"], model_path: str = None, dtype: torch.dtype = None, device: torch.device = None):
+def get_pipeline(model_type: Literal["sd3", "flux-dev", "pixart-sigma", "qwen-image", "flux-kontext", "qwen-image-edit", "omnigen", "wan"], model_path: str = None, dtype: torch.dtype = None, device: torch.device = None):
     model_path = model_path or default_model_config[model_type][0]
     dtype = dtype or default_model_config[model_type][1]
     PipelineType = default_model_config[model_type][2]
@@ -107,6 +109,17 @@ def process_quick_start(pipeline: DiffusionPipeline, **kwargs):
         kwargs.setdefault('width', 1024)
         kwargs.setdefault('generator', torch.Generator(device="cuda").manual_seed(0))
         return pipeline(**kwargs).images[0]
+    elif isinstance(pipeline, OmniGenPipeline):
+        input_image = Image.open("pic/two_man.jpg").convert("RGB")
+        kwargs.setdefault('input_images', [input_image])
+        kwargs.setdefault('prompt', "A man in a black shirt is reading a book. The man is the right man in <img><|image_1|></img>.")
+        kwargs.setdefault('height', 1024)
+        kwargs.setdefault('width', 1024)
+        kwargs.setdefault('num_inference_steps', 50)
+        kwargs.setdefault('guidance_scale', 2.5)
+        kwargs.setdefault('img_guidance_scale', 1.6)
+        kwargs.setdefault('generator', torch.Generator(device="cuda").manual_seed(0))
+        return pipeline(**kwargs).images[0]
     elif isinstance(pipeline, WanPipeline):
         kwargs.setdefault('prompt', "Two anthropomorphic cats in comfy boxing gear and bright gloves fight intensely on a spotlighted stage.")
         kwargs.setdefault('negative_prompt', "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走")
@@ -122,7 +135,7 @@ def _slice_rope(rope: Tuple[torch.Tensor, torch.Tensor], start: int, end: Option
     return tuple(t[start:end] for t in rope)
 
 def parse_image_rotary_emb(
-    model_type: Literal["sd3", "flux-dev", "pixart-sigma", "qwen-image", "flux-kontext", "qwen-image-edit", "wan"],
+    model_type: Literal["sd3", "flux-dev", "pixart-sigma", "qwen-image", "flux-kontext", "qwen-image-edit", "omnigen", "wan"],
     image_rotary_emb: any,
     hidden_seq_len: int,
     encoder_hidden_seq_len: int,
