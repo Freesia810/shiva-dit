@@ -51,8 +51,6 @@ def install_shiva_hooks(
     prompt_embed_dim = global_context.encoder_hidden_dim
     if model_dim is None:
         raise ValueError("[ShivaInstaller] 'hidden_dim' not found in global_context.")
-    if prompt_embed_dim is None:
-        raise ValueError("[ShivaInstaller] 'encoder_hidden_dim' not found in global_context.")
 
     time_embed_dim = model_dim
 
@@ -255,6 +253,11 @@ if __name__ == "__main__":
 
     max_sequence_length = None
     image = None
+    input_images = None
+
+    # model_type = "omnigen"
+    # prompt = "A man in a black shirt is reading a book. The man is the left man in <img><|image_1|></img>."
+    # input_images = ["./pic/two_man.jpg"]
 
     model_type = "qwen-image-edit"
     prompt = "Change the rabbit's color to purple, with a flash light background."
@@ -293,6 +296,8 @@ if __name__ == "__main__":
         )
         if model_type == "qwen-image-edit":
             res = process_quick_start(pipe, prompt=prompt, max_sequence_length=max_sequence_length, image=image, num_images_per_prompt=1)
+        elif model_type == "omnigen":
+            res = process_quick_start(pipe, prompt=prompt, input_images=input_images, num_images_per_prompt=1)
         else:
             res = process_quick_start(pipe, prompt=prompt, max_sequence_length=max_sequence_length, num_images_per_prompt=1)
         res.save(f"{model_type}_shiva.png")

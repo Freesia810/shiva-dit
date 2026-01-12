@@ -162,6 +162,23 @@ def parse_image_rotary_emb(
                 extra_hidden_rotary_emb = None
             
             return hidden_rotary_emb, encoder_rotary_emb, extra_hidden_rotary_emb
+    
+    # === OmniGen Family Logic ===
+    # we assume time_seq as extra, for not changing the signature
+    # we shouldn't change the temb_rotary_emb
+    elif model_type in ("omnigen"):
+        # image_rotary_emb is strictly (cos, sin)
+        # Structure: [Encoder | Time | Hidden]
+        time_seq_len = image_rotary_emb[0].shape[0] - encoder_hidden_seq_len - hidden_seq_len 
+
+        encoder_rotary_emb = _slice_rope(image_rotary_emb, 0, encoder_hidden_seq_len)
+        temb_rotary_emb = _slice_rope(image_rotary_emb, encoder_hidden_seq_len, encoder_hidden_seq_len + time_seq_len)
+        
+        h_start = encoder_hidden_seq_len + time_seq_len
+        h_end = encoder_hidden_seq_len + time_seq_len + hidden_seq_len
+        hidden_rotary_emb = _slice_rope(image_rotary_emb, h_start, h_end)
+
+        return hidden_rotary_emb, encoder_rotary_emb, temb_rotary_emb
 
     # === Qwen Family Logic ===
     elif model_type == "qwen-image":
@@ -202,7 +219,7 @@ def parse_image_rotary_emb(
 
 
 def join_image_rotary_emb(
-    model_type: Literal["sd3", "flux-dev", "pixart-sigma", "qwen-image", "flux-kontext", "qwen-image-edit", "wan"],
+    model_type: Literal["sd3", "flux-dev", "pixart-sigma", "qwen-image", "flux-kontext", "qwen-image-edit", "omnigen", "wan"],
     hidden_rotary_emb: Tuple[torch.Tensor, ...],
     encoder_rotary_emb: Tuple[torch.Tensor, ...],
     extra_hidden_rotary_emb: Optional[Tuple[torch.Tensor, ...]] = None
@@ -216,6 +233,13 @@ def join_image_rotary_emb(
             parts_cos.append(extra_hidden_rotary_emb[0])
             parts_sin.append(extra_hidden_rotary_emb[1])
             
+        return (torch.cat(parts_cos, dim=0), torch.cat(parts_sin, dim=0))
+    
+    # === OmniGen Family Logic ===
+    elif model_type == 'omnigen':
+        # extra is time
+        parts_cos = [encoder_rotary_emb[0], extra_hidden_rotary_emb[0], hidden_rotary_emb[0]]
+        parts_sin = [encoder_rotary_emb[1], extra_hidden_rotary_emb[1], hidden_rotary_emb[1]]
         return (torch.cat(parts_cos, dim=0), torch.cat(parts_sin, dim=0))
 
     # === Qwen Family Logic ===

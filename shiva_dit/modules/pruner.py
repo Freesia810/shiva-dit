@@ -60,9 +60,25 @@ class ShivaContextPruner(nn.Module):
 
     @staticmethod
     def _get_free_ops(block: nn.Module):
-        attn = block.attn if hasattr(block, "attn") else block
+        is_omnigen = block.__class__.__name__ == "OmniGenBlock"
+        if is_omnigen:
+            attn = block.self_attn
+        else:
+            attn = block.attn if hasattr(block, "attn") else block
 
         ops = {}
+
+        if is_omnigen:
+            # in OmniGen, we use to_k and to_q instead of add_k_proj, and no norm
+            if hasattr(attn, "to_k"):
+                ops["to_k"] = attn.to_k
+
+            # Image Query Projection
+            if hasattr(attn, "to_q"):
+                ops["to_q"] = attn.to_q
+            ops["num_heads"] = attn.heads
+
+            return ops
 
         if hasattr(attn, "add_k_proj"):
             # Text Key Projection (Context)
@@ -283,14 +299,16 @@ class ShivaContextPruner(nn.Module):
         ops = free_ops
         with torch.no_grad():
             num_heads = ops.get("num_heads", 1)
+            # TODO: is importance really important?
+            enable_importance = False
             if enable_importance:
                 importance_map = ShivaContextPruner._get_spatial_importance(h_in.shape[0], H, W, h_in.device, h_in.dtype)
             else:
                 importance_map = None
             if "to_q" in ops:
-                q_full = ops["to_q"](h_in)
+                q_full = ops["to_q"](h_in).unflatten(-1, (num_heads, -1))
                 if "norm_q" in ops:
-                    q_full = ops["norm_q"](q_full.unflatten(-1, (num_heads, -1)))
+                    q_full = ops["norm_q"](q_full)
             else:
                 q_full = h_in.unsqueeze(2)  # Fallback: (B, N, 1, D)
 
@@ -299,9 +317,9 @@ class ShivaContextPruner(nn.Module):
 
             # --- Extract Text K (Retain Heads) ---
             if "to_k" in ops:
-                k_full = ops["to_k"](e_in)
+                k_full = ops["to_k"](e_in).unflatten(-1, (num_heads, -1))
                 if "norm_k" in ops:
-                    k_full = ops["norm_k"](k_full.unflatten(-1, (num_heads, -1)))
+                    k_full = ops["norm_k"](k_full)
                 k_proj = k_full
             else:
                 k_proj = e_in.unsqueeze(2)
@@ -352,7 +370,11 @@ class ShivaContextPruner(nn.Module):
 
         # print(current_iter, self.layer_id, leader_id, active_spatial_group, active_temporal_interval, global_context.encoder_flag)
         attn_map = ShivaContextPruner._process_attn(h_in, e_in, H, W, self.free_ops, self.pool_size)
-        scores = attn_map.max(dim=1).values  # (B, L)
+
+        # for the case that B > 1, we mean the average of all B samples to control all cfg tokens have the same score
+        B = attn_map.shape[0]
+        avg_map = attn_map.mean(dim=0, keepdim=True) # (B, M, L) -> (1, M, L)
+        scores = avg_map.max(dim=1).values.expand(B, -1) # (B, L)
         idx_sorted = torch.argsort(scores, dim=-1, descending=True)
         if self.layer_id == leader_id:
             cache[self.layer_id] = {

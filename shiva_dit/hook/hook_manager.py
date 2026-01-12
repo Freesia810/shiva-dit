@@ -28,6 +28,7 @@ class HookManager:
         'qwen-image': ('transformer_blocks.*',),
         'qwen-image-edit': ('transformer_blocks.*',),
         'pixart-sigma': ('transformer_blocks.*',),
+        'omnigen': ('layers.*',),
         'wan': ('blocks.*',),
     }
 
@@ -51,6 +52,10 @@ class HookManager:
         elif model_type in ('qwen-image', 'qwen-image-edit'):
             from diffusers.models.transformers.transformer_qwenimage import QwenImageTransformerBlock
             return QwenImageTransformerBlock
+        
+        elif model_type in ('omnigen'):
+            from diffusers.models.transformers.transformer_omnigen import OmniGenBlock
+            return OmniGenBlock
 
         elif model_type == 'wan':
             from diffusers.models.transformers.transformer_wan import WanTransformerBlock

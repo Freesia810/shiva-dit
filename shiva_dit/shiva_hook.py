@@ -183,6 +183,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             rej_idx_ctx,
             # Meta
             sel_rope,
+            attention_mask,
             N,
             L,
         ) = self._prepare_inputs(func, module_self, *args, **kwargs)
@@ -202,12 +203,18 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         # 2. Context Pruning Forward (Text)
         final_topk_context = ctx_sel
 
+        # sel attn mask
+        sel_attn_mask = self._gather_attention_mask(
+            attention_mask, sel_idx, sel_idx_ctx
+        )
+
         processed_output = self._process_outputs(
             func,
             bound,
             final_topk_states,
             final_topk_context,
             sel_rope,
+            sel_attn_mask,
             x_rej,
             sel_idx,
             rej_idx,
@@ -221,8 +228,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         return processed_output
 
     def _prepare_inputs(self, func, module_self, *args, **kwargs):
-
-
         sig = inspect.signature(func)
         bound = sig.bind_partial(module_self, *args, **kwargs)
         bound.apply_defaults()
@@ -230,6 +235,16 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         hidden_states = bound.arguments.get("hidden_states")
         encoder_hidden_states = bound.arguments.get("encoder_hidden_states")
         image_rotary_emb = bound.arguments.get("image_rotary_emb")
+        attention_mask = bound.arguments.get("attention_mask")
+
+        if self.model_type == 'omnigen':
+            # in OmniGen, all the seqs are mixed in hidden_states
+            # we just get the ref for hidden_states and encoder_hidden_states
+            # finally write back in the bound arguments
+
+            encoder_hidden_states = hidden_states[:, :global_context.encoder_hidden_seq_len, :]
+            h_start = global_context.encoder_hidden_seq_len + global_context.time_seq_len
+            hidden_states = hidden_states[:, h_start:, :]
 
         dtype = hidden_states.dtype
         device = hidden_states.device
@@ -451,6 +466,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             rej_idx_ctx,
             # Meta
             sel_rope,
+            attention_mask,
             N,
             L,
         )
@@ -532,6 +548,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         final_topk_states,
         final_topk_context,
         sel_rope,
+        sel_attn_mask,
         x_rej,
         sel_idx,
         rej_idx,
@@ -541,17 +558,81 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         rej_idx_ctx,
         L,
     ):
-        bound.arguments["hidden_states"] = final_topk_states
-        bound.arguments["image_rotary_emb"] = sel_rope
-        bound.arguments["encoder_hidden_states"] = final_topk_context
+        if self.model_type == 'omnigen':
+            # image and context seqs are all reduced, so we must concat them together
+            t_start = global_context.encoder_hidden_seq_len
+            t_end = t_start + global_context.time_seq_len
+            bound.arguments["hidden_states"] = torch.cat([
+                final_topk_context,
+                bound.arguments["hidden_states"][:, t_start:t_end, :],
+                final_topk_states
+            ], dim=1)
+            bound.arguments["image_rotary_emb"] = sel_rope
+            if sel_attn_mask is not None:
+                bound.arguments["attention_mask"] = sel_attn_mask
 
-        # torch.cuda.synchronize()
-        # t_fwd_start = time.time()
+            # reduce seq len, for later using
+            reduced_encoder_seq_len = final_topk_context.shape[1]
+            reduced_hidden_seq_len = final_topk_states.shape[1]
+
+            processed_output = func(*bound.args, **bound.kwargs)
+
+            # the processed_output is a tensor of mixed
+            # encoder_seq | time_seq | hidden_seq
+            B, _, D = processed_output.shape
+
+            # reduced_time_seq_len should be the same as time_seq_len
+            reduced_time_seq_len = processed_output.shape[1] - reduced_encoder_seq_len - reduced_hidden_seq_len
+            final_hidden_states_seq_len = global_context.encoder_hidden_seq_len + global_context.time_seq_len + global_context.hidden_seq_len
+            final_hidden_states = torch.empty(
+                (B, final_hidden_states_seq_len, D),
+                device=processed_output.device,
+                dtype=processed_output.dtype,
+            )
+            # scatter time seq
+            t_final_start = global_context.encoder_hidden_seq_len
+            t_final_end = t_final_start + global_context.time_seq_len
+            t_reduced_start = reduced_encoder_seq_len
+            t_reduced_end = t_reduced_start + reduced_time_seq_len
+            final_hidden_states[:, t_final_start:t_final_end, :] = processed_output[:, t_reduced_start:t_reduced_end, :]
+
+            # scatter image tokens
+            h_reduced_start = reduced_encoder_seq_len + reduced_time_seq_len
+            h_final_start = global_context.encoder_hidden_seq_len + global_context.time_seq_len
+            if sel_idx is not None:
+                final_hidden_states_ref = final_hidden_states[:, h_final_start:, :]
+                final_hidden_states_ref.scatter_(
+                    1, sel_idx.unsqueeze(-1).expand(-1, -1, D), processed_output[:, h_reduced_start:, :]
+                )
+                if x_rej is not None and x_rej.shape[1] > 0:
+                    final_hidden_states_ref.scatter_(
+                        1, rej_idx.unsqueeze(-1).expand(-1, -1, D), x_rej
+                    )
+            else:
+                final_hidden_states[:, h_final_start:, :] = processed_output[:, h_reduced_start:, :]
+            
+            # scatter context tokens
+            c_reduced_end = reduced_encoder_seq_len
+            c_final_end = global_context.encoder_hidden_seq_len
+            if sel_idx_ctx is not None:
+                final_encoder_states_ref = final_hidden_states[:, :c_final_end, :]
+                final_encoder_states_ref.scatter_(
+                    1, sel_idx_ctx.unsqueeze(-1).expand(-1, -1, D), processed_output[:, :c_reduced_end, :]
+                )
+                if ctx_rej is not None and ctx_rej.shape[1] > 0:
+                    final_encoder_states_ref.scatter_(
+                        1, rej_idx_ctx.unsqueeze(-1).expand(-1, -1, D), ctx_rej
+                    )
+            else:
+                final_hidden_states[:, :c_final_end, :] = processed_output[:, :c_reduced_end, :]
+
+            return final_hidden_states
+
+        bound.arguments["hidden_states"] = final_topk_states
+        bound.arguments["encoder_hidden_states"] = final_topk_context
+        bound.arguments["image_rotary_emb"] = sel_rope
 
         processed_output = func(*bound.args, **bound.kwargs)
-
-        # torch.cuda.synchronize()
-        # t_fwd_end = time.time()
 
         if isinstance(processed_output, tuple):
             processed_encoder_states, processed_hidden_states = processed_output
@@ -632,7 +713,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         if image_rotary_emb is None:
             return None
 
-        hidden_emb, encoder_emb, _ = parse_image_rotary_emb(
+        # in normal exps, we needn't handle extra_emb because we don't support edit task now.
+        hidden_emb, encoder_emb, extra_emb = parse_image_rotary_emb(
             self.model_type,
             image_rotary_emb,
             global_context.hidden_seq_len,
@@ -649,9 +731,80 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             encoder_emb = tuple(x[idx_ctx] for x in encoder_emb)
 
         image_rotary_emb = join_image_rotary_emb(
-            self.model_type, hidden_emb, encoder_emb
+            self.model_type, hidden_emb, encoder_emb, extra_emb
         )
         return image_rotary_emb
+
+    def _gather_attention_mask(self, attention_mask, survivors_indices, context_survivors_indices):
+        if attention_mask is None:
+            return None
+
+        if self.model_type == 'omnigen':
+            B = attention_mask.shape[0]
+            enc_len = global_context.encoder_hidden_seq_len
+            time_len = global_context.time_seq_len
+            device = attention_mask.device
+            
+            indices_parts = []
+            
+            # Encoder
+            if context_survivors_indices is not None:
+                indices_parts.append(context_survivors_indices)
+            else:
+                full_enc_idx = torch.arange(enc_len, device=device).unsqueeze(0).expand(B, -1)
+                indices_parts.append(full_enc_idx)
+
+            # Time
+            time_idx = torch.arange(enc_len, enc_len + time_len, device=device).unsqueeze(0).expand(B, -1)
+            indices_parts.append(time_idx)
+
+            # Hidden
+            offset_hidden = enc_len + time_len
+            if survivors_indices is not None:
+                shifted_hidden_idx = survivors_indices + offset_hidden
+                indices_parts.append(shifted_hidden_idx)
+            else:
+                total_len = attention_mask.shape[-1]
+                full_hidden_idx = torch.arange(offset_hidden, total_len, device=device).unsqueeze(0).expand(B, -1)
+                indices_parts.append(full_hidden_idx)
+
+            # gather_indices: (B, L_new)
+            gather_indices = torch.cat(indices_parts, dim=1)
+            L_new = gather_indices.shape[1]
+
+            if attention_mask.shape[0] == 1 and B > 1:
+                attention_mask = attention_mask.expand(B, -1, -1, -1)
+
+            batch_idx = torch.arange(B, device=device).view(B, 1, 1, 1)
+            
+            # row_idx: (B, 1, L_new, 1)
+            row_idx = gather_indices.view(B, 1, L_new, 1)
+            
+            # col_idx: (B, 1, 1, L_new)
+            col_idx = gather_indices.view(B, 1, 1, L_new)
+
+            if attention_mask.dim() == 4:
+                # Mask Shape: (B, H, S, S)
+                H = attention_mask.shape[1]
+                head_idx = torch.arange(H, device=device).view(1, H, 1, 1)
+                
+                # (B, 1, 1, 1) + (1, H, 1, 1) + (B, 1, L, 1) + (B, 1, 1, L)
+                # (B, H, L_new, L_new)
+                final_mask = attention_mask[batch_idx, head_idx, row_idx, col_idx]
+            
+            elif attention_mask.dim() == 3:
+                # Mask Shape: (B, S, S)
+                batch_idx = batch_idx.view(B, 1, 1)
+                row_idx = gather_indices.view(B, L_new, 1)
+                col_idx = gather_indices.view(B, 1, L_new)
+                
+                final_mask = attention_mask[batch_idx, row_idx, col_idx]
+            else:
+                raise ValueError('Unsupported attention mask shape: {}'.format(attention_mask.shape))
+
+            return final_mask
+        else:
+            raise NotImplementedError('Unsupported model type: {}'.format(self.model_type))
 
     def clear_accumulators(self):
         self.gate_loss_accumulator.clear()
