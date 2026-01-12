@@ -15,6 +15,7 @@ matplotlib>=3.10,<3.11
 mlflow==3.5.1
 numpy==2.2.6
 opencv-python>=4.11.0.86,<5.0
+open_clip_torch==3.2.0
 peft==0.17.1
 pillow>=10.3,<11.0
 protobuf>=5.27
