@@ -3,6 +3,7 @@ accelerate==1.8.1
 beautifulsoup4==4.14.2
 calflops==0.3.2
 clip==0.2.0
+einops==0.8.1
 datasets>=2.21,<3.0
 diffusers @ git+https://github.com/OptiSys-ZJU/shiva-diffusers.git@main
 fairscale==0.4.13
