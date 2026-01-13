@@ -290,7 +290,7 @@ class ShivaContextPruner(nn.Module):
         return active_spatial_group, active_temporal_interval
 
     @staticmethod
-    def _process_attn(h_in, e_in, H, W, free_ops, pool_size, enable_importance=True):
+    def _process_attn(h_in, e_in, H, W, free_ops, pool_size, attention_mask=None, enable_importance=True):
         if free_ops is None:
             raise RuntimeError(
                 "Pruner is in 'free' mode but 'on_register' was never called to bind model layers."
@@ -313,9 +313,8 @@ class ShivaContextPruner(nn.Module):
                 q_full = h_in.unsqueeze(2)  # Fallback: (B, N, 1, D)
 
             # Apply Pooling: (B, N, H, D) -> (B, M, H, D)
-            q = ShivaContextPruner._apply_pooling(q_full, H, W, pool_size=pool_size, importance_map=importance_map)
+            q = ShivaContextPruner._apply_pooling(q_full, H, W, pool_size=pool_size, importance_map=importance_map).transpose(1, 2) # (B, H, M, D)
 
-            # --- Extract Text K (Retain Heads) ---
             if "to_k" in ops:
                 k_full = ops["to_k"](e_in).unflatten(-1, (num_heads, -1))
                 if "norm_k" in ops:
@@ -323,12 +322,18 @@ class ShivaContextPruner(nn.Module):
                 k_proj = k_full
             else:
                 k_proj = e_in.unsqueeze(2)
-
+            
+            k_proj = k_proj.transpose(1, 2) # (B, H, L, D)
+            
             scale = 1.0 / math.sqrt(h_in.shape[-1] // num_heads)
-            attn_map_heads = torch.einsum("bmhd,blhd->bmhl", q, k_proj) * scale # Einsum: (B, M, H, D) @ (B, L, H, D) -> (B, M, H, L)
-            attn_map = attn_map_heads.mean(dim=2) # (B, M, L)
 
-        return attn_map
+            attn_map_heads = q @ k_proj.transpose(-2, -1) * scale # (B, H, M, L)
+
+            if attention_mask is not None:
+                sliced_mask = attention_mask[:, :, -q.shape[-2]:, :k_proj.shape[-2]]
+                attn_map_heads = attn_map_heads + sliced_mask
+
+        return attn_map_heads
 
     def _forward_learned(self, h_in, e_in, H, W):
         q_full = self.q_proj(h_in)
@@ -345,7 +350,7 @@ class ShivaContextPruner(nn.Module):
 
         return scores
 
-    def _forward_free(self, h_in, e_in, H, W, current_iter, num_inference_steps):
+    def _forward_free(self, h_in, e_in, H, W, current_iter, num_inference_steps, attention_mask=None):
         active_spatial_group, active_temporal_interval = self._get_active_policy(current_iter, num_inference_steps)
 
         if active_spatial_group > 1:
@@ -369,9 +374,10 @@ class ShivaContextPruner(nn.Module):
                 return my_data["score"], my_data.get("idx_sorted")
 
         # print(current_iter, self.layer_id, leader_id, active_spatial_group, active_temporal_interval, global_context.encoder_flag)
-        attn_map = ShivaContextPruner._process_attn(h_in, e_in, H, W, self.free_ops, self.pool_size)
+        attn_map_heads = ShivaContextPruner._process_attn(h_in, e_in, H, W, self.free_ops, self.pool_size, attention_mask=attention_mask)
 
-        # for the case that B > 1, we mean the average of all B samples to control all cfg tokens have the same score
+        # cfg guard
+        attn_map = attn_map_heads.mean(dim=1) # (B, H, M, L) -> (B, M, L)
         B = attn_map.shape[0]
         avg_map = attn_map.mean(dim=0, keepdim=True) # (B, M, L) -> (1, M, L)
         scores = avg_map.max(dim=1).values.expand(B, -1) # (B, L)
@@ -386,7 +392,7 @@ class ShivaContextPruner(nn.Module):
 
         return scores, idx_sorted
 
-    def forward(self, hidden_states, encoder_hidden_states, k):
+    def forward(self, hidden_states, encoder_hidden_states, k, attention_mask=None):
         original_dtype = hidden_states.dtype
 
         h_in = hidden_states
@@ -397,7 +403,7 @@ class ShivaContextPruner(nn.Module):
             scores = self._forward_learned(h_in, e_in, H, W)
             idx_sorted = None
         else:
-            scores, idx_sorted = self._forward_free(h_in, e_in, H, W, global_context.current_iteration, global_context.num_inference_steps)
+            scores, idx_sorted = self._forward_free(h_in, e_in, H, W, global_context.current_iteration, global_context.num_inference_steps, attention_mask)
 
         # self._save_full_score_trajectory(scores[0])
 

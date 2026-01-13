@@ -241,9 +241,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             # in OmniGen, all the seqs are mixed in hidden_states
             # we just get the ref for hidden_states and encoder_hidden_states
             # finally write back in the bound arguments
-
-            encoder_hidden_states = hidden_states[:, :global_context.encoder_hidden_seq_len, :]
             h_start = global_context.encoder_hidden_seq_len + global_context.time_seq_len
+            encoder_hidden_states = hidden_states[:, :global_context.encoder_hidden_seq_len, :]
             hidden_states = hidden_states[:, h_start:, :]
 
         dtype = hidden_states.dtype
@@ -344,6 +343,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 encoder_hidden_states.to(dtype),
                 k_ctx,
                 D,
+                attention_mask
             )
             # if k_ctx < L:
             #     ctx_sel, ctx_rej, sel_idx_ctx, rej_idx_ctx = self._select_topk_context(
@@ -698,11 +698,12 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         return x_sel, x_rej, sel_idx, rej_idx
 
-    def _select_topk_context(self, hidden_states, encoder_hidden_states, k, C):
+    def _select_topk_context(self, hidden_states, encoder_hidden_states, k, C, attention_mask=None):
         ctx_sel, ctx_rej, sel_idx, rej_idx = self.context_pruner(
             hidden_states=hidden_states,
             encoder_hidden_states=encoder_hidden_states,
             k=k,
+            attention_mask=attention_mask
         )
 
         return ctx_sel, ctx_rej, sel_idx, rej_idx
