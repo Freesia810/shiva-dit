@@ -1,5 +1,5 @@
 import torch
-from diffusers.pipelines import StableDiffusion3Pipeline
+from shiva_dit.registry.pipelines import StableDiffusion3Pipeline
 
 pipe = StableDiffusion3Pipeline.from_pretrained("../stable-diffusion-3-medium-diffusers", torch_dtype=torch.float16).to("cuda")
 image = pipe(

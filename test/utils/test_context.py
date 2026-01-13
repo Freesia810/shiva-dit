@@ -3,7 +3,7 @@ from PIL import Image
 from shiva_dit.utils import global_context
 from diffusers.utils import load_image
 from diffusers.models.autoencoders import AutoencoderKLWan
-from diffusers.pipelines import (
+from shiva_dit.registry.pipelines import (
     StableDiffusion3Pipeline,
     FluxPipeline,
     PixArtSigmaPipeline,

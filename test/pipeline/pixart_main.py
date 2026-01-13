@@ -1,5 +1,5 @@
 import torch
-from diffusers.pipelines import PixArtSigmaPipeline
+from shiva_dit.registry.pipelines import PixArtSigmaPipeline
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 weight_dtype = torch.float16

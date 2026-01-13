@@ -4,7 +4,7 @@ from PIL import Image
 from diffusers import DiffusionPipeline
 from diffusers.utils import load_image
 from diffusers.models.autoencoders import AutoencoderKLWan
-from shiva.registry.pipelines import (
+from shiva_dit.registry.pipelines import (
     StableDiffusion3Pipeline,
     FluxPipeline,
     PixArtSigmaPipeline,
@@ -24,10 +24,11 @@ default_model_config = {
     "flux-kontext": ("../FLUX.1-Kontext-dev", torch.bfloat16, FluxKontextPipeline),
     "qwen-image-edit": ("../Qwen-Image-Edit", torch.bfloat16, QwenImageEditPipeline),
     "omnigen": ("../OmniGen-v1-diffusers", torch.bfloat16, OmniGenPipeline),
+    "omnigen2": ("../OmniGen2", torch.bfloat16, OmniGen2Pipeline),
     "wan": ("../Wan2.2-T2V-A14B-Diffusers", torch.bfloat16, WanPipeline),
 }
 
-def get_pipeline(model_type: Literal["sd3", "flux-dev", "pixart-sigma", "qwen-image", "flux-kontext", "qwen-image-edit", "omnigen", "wan"], model_path: str = None, dtype: torch.dtype = None, device: torch.device = None):
+def get_pipeline(model_type: Literal["sd3", "flux-dev", "pixart-sigma", "qwen-image", "flux-kontext", "qwen-image-edit", "omnigen", "omnigen2", "wan"], model_path: str = None, dtype: torch.dtype = None, device: torch.device = None):
     model_path = model_path or default_model_config[model_type][0]
     dtype = dtype or default_model_config[model_type][1]
     PipelineType = default_model_config[model_type][2]

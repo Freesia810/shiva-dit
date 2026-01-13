@@ -32,5 +32,4 @@ __all__ = [
     "OmniGenPipeline",
     "OmniGen2Pipeline",
     "WanPipeline",
-    "OmniGen2Pipeline"
 ]

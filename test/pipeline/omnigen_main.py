@@ -1,5 +1,5 @@
 import torch
-from diffusers.pipelines import OmniGenPipeline
+from shiva_dit.registry.pipelines import OmniGenPipeline
 
 pipe = OmniGenPipeline.from_pretrained("../OmniGen-v1-diffusers", torch_dtype=torch.bfloat16).to("cuda")
 # Note: Your local model path is also acceptable, such as 'pipe = OmniGenPipeline.from_pretrained(your_local_model_path)', where all files in your_local_model_path should be organized as https://huggingface.co/Shitao/OmniGen-v1/tree/main

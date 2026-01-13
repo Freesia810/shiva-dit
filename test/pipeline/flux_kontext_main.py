@@ -1,5 +1,5 @@
 import torch
-from diffusers.pipelines import FluxKontextPipeline
+from shiva_dit.registry.pipelines import FluxKontextPipeline
 from diffusers.utils import load_image
 
 pipe = FluxKontextPipeline.from_pretrained("../FLUX.1-Kontext-dev", torch_dtype=torch.bfloat16)

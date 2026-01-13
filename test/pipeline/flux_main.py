@@ -1,5 +1,5 @@
 import torch
-from diffusers.pipelines import FluxPipeline
+from shiva_dit.registry.pipelines import FluxPipeline
 
 pipe = FluxPipeline.from_pretrained("../FLUX.1-dev", torch_dtype=torch.bfloat16).to("cuda")
 prompt = "A cat holding a sign that says hello world"

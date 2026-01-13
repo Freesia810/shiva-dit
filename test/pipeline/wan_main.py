@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from diffusers.pipelines import WanPipeline
+from shiva_dit.registry.pipelines import WanPipeline
 from diffusers.models.autoencoders import AutoencoderKLWan
 from diffusers.utils import export_to_video, load_image
 
