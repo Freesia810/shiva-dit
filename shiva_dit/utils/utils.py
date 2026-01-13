@@ -4,7 +4,7 @@ from PIL import Image
 from diffusers import DiffusionPipeline
 from diffusers.utils import load_image
 from diffusers.models.autoencoders import AutoencoderKLWan
-from diffusers.pipelines import (
+from shiva.registry.pipelines import (
     StableDiffusion3Pipeline,
     FluxPipeline,
     PixArtSigmaPipeline,
@@ -12,6 +12,7 @@ from diffusers.pipelines import (
     FluxKontextPipeline,
     QwenImageEditPipeline,
     OmniGenPipeline,
+    OmniGen2Pipeline,
     WanPipeline,
 )
 
