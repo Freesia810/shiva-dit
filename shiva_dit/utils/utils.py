@@ -3,7 +3,7 @@ from typing import Literal, Tuple, Union, Optional, List
 from PIL import Image
 from diffusers import DiffusionPipeline
 from diffusers.utils import load_image
-from diffusers.models.autoencoders import AutoencoderKLWan
+from shiva_dit.registry.models import AutoencoderKLWan, OmniGen2Transformer2DModel
 from shiva_dit.registry.pipelines import (
     StableDiffusion3Pipeline,
     FluxPipeline,
@@ -38,6 +38,15 @@ def get_pipeline(model_type: Literal["sd3", "flux-dev", "pixart-sigma", "qwen-im
         vae = AutoencoderKLWan.from_pretrained(model_path, subfolder="vae", torch_dtype=torch.float32)
         pipe = PipelineType.from_pretrained(model_path, torch_dtype=dtype, vae=vae).to(device)
         model_attrs = ('transformer', 'transformer_2')
+    elif model_type == 'omnigen2':
+        pipe = PipelineType.from_pretrained(model_path, torch_dtype=dtype)
+        pipe.transformer = OmniGen2Transformer2DModel.from_pretrained(
+            model_path,
+            subfolder="transformer",
+            torch_dtype=dtype,
+        )
+        pipe = pipe.to(device)
+        model_attrs = ('transformer',)
     else:
         pipe = PipelineType.from_pretrained(model_path, torch_dtype=dtype, use_safetensors=True).to(device)
         model_attrs = ('transformer',)
@@ -120,6 +129,17 @@ def process_quick_start(pipeline: DiffusionPipeline, **kwargs):
         kwargs.setdefault('num_inference_steps', 50)
         kwargs.setdefault('guidance_scale', 2.5)
         kwargs.setdefault('img_guidance_scale', 1.6)
+        kwargs.setdefault('generator', torch.Generator(device="cuda").manual_seed(0))
+        return pipeline(**kwargs).images[0]
+    elif isinstance(pipeline, OmniGen2Pipeline):
+        input_image = Image.open("pic/two_man.jpg").convert("RGB")
+        kwargs.setdefault('input_images', [input_image])
+        kwargs.setdefault('prompt', "A man in a black shirt is reading a book. The man is the right man in the first image.")
+        kwargs.setdefault('height', 1024)
+        kwargs.setdefault('width', 1024)
+        kwargs.setdefault('num_inference_steps', 50)
+        kwargs.setdefault('text_guidance_scale', 5.0)
+        kwargs.setdefault('image_guidance_scale', 2.0)
         kwargs.setdefault('generator', torch.Generator(device="cuda").manual_seed(0))
         return pipeline(**kwargs).images[0]
     elif isinstance(pipeline, WanPipeline):

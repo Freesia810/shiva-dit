@@ -29,6 +29,7 @@ class HookManager:
         'qwen-image-edit': ('transformer_blocks.*',),
         'pixart-sigma': ('transformer_blocks.*',),
         'omnigen': ('layers.*',),
+        'omnigen2': ('layers.*',),
         'wan': ('blocks.*',),
     }
 
@@ -38,27 +39,31 @@ class HookManager:
         Lazy import transformer block types to avoid circular imports.
         """
         if model_type in ('sd3',):
-            from diffusers.models.attention import JointTransformerBlock
+            from shiva_dit.registry.models import JointTransformerBlock
             return JointTransformerBlock
 
         elif model_type in ('pixart-sigma',):
-            from diffusers.models.attention import BasicTransformerBlock
+            from shiva_dit.registry.models import BasicTransformerBlock
             return BasicTransformerBlock
 
         elif model_type in ('flux-dev', 'flux-kontext'):
-            from diffusers.models.transformers.transformer_flux import FluxTransformerBlock, FluxSingleTransformerBlock
+            from shiva_dit.registry.models import FluxTransformerBlock, FluxSingleTransformerBlock
             return (FluxTransformerBlock, FluxSingleTransformerBlock)
 
         elif model_type in ('qwen-image', 'qwen-image-edit'):
-            from diffusers.models.transformers.transformer_qwenimage import QwenImageTransformerBlock
+            from shiva_dit.registry.models import QwenImageTransformerBlock
             return QwenImageTransformerBlock
         
         elif model_type in ('omnigen'):
-            from diffusers.models.transformers.transformer_omnigen import OmniGenBlock
+            from shiva_dit.registry.models import OmniGenBlock
             return OmniGenBlock
+        
+        elif model_type in ('omnigen2',):
+            from shiva_dit.registry.models import OmniGen2TransformerBlock
+            return OmniGen2TransformerBlock
 
         elif model_type == 'wan':
-            from diffusers.models.transformers.transformer_wan import WanTransformerBlock
+            from shiva_dit.registry.models import WanTransformerBlock
             return WanTransformerBlock
 
         else:
