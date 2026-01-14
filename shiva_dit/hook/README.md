@@ -44,7 +44,7 @@ In this mode, the hook **completely takes over** the execution of the block's `f
 
 * **Mechanism:** The `HookManager` replaces the block's `forward` method with a wrapper. If the hook implements `delegated_call`, it receives the original function and all arguments, allowing it to decide *if, when, and how* to call the original logic.
 
-Implementation Guide: To use this, your hook class must inherit from `BaseDelegator` and override `delegated_call`.
+**Implementation Guide**: To use this, your hook class must inherit from `BaseDelegator` and override `delegated_call`.
 
 ```python
 class MyCustomControlHook(BaseDiTBlockHook):
@@ -64,6 +64,8 @@ class MyCustomControlHook(BaseDiTBlockHook):
         # 3. Post-processing logic
         return output
 ```
+
+In practice, these two modes can be used in conjunction; all hook methods will continue to be triggered as expected.
 
 ## HookManager
 The `HookManager` is a static utility class responsible for configuration, injection, and lifecycle management.
