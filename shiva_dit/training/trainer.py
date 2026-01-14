@@ -3021,6 +3021,7 @@ class DiffusionModelTrainer:
         if self.accelerator.is_main_process:
             print("Starting training...")
         global_context.update(encoder_flag=True)
+        global_context.update(cfg_mode=0)
 
         self._try_resume()
 

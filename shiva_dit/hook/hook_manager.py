@@ -184,6 +184,11 @@ class HookManager:
 
                 for name, module in m.named_modules():
                     if isinstance(module, cls.get_block_type(model_type)):
+                        valid_patterns = cls._block_name.get(model_type, None)
+                        if valid_patterns:                            
+                            if not any(fnmatch.fnmatchcase(name, valid) for valid in valid_patterns):
+                                continue
+
                         hook_cls, kwargs = cls._resolve_hook_config(name)
                         hook = hook_cls(**deepcopy(kwargs))
                         hook_name = f"{model_attr}.{name}"

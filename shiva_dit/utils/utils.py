@@ -157,7 +157,7 @@ def _slice_rope(rope: Tuple[torch.Tensor, torch.Tensor], start: int, end: Option
     return tuple(t[start:end] for t in rope)
 
 def parse_image_rotary_emb(
-    model_type: Literal["sd3", "flux-dev", "pixart-sigma", "qwen-image", "flux-kontext", "qwen-image-edit", "omnigen", "wan"],
+    model_type: Literal["sd3", "flux-dev", "pixart-sigma", "qwen-image", "flux-kontext", "qwen-image-edit", "omnigen", "omnigen2", "wan"],
     image_rotary_emb: any,
     hidden_seq_len: int,
     encoder_hidden_seq_len: int,
@@ -201,6 +201,13 @@ def parse_image_rotary_emb(
         hidden_rotary_emb = _slice_rope(image_rotary_emb, h_start, h_end)
 
         return hidden_rotary_emb, encoder_rotary_emb, temb_rotary_emb
+    
+    elif model_type in ("omnigen2"):
+        # image_rotary_emb is a tensor
+        # Structure: [Encoder | Hidden]
+        encoder_rotary_emb = (image_rotary_emb[:, :encoder_hidden_seq_len, :],)
+        hidden_rotary_emb = (image_rotary_emb[:, encoder_hidden_seq_len:, :],)
+        return hidden_rotary_emb, encoder_rotary_emb, None
 
     # === Qwen Family Logic ===
     elif model_type == "qwen-image":
@@ -241,7 +248,7 @@ def parse_image_rotary_emb(
 
 
 def join_image_rotary_emb(
-    model_type: Literal["sd3", "flux-dev", "pixart-sigma", "qwen-image", "flux-kontext", "qwen-image-edit", "omnigen", "wan"],
+    model_type: Literal["sd3", "flux-dev", "pixart-sigma", "qwen-image", "flux-kontext", "qwen-image-edit", "omnigen", "omnigen2", "wan"],
     hidden_rotary_emb: Tuple[torch.Tensor, ...],
     encoder_rotary_emb: Tuple[torch.Tensor, ...],
     extra_hidden_rotary_emb: Optional[Tuple[torch.Tensor, ...]] = None
@@ -263,6 +270,10 @@ def join_image_rotary_emb(
         parts_cos = [encoder_rotary_emb[0], extra_hidden_rotary_emb[0], hidden_rotary_emb[0]]
         parts_sin = [encoder_rotary_emb[1], extra_hidden_rotary_emb[1], hidden_rotary_emb[1]]
         return (torch.cat(parts_cos, dim=0), torch.cat(parts_sin, dim=0))
+    
+    elif model_type == 'omnigen2':
+        parts = [encoder_rotary_emb[0], hidden_rotary_emb[0]]
+        return torch.cat(parts, dim=1) # need a tensor
 
     # === Qwen Family Logic ===
     elif model_type == 'qwen-image':

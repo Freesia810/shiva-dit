@@ -80,7 +80,7 @@ class ShivaContextPruner(nn.Module):
 
             return ops
 
-        if hasattr(attn, "add_k_proj"):
+        if hasattr(attn, "add_k_proj") and attn.add_k_proj is not None:
             # Text Key Projection (Context)
             ops["to_k"] = attn.add_k_proj
             if hasattr(attn, "norm_added_k"):
@@ -305,29 +305,47 @@ class ShivaContextPruner(nn.Module):
                 importance_map = ShivaContextPruner._get_spatial_importance(h_in.shape[0], H, W, h_in.device, h_in.dtype)
             else:
                 importance_map = None
+
             if "to_q" in ops:
-                q_full = ops["to_q"](h_in).unflatten(-1, (num_heads, -1))
-                if "norm_q" in ops:
-                    q_full = ops["norm_q"](q_full)
+                q_proj = ops["to_q"](h_in) # (B, N, dim_q)
             else:
-                q_full = h_in.unsqueeze(2)  # Fallback: (B, N, 1, D)
+                q_proj = h_in.unsqueeze(2) # Fallback
+            
+            query_dim = q_proj.shape[-1]
+            head_dim = query_dim // num_heads
+
+            q_full = q_proj.unflatten(-1, (num_heads, head_dim)) # (B, N, num_heads, head_dim)
+
+            if "norm_q" in ops:
+                q_full = ops["norm_q"](q_full)
 
             # Apply Pooling: (B, N, H, D) -> (B, M, H, D)
             q = ShivaContextPruner._apply_pooling(q_full, H, W, pool_size=pool_size, importance_map=importance_map).transpose(1, 2) # (B, H, M, D)
 
             if "to_k" in ops:
-                k_full = ops["to_k"](e_in).unflatten(-1, (num_heads, -1))
+                k_proj = ops["to_k"](e_in) # (B, L, dim_k)
+                
+                inner_dim = k_proj.shape[-1]
+                kv_heads = inner_dim // head_dim
+                
+                # Reshape K: (B, L, kv_heads, head_dim)
+                k_full = k_proj.unflatten(-1, (kv_heads, head_dim))
+
                 if "norm_k" in ops:
                     k_full = ops["norm_k"](k_full)
-                k_proj = k_full
             else:
-                k_proj = e_in.unsqueeze(2)
+                kv_heads = num_heads
+                k_full = e_in.unsqueeze(2)
             
-            k_proj = k_proj.transpose(1, 2) # (B, H, L, D)
-            
-            scale = 1.0 / math.sqrt(h_in.shape[-1] // num_heads)
+            k = k_full.transpose(1, 2) # (B, kv_heads, L, head_dim)
 
-            attn_map_heads = q @ k_proj.transpose(-2, -1) * scale # (B, H, M, L)
+            if kv_heads < num_heads:
+                n_rep = num_heads // kv_heads
+                k = k.repeat_interleave(n_rep, dim=1)
+            
+            scale = 1.0 / math.sqrt(head_dim)
+
+            attn_map_heads = q @ k.transpose(-2, -1) * scale # (B, H, M, L)
 
             if attention_mask is not None:
                 sliced_mask = attention_mask[:, :, -q.shape[-2]:, :k_proj.shape[-2]]
@@ -363,7 +381,7 @@ class ShivaContextPruner(nn.Module):
         else:
             anchor_step = current_iter
 
-        cache = HookManager.get_global(f"SHIVA_SCORE_CACHE_{global_context.encoder_flag}", {})
+        cache = HookManager.get_global(f"SHIVA_SCORE_CACHE_{global_context.encoder_forward_key()}", {})
         if self.layer_id != leader_id:
             leader_data = cache.get(leader_id)
             if leader_data is not None and leader_data["step"] == anchor_step:
@@ -373,7 +391,7 @@ class ShivaContextPruner(nn.Module):
             if my_data is not None and my_data["step"] == anchor_step:
                 return my_data["score"], my_data.get("idx_sorted")
 
-        # print(current_iter, self.layer_id, leader_id, active_spatial_group, active_temporal_interval, global_context.encoder_flag)
+        # print(current_iter, self.layer_id, leader_id, active_spatial_group, active_temporal_interval, global_context.encoder_forward_key())
         attn_map_heads = ShivaContextPruner._process_attn(h_in, e_in, H, W, self.free_ops, self.pool_size, attention_mask=attention_mask)
 
         # cfg guard
@@ -388,7 +406,7 @@ class ShivaContextPruner(nn.Module):
                 "idx_sorted": idx_sorted.detach(),
                 "step": current_iter
             }
-            HookManager.set_global(f"SHIVA_SCORE_CACHE_{global_context.encoder_flag}", cache)
+            HookManager.set_global(f"SHIVA_SCORE_CACHE_{global_context.encoder_forward_key()}", cache)
 
         return scores, idx_sorted
 
