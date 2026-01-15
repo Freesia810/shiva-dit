@@ -271,7 +271,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 split_extra=False,
             )
             apply_rope = partial(apply_rotary_emb, use_real=False)
-        elif self.model_type == 'qwen-image':
+        elif self.model_type == 'qwen-image' or self.model_type == 'qwen-image-edit':
             from diffusers.models.transformers.transformer_qwenimage import apply_rotary_emb_qwen
             norm_hidden_states = norm_encoder_hidden_states = None
             hidden_rotary_emb, encoder_rotary_emb, _ = parse_image_rotary_emb(
