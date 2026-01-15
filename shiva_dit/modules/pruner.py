@@ -290,7 +290,7 @@ class ShivaContextPruner(nn.Module):
         return active_spatial_group, active_temporal_interval
 
     @staticmethod
-    def _process_attn(h_in, e_in, H, W, free_ops, pool_size, attention_mask=None, enable_importance=True):
+    def _process_attn(h_in, e_in, H, W, free_ops, pool_size, attention_mask=None, norm_hidden_states=None, norm_encoder_hidden_states=None, hidden_rotary_emb=None, encoder_rotary_emb=None, apply_rope=None, enable_importance=True):
         if free_ops is None:
             raise RuntimeError(
                 "Pruner is in 'free' mode but 'on_register' was never called to bind model layers."
@@ -305,6 +305,8 @@ class ShivaContextPruner(nn.Module):
                 importance_map = ShivaContextPruner._get_spatial_importance(h_in.shape[0], H, W, h_in.device, h_in.dtype)
             else:
                 importance_map = None
+            
+            h_in = norm_hidden_states if norm_hidden_states is not None else h_in
 
             if "to_q" in ops:
                 q_proj = ops["to_q"](h_in) # (B, N, dim_q)
@@ -320,7 +322,15 @@ class ShivaContextPruner(nn.Module):
                 q_full = ops["norm_q"](q_full)
 
             # Apply Pooling: (B, N, H, D) -> (B, M, H, D)
-            q = ShivaContextPruner._apply_pooling(q_full, H, W, pool_size=pool_size, importance_map=importance_map).transpose(1, 2) # (B, H, M, D)
+            # q = ShivaContextPruner._apply_pooling(q_full, H, W, pool_size=pool_size, importance_map=importance_map) # (B, H, M, D)
+            q = q_full
+
+            if hidden_rotary_emb is not None and len(hidden_rotary_emb) == 1 and apply_rope:
+                q = apply_rope(q.contiguous(), hidden_rotary_emb[0])
+            
+            q = q.transpose(1, 2)
+
+            e_in = norm_encoder_hidden_states if norm_encoder_hidden_states is not None else e_in
 
             if "to_k" in ops:
                 k_proj = ops["to_k"](e_in) # (B, L, dim_k)
@@ -336,8 +346,11 @@ class ShivaContextPruner(nn.Module):
             else:
                 kv_heads = num_heads
                 k_full = e_in.unsqueeze(2)
+
+            if encoder_rotary_emb is not None and len(encoder_rotary_emb) == 1 and apply_rope:
+                k_full = apply_rope(k_full.contiguous(), encoder_rotary_emb[0])
             
-            k = k_full.transpose(1, 2) # (B, kv_heads, L, head_dim)
+            k = k_full.transpose(1, 2)
 
             if kv_heads < num_heads:
                 n_rep = num_heads // kv_heads
@@ -348,8 +361,18 @@ class ShivaContextPruner(nn.Module):
             attn_map_heads = q @ k.transpose(-2, -1) * scale # (B, H, M, L)
 
             if attention_mask is not None:
-                sliced_mask = attention_mask[:, :, -q.shape[-2]:, :k_proj.shape[-2]]
-                attn_map_heads = attn_map_heads + sliced_mask
+                M = q.shape[-2]
+                L = k.shape[-2]
+
+                if attention_mask.dim() == 2:
+                    # Case: (B, S)
+                    mask_k = attention_mask[:, :L]
+                    mask_k_broadcast = mask_k.view(mask_k.shape[0], 1, 1, L)
+                    attn_map_heads = attn_map_heads.masked_fill(mask_k_broadcast == False, float('-inf'))
+                else:
+                    # (B, H, S, S)
+                    sliced_mask = attention_mask[:, :, -M:, :L]
+                    attn_map_heads = attn_map_heads + sliced_mask
 
         return attn_map_heads
 
@@ -368,7 +391,7 @@ class ShivaContextPruner(nn.Module):
 
         return scores
 
-    def _forward_free(self, h_in, e_in, H, W, current_iter, num_inference_steps, attention_mask=None):
+    def _forward_free(self, h_in, e_in, H, W, current_iter, num_inference_steps, attention_mask=None, norm_hidden_states=None, norm_encoder_hidden_states=None, hidden_rotary_emb=None, encoder_rotary_emb=None, apply_rope=None):
         active_spatial_group, active_temporal_interval = self._get_active_policy(current_iter, num_inference_steps)
 
         if active_spatial_group > 1:
@@ -392,7 +415,7 @@ class ShivaContextPruner(nn.Module):
                 return my_data["score"], my_data.get("idx_sorted")
 
         # print(current_iter, self.layer_id, leader_id, active_spatial_group, active_temporal_interval, global_context.encoder_forward_key())
-        attn_map_heads = ShivaContextPruner._process_attn(h_in, e_in, H, W, self.free_ops, self.pool_size, attention_mask=attention_mask)
+        attn_map_heads = ShivaContextPruner._process_attn(h_in, e_in, H, W, self.free_ops, self.pool_size, attention_mask=attention_mask, norm_hidden_states=norm_hidden_states, norm_encoder_hidden_states=norm_encoder_hidden_states, hidden_rotary_emb=hidden_rotary_emb, encoder_rotary_emb=encoder_rotary_emb, apply_rope=apply_rope)
 
         # cfg guard
         attn_map = attn_map_heads.mean(dim=1) # (B, H, M, L) -> (B, M, L)
@@ -410,7 +433,7 @@ class ShivaContextPruner(nn.Module):
 
         return scores, idx_sorted
 
-    def forward(self, hidden_states, encoder_hidden_states, k, attention_mask=None):
+    def forward(self, hidden_states, encoder_hidden_states, k, attention_mask=None, norm_hidden_states=None, norm_encoder_hidden_states=None, hidden_rotary_emb=None, encoder_rotary_emb=None, apply_rope=None):
         original_dtype = hidden_states.dtype
 
         h_in = hidden_states
@@ -421,7 +444,7 @@ class ShivaContextPruner(nn.Module):
             scores = self._forward_learned(h_in, e_in, H, W)
             idx_sorted = None
         else:
-            scores, idx_sorted = self._forward_free(h_in, e_in, H, W, global_context.current_iteration, global_context.num_inference_steps, attention_mask)
+            scores, idx_sorted = self._forward_free(h_in, e_in, H, W, global_context.current_iteration, global_context.num_inference_steps, attention_mask, norm_hidden_states, norm_encoder_hidden_states, hidden_rotary_emb, encoder_rotary_emb, apply_rope)
 
         # self._save_full_score_trajectory(scores[0])
 

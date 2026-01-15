@@ -4,6 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from functools import partial
+
 from shiva_dit.hook import BaseDelegator, BaseDiTBlockHook
 from shiva_dit.utils import global_context
 from shiva_dit.utils.ste import ceil_ste
@@ -244,18 +246,53 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             h_start = global_context.encoder_hidden_seq_len + global_context.time_seq_len
             encoder_hidden_states = hidden_states[:, :global_context.encoder_hidden_seq_len, :]
             hidden_states = hidden_states[:, h_start:, :]
+
+            norm_hidden_states = norm_encoder_hidden_states = None
+            hidden_rotary_emb = encoder_rotary_emb = None
+            apply_rope = None
         elif self.model_type == 'omnigen2':
             # encoder_seq | hidden_seq
             h_start = global_context.encoder_hidden_seq_len_gen()
+
+            temb = bound.arguments.get("temb")
+            norm_hidden_states, _, _, _ = module_self.norm1(hidden_states, temb)
+            norm_encoder_hidden_states = norm_hidden_states[:, :h_start, :]
+            norm_hidden_states = norm_hidden_states[:, h_start:, :]
+
             encoder_hidden_states = hidden_states[:, :h_start, :]
             hidden_states = hidden_states[:, h_start:, :]
+
+            from diffusers.models.embeddings import apply_rotary_emb
+            hidden_rotary_emb, encoder_rotary_emb, _ = parse_image_rotary_emb(
+                self.model_type,
+                image_rotary_emb,
+                global_context.hidden_seq_len,
+                global_context.encoder_hidden_seq_len_gen(),
+                split_extra=False,
+            )
+            apply_rope = partial(apply_rotary_emb, use_real=False)
+        elif self.model_type == 'qwen-image':
+            from diffusers.models.transformers.transformer_qwenimage import apply_rotary_emb_qwen
+            norm_hidden_states = norm_encoder_hidden_states = None
+            hidden_rotary_emb, encoder_rotary_emb, _ = parse_image_rotary_emb(
+                self.model_type,
+                image_rotary_emb,
+                global_context.hidden_seq_len,
+                global_context.encoder_hidden_seq_len_gen(),
+                split_extra=False,
+            )
+
+            apply_rope = partial(apply_rotary_emb_qwen, use_real=False)
+        else:
+            norm_hidden_states = norm_encoder_hidden_states = None
+            hidden_rotary_emb = encoder_rotary_emb = None
+            apply_rope = None
 
         dtype = hidden_states.dtype
         device = hidden_states.device
         B, N, D = hidden_states.shape
 
         L = 0
-        L_min = 64 # short seqs are not pruned
         if encoder_hidden_states is not None:
             L = encoder_hidden_states.shape[1]
 
@@ -344,12 +381,17 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                     k_ctx = int(math.ceil(ctx_ratio.item() * L))
 
             # Execute Context Pruning
-            if k_ctx < L and k_ctx > L_min:
+            if k_ctx < L:
                 ctx_sel, ctx_rej, sel_idx_ctx, rej_idx_ctx = self._select_topk_context(
                     hidden_states.detach().to(dtype),
                     encoder_hidden_states.to(dtype),
                     k_ctx,
                     D,
+                    attention_mask,
+                    norm_hidden_states,
+                    norm_encoder_hidden_states,
+                    hidden_rotary_emb, encoder_rotary_emb,
+                    apply_rope
                 )
 
         if self.shiva_mode in ["image", "both"] and self.router is not None:
@@ -753,12 +795,17 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         return x_sel, x_rej, sel_idx, rej_idx
 
-    def _select_topk_context(self, hidden_states, encoder_hidden_states, k, C, attention_mask=None):
+    def _select_topk_context(self, hidden_states, encoder_hidden_states, k, C, attention_mask=None, norm_hidden_states=None, norm_encoder_hidden_states=None, hidden_rotary_emb=None, encoder_rotary_emb=None, apply_rope=None):
         ctx_sel, ctx_rej, sel_idx, rej_idx = self.context_pruner(
             hidden_states=hidden_states,
             encoder_hidden_states=encoder_hidden_states,
             k=k,
-            attention_mask=attention_mask
+            attention_mask=attention_mask,
+            norm_hidden_states=norm_hidden_states,
+            norm_encoder_hidden_states=norm_encoder_hidden_states,
+            hidden_rotary_emb=hidden_rotary_emb,
+            encoder_rotary_emb=encoder_rotary_emb,
+            apply_rope=apply_rope
         )
 
         return ctx_sel, ctx_rej, sel_idx, rej_idx
