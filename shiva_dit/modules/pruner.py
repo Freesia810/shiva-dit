@@ -210,17 +210,11 @@ class ShivaContextPruner(nn.Module):
         if H is not None and W is not None and q_in.shape[1] >= H * W:
             num_spatial = H * W
             q_spatial = q_in[:, :num_spatial, :] # (B_eff, H*W, D)
-            q_extra = q_in[:, num_spatial:, :]   # (B_eff, N-H*W, D)
 
             q_2d = q_spatial.transpose(1, 2).view(-1, D, H, W)
             q_out_2d = F.adaptive_max_pool2d(q_2d, pool_sz) 
             q_pooled_spatial = q_out_2d.flatten(2) # (B_eff, D, M)
-
-            if q_extra.size(1) > 0:
-                q_extra_mean = q_extra.mean(dim=1, keepdim=True).transpose(1, 2)
-                q_pooled = torch.cat([q_pooled_spatial, q_extra_mean], dim=2)
-            else:
-                q_pooled = q_pooled_spatial
+            q_pooled = q_pooled_spatial
 
         if q_pooled is None:
             # 1D Pooling Fallback
@@ -299,8 +293,6 @@ class ShivaContextPruner(nn.Module):
         ops = free_ops
         with torch.no_grad():
             num_heads = ops.get("num_heads", 1)
-            # TODO: is importance really important?
-            enable_importance = False
             if enable_importance:
                 importance_map = ShivaContextPruner._get_spatial_importance(h_in.shape[0], H, W, h_in.device, h_in.dtype)
             else:
@@ -321,12 +313,13 @@ class ShivaContextPruner(nn.Module):
             if "norm_q" in ops:
                 q_full = ops["norm_q"](q_full)
 
-            # Apply Pooling: (B, N, H, D) -> (B, M, H, D)
-            # q = ShivaContextPruner._apply_pooling(q_full, H, W, pool_size=pool_size, importance_map=importance_map) # (B, H, M, D)
             q = q_full
-
             if hidden_rotary_emb is not None and len(hidden_rotary_emb) == 1 and apply_rope:
                 q = apply_rope(q.contiguous(), hidden_rotary_emb[0])
+            else:
+                # if no rope for q, we can apply pooling
+                # Apply Pooling: (B, N, H, D) -> (B, M, H, D)
+                q = ShivaContextPruner._apply_pooling(q, H, W, pool_size=pool_size, importance_map=importance_map) # (B, H, M, D)
             
             q = q.transpose(1, 2)
 
@@ -414,8 +407,9 @@ class ShivaContextPruner(nn.Module):
             if my_data is not None and my_data["step"] == anchor_step:
                 return my_data["score"], my_data.get("idx_sorted")
 
+        enable_importance = False
         # print(current_iter, self.layer_id, leader_id, active_spatial_group, active_temporal_interval, global_context.encoder_forward_key())
-        attn_map_heads = ShivaContextPruner._process_attn(h_in, e_in, H, W, self.free_ops, self.pool_size, attention_mask=attention_mask, norm_hidden_states=norm_hidden_states, norm_encoder_hidden_states=norm_encoder_hidden_states, hidden_rotary_emb=hidden_rotary_emb, encoder_rotary_emb=encoder_rotary_emb, apply_rope=apply_rope)
+        attn_map_heads = ShivaContextPruner._process_attn(h_in, e_in, H, W, self.free_ops, self.pool_size, attention_mask=attention_mask, norm_hidden_states=norm_hidden_states, norm_encoder_hidden_states=norm_encoder_hidden_states, hidden_rotary_emb=hidden_rotary_emb, encoder_rotary_emb=encoder_rotary_emb, apply_rope=apply_rope, enable_importance=enable_importance)
 
         # cfg guard
         attn_map = attn_map_heads.mean(dim=1) # (B, H, M, L) -> (B, M, L)

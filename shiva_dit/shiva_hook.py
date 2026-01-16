@@ -263,18 +263,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             hidden_states = hidden_states[:, h_start:, :]
 
             from diffusers.models.embeddings import apply_rotary_emb
-            hidden_rotary_emb, encoder_rotary_emb, _ = parse_image_rotary_emb(
-                self.model_type,
-                image_rotary_emb,
-                global_context.hidden_seq_len,
-                global_context.encoder_hidden_seq_len_gen(),
-                split_extra=False,
-            )
-            apply_rope = partial(apply_rotary_emb, use_real=False)
-        elif self.model_type == 'qwen-image' or self.model_type == 'qwen-image-edit':
-            from diffusers.models.transformers.transformer_qwenimage import apply_rotary_emb_qwen
-            norm_hidden_states = norm_encoder_hidden_states = None
-            hidden_rotary_emb, encoder_rotary_emb, _ = parse_image_rotary_emb(
+            _, encoder_rotary_emb, _ = parse_image_rotary_emb(
                 self.model_type,
                 image_rotary_emb,
                 global_context.hidden_seq_len,
@@ -282,6 +271,20 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 split_extra=False,
             )
 
+            hidden_rotary_emb = None
+            apply_rope = partial(apply_rotary_emb, use_real=False)
+        elif self.model_type == 'qwen-image' or self.model_type == 'qwen-image-edit':
+            from diffusers.models.transformers.transformer_qwenimage import apply_rotary_emb_qwen
+            norm_hidden_states = norm_encoder_hidden_states = None
+            _, encoder_rotary_emb, _ = parse_image_rotary_emb(
+                self.model_type,
+                image_rotary_emb,
+                global_context.hidden_seq_len,
+                global_context.encoder_hidden_seq_len_gen(),
+                split_extra=False,
+            )
+
+            hidden_rotary_emb = None
             apply_rope = partial(apply_rotary_emb_qwen, use_real=False)
         else:
             norm_hidden_states = norm_encoder_hidden_states = None

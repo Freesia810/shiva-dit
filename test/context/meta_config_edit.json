@@ -5,14 +5,14 @@
         "class_name": "ShivaDitBlockHook",
         "config": {
             "shiva_mode": "context",
-            "context_ratio_mode": "linear",
+            "context_ratio_mode": "cosine",
             "fixed_context_ratio": [1.0, 0.3],
             "context_pruner_mode": "free",
-            "context_pool_size": null,
+            "context_pool_size": 64,
             "context_shared_config": {
-                "spatial_step_thresh": 1.0,
-                "spatial_group_size": 60,
-                "temporal_layer_thresh": 60,
+                "spatial_step_thresh": 0.2,
+                "spatial_group_size": 2,
+                "temporal_layer_thresh": 1.0,
                 "temporal_interval": 50
             },
             "init_Ts": 10.0,
