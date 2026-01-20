@@ -110,7 +110,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         super().register_name(model_type, layer_name)
 
         # register index for context pruner
-        self.context_pruner.on_register_layer_idx(self.layer_idx)
+        if self.context_pruner is not None:
+            self.context_pruner.on_register_layer_idx(self.layer_idx)
 
     def _get_stratified_ratio_val(self, device):
         step_idx = getattr(global_context, "train_step_idx", 0)

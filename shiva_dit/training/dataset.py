@@ -39,6 +39,32 @@ class BaseItemProcessor:
         self.pipe = pipe
         self.hf_datasets_cache = {}
 
+    def _load_hf_dataset_split(self, dataset_name: str, split: str):
+        local_path = self.image_dir
+        
+        try:
+            if local_path:
+                print(f"[Dataset] Found local path for {dataset_name}: {local_path}")
+                try:
+                    return load_dataset(local_path, split=split)
+                except Exception:
+                    print(f"[Dataset] load_dataset failed: {local_path}")
+            else:
+                print(f"[Dataset] No local path found in {self.image_dir}, trying HF Hub: {dataset_name}...")
+                return load_dataset(dataset_name, split=split)
+
+        except Exception as e:
+            raise RuntimeError(f"Failed to load dataset {dataset_name} (split={split}). Local path found: {local_path}. Error: {e}")
+
+    def preload_hf_dataset(self, dataset_name: str, split: str):
+        cache_key = f"{dataset_name}/{split}"
+        if cache_key not in self.hf_datasets_cache:
+            try:
+                self.hf_datasets_cache[cache_key] = self._load_hf_dataset_split(dataset_name, split)
+                print(f"[Dataset] Successfully preloaded: {dataset_name} [{split}]")
+            except Exception as e:
+                print(f"[Dataset] Warning: Failed to preload {dataset_name}: {e}")
+
     def _load_image_entry(self, entry: Any) -> Image.Image:
         """
         Robust image loader supporting paths (rel/abs), URLs, HF URIs, and PIL Images.
@@ -75,13 +101,7 @@ class BaseItemProcessor:
                     cache_key = f"{dataset_name}/{split}"
 
                     if cache_key not in self.hf_datasets_cache:
-                        print(
-                            f"[Dataset] Loading HF dataset split into memory: {dataset_name} [{split}]..."
-                        )
-                        # Loading dataset with keep_in_memory=False by default (uses disk cache / mmap)
-                        self.hf_datasets_cache[cache_key] = load_dataset(
-                            dataset_name, split=split
-                        )
+                        raise ValueError(f"Invalid HF URI format: {entry}")
 
                     dataset = self.hf_datasets_cache[cache_key]
                     image = dataset[row_idx][col_name]
@@ -400,6 +420,35 @@ class ImageTextDataset(Dataset):
             image_processor=image_processor,
             **kwargs,
         )
+
+        self._preload_hf_datasets()
+    
+    def _preload_hf_datasets(self):
+        required_splits = set()
+        
+        keys_to_scan = ["file_name", "image", "condition_image"]
+        
+        print(f"[Dataset] Scanning {len(self.metadata)} items for HF URIs...")
+        for item in self.metadata:
+            for key in keys_to_scan:
+                val = item.get(key)
+                if isinstance(val, str) and val.startswith("hf://"):
+                    try:
+                        # hf://dataset_name/split/index/col
+                        content = val[5:]
+                        parts = content.split("/")
+                        if len(parts) >= 4:
+                            split = parts[-3]
+                            dataset_name = "/".join(parts[:-3])
+                            required_splits.add((dataset_name, split))
+                    except:
+                        pass
+        
+        for d_name, split in required_splits:
+            self.processor.preload_hf_dataset(d_name, split)
+        
+        if required_splits:
+            print(f"[Dataset] Preload complete. Cached {len(required_splits)} HF dataset splits.")
 
     def process_metadata(self, metadata_file):
         with open(metadata_file, "r", encoding="utf-8") as f:

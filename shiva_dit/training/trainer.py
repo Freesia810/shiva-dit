@@ -434,9 +434,9 @@ class DiffusionModelTrainer:
             shuffle=True,
             collate_fn=collate_fn,
             pin_memory=True,
-            num_workers=4,
-            persistent_workers=True,
-            prefetch_factor=2,
+            num_workers=config.dataloader_num_workers,
+            persistent_workers=True if config.dataloader_num_workers > 0 else False,
+            prefetch_factor= 2 if config.dataloader_num_workers > 0 else None
         )
 
         self.val_dataloader = None
@@ -1184,7 +1184,7 @@ class DiffusionModelTrainer:
 
             noisy_latents = torch.cat([noisy_latents, cond_latents], dim=1)
 
-        if self.model_type in ["flux-dev", "qwen-image-edit"]:
+        if self.model_type in ["flux-dev", "qwen-image", "qwen-image-edit"]:
             global_context.update(current_timestep=(timesteps * 1000).to(self.device))
         else:
             global_context.update(current_timestep=timesteps.to(self.device))

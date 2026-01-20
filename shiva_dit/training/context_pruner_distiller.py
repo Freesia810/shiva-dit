@@ -2,13 +2,13 @@ import inspect
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from functools import partial
 from tqdm import tqdm
 from shiva_dit.hook.hook_manager import HookManager
 from shiva_dit.training.trainer import DiffusionModelTrainer
 from shiva_dit.training.config import TrainerConfig
-from shiva_dit.utils import global_context
-from shiva_dit.hook.delegate import BaseDelegator
-from shiva_dit.hook.block_hook import BaseDiTBlockHook
+from shiva_dit.utils import global_context, parse_image_rotary_emb
+from shiva_dit.hook import BaseDelegator, BaseDiTBlockHook
 from shiva_dit.modules.pruner import ShivaContextPruner
 
 class ContextPrunerDistillHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
@@ -38,13 +38,73 @@ class ContextPrunerDistillHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         hidden_states = bound.arguments.get("hidden_states")
         encoder_hidden_states = bound.arguments.get("encoder_hidden_states")
+        image_rotary_emb = bound.arguments.get("image_rotary_emb")
+        attention_mask = bound.arguments.get("attention_mask")
+
+        if self.model_type == 'omnigen':
+            h_start = global_context.encoder_hidden_seq_len + global_context.time_seq_len
+            encoder_hidden_states = hidden_states[:, :global_context.encoder_hidden_seq_len, :]
+            hidden_states = hidden_states[:, h_start:, :]
+
+            norm_hidden_states = norm_encoder_hidden_states = None
+            hidden_rotary_emb = encoder_rotary_emb = None
+            apply_rope = None
+        elif self.model_type == 'omnigen2':
+            h_start = global_context.encoder_hidden_seq_len_gen()
+
+            temb = bound.arguments.get("temb")
+            norm_hidden_states, _, _, _ = module_self.norm1(hidden_states, temb)
+            norm_encoder_hidden_states = norm_hidden_states[:, :h_start, :]
+            norm_hidden_states = norm_hidden_states[:, h_start:, :]
+
+            encoder_hidden_states = hidden_states[:, :h_start, :]
+            hidden_states = hidden_states[:, h_start:, :]
+
+            from diffusers.models.embeddings import apply_rotary_emb
+            _, encoder_rotary_emb, _ = parse_image_rotary_emb(
+                self.model_type,
+                image_rotary_emb,
+                global_context.hidden_seq_len,
+                global_context.encoder_hidden_seq_len_gen(),
+                split_extra=False,
+            )
+
+            hidden_rotary_emb = None
+            apply_rope = partial(apply_rotary_emb, use_real=False)
+        elif self.model_type == 'qwen-image' or self.model_type == 'qwen-image-edit':
+            from diffusers.models.transformers.transformer_qwenimage import apply_rotary_emb_qwen
+            norm_hidden_states = norm_encoder_hidden_states = None
+            _, encoder_rotary_emb, _ = parse_image_rotary_emb(
+                self.model_type,
+                image_rotary_emb,
+                global_context.hidden_seq_len,
+                global_context.encoder_hidden_seq_len_gen(),
+                split_extra=False,
+            )
+
+            hidden_rotary_emb = None
+            apply_rope = partial(apply_rotary_emb_qwen, use_real=False)
+        else:
+            norm_hidden_states = norm_encoder_hidden_states = None
+            hidden_rotary_emb = encoder_rotary_emb = None
+            apply_rope = None
 
         h_in = hidden_states
         e_in = encoder_hidden_states
         H, W = global_context.hidden_seq_height, global_context.hidden_seq_width
 
         self.learned_score = self.context_pruner._forward_learned(h_in, e_in, H, W) # (B, L)
-        self.target_score = ShivaContextPruner._process_attn(h_in, e_in, H, W, self.ops, self.context_pruner.pool_size, enable_importance=False).max(dim=1).values  # (B, L)
+        attn_map_heads = ShivaContextPruner._process_attn(h_in, e_in, H, W, self.ops, self.context_pruner.pool_size, 
+                                                            attention_mask=attention_mask, 
+                                                            norm_hidden_states=norm_hidden_states, norm_encoder_hidden_states=norm_encoder_hidden_states, 
+                                                            hidden_rotary_emb=hidden_rotary_emb, encoder_rotary_emb=encoder_rotary_emb, 
+                                                            apply_rope=apply_rope, enable_importance=False) # (B, H, M, L)
+        # cfg guard
+        attn_map = attn_map_heads.mean(dim=1) # (B, H, M, L) -> (B, M, L)
+        B = attn_map.shape[0]
+        avg_map = attn_map.mean(dim=0, keepdim=True) # (B, M, L) -> (1, M, L)
+        self.target_score = avg_map.max(dim=1).values.expand(B, -1) # (B, L)
+
         if self.record_spearman_score:
             self.spearman_score.append(self.compute_spearman_rank())
 

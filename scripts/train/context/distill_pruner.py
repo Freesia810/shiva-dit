@@ -23,17 +23,20 @@ lora_config = {
     "use_dora": False
 }
 
+dataset = 'MagicBrush'
+
 trainer_config = {
-    "metadata_file": "../dataset/MJHQ-30K/eval_dense_captions_512_train.jsonl",
-    "image_dir": "../dataset/MJHQ-30K/",
-    "model_type": "flux-dev",
+    "metadata_file": f"../dataset/{dataset}/train.jsonl",
+    "image_dir": f"../dataset/{dataset}/",
+    "model_type": "qwen-image-edit",
     "model_path": None,
+    "dataloader_num_workers": 0,
     "output_dir": "./checkpoints",
     "training_mode": "hook_only",
     "lora_config": LoraConfig(**lora_config),
     "trainable_hook_config": (HookType, hook_config),
     "caption_dropout_rate": 0.0,
-    "tokenizer_max_length": 512,
+    "tokenizer_max_length": 1024,
     "enable_gradient_checkpointing": False,
     "num_epochs": 50,
     "train_batch_size": 1,
@@ -47,8 +50,8 @@ trainer_config = {
     "save_best": True,
     "run_validation": True,
     "validation_steps": 200,
-    "val_metadata_file": "../dataset/MJHQ-30K/eval_dense_captions_512_val.jsonl",
-    "val_image_dir": "../dataset/MJHQ-30K/",
+    "val_metadata_file": f"../dataset/{dataset}/val.jsonl",
+    "val_image_dir": f"../dataset/{dataset}/",
     "run_inference_validation": False,
     "mixed_precision": "bf16",
     "log_with_tensorboard": True,
@@ -59,5 +62,5 @@ print(lora_config)
 print(trainer_config)
 
 config = TrainerConfig(**trainer_config)
-trainer = ContextPrunerDistiller(config=config)
+trainer = ContextPrunerDistiller(config=config, load_evaluators=False)
 trainer.train()
