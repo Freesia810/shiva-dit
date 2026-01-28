@@ -369,18 +369,45 @@ class ShivaContextPruner(nn.Module):
 
         return attn_map_heads
 
-    def _forward_learned(self, h_in, e_in, H, W):
-        q_full = self.q_proj(h_in)
-        q_pooled = ShivaContextPruner._apply_pooling(q_full, H, W, pool_size=self.pool_size)  # (B, M, Dim_in)
-        k_proj = self.k_proj(e_in)  # (B, L, Proj_Dim)
+    def _forward_learned(self, h_in, e_in, H, W, attention_mask=None, norm_hidden_states=None, norm_encoder_hidden_states=None, hidden_rotary_emb=None, encoder_rotary_emb=None, apply_rope=None):
+        h_in = norm_hidden_states if norm_hidden_states is not None else h_in
+        q_full = self.q_proj(h_in) # (B, N, Dim_in)
 
-        q = F.normalize(q_pooled, p=2, dim=-1)
+        if hidden_rotary_emb is not None:
+            q = apply_rope(q.unsqueeze(2).contiguous(), hidden_rotary_emb[0]).squeeze(2) # (B, N, 1, Dim_in) -> (B, N, Dim_in)
+        else:
+            q = ShivaContextPruner._apply_pooling(q_full, H, W, pool_size=self.pool_size)  # (B, M, Dim_in)
+
+        e_in = norm_encoder_hidden_states if norm_encoder_hidden_states is not None else e_in
+        k_proj = self.k_proj(e_in)  # (B, L, Proj_Dim)
+        if encoder_rotary_emb is not None:
+            k_proj = apply_rope(k_proj.unsqueeze(2).contiguous(), encoder_rotary_emb[0]).squeeze(2)
+
+        q = F.normalize(q, p=2, dim=-1)
         k_proj = F.normalize(k_proj, p=2, dim=-1)
         scale = self.logit_scale.exp()
 
         # MatMul: (B, M, D) @ (B, L, D)^T -> (B, M, L)
         attn_map = torch.matmul(q, k_proj.transpose(-2, -1)) * scale
-        scores = attn_map.max(dim=1).values  # (B, L)
+
+        if attention_mask is not None:
+            M = q.shape[-2]
+            L = k_proj.shape[-2]
+
+            if attention_mask.dim() == 2:
+                # Case: (B, S)
+                mask_k = attention_mask[:, :L]
+                mask_k_broadcast = mask_k.unsqueeze(1) 
+                attn_map = attn_map.masked_fill(mask_k_broadcast == False, float('-inf'))
+            elif attention_mask.dim() == 4:
+                # Case: (B, H, S, S)
+                mask_2d = attention_mask[:, 0, :, :] 
+                sliced_mask = mask_2d[:, -M:, :L]
+                attn_map = attn_map + sliced_mask
+
+        B = attn_map.shape[0]
+        avg_map = attn_map.mean(dim=0, keepdim=True) # (B, M, L) -> (1, M, L)
+        scores = avg_map.max(dim=1).values.expand(B, -1) # (B, L)
 
         return scores
 
@@ -435,7 +462,7 @@ class ShivaContextPruner(nn.Module):
         H, W = global_context.hidden_seq_height, global_context.hidden_seq_width
 
         if self.mode == "learned":
-            scores = self._forward_learned(h_in, e_in, H, W)
+            scores = self._forward_learned(h_in, e_in, H, W, attention_mask, norm_hidden_states, norm_encoder_hidden_states, hidden_rotary_emb, encoder_rotary_emb, apply_rope)
             idx_sorted = None
         else:
             scores, idx_sorted = self._forward_free(h_in, e_in, H, W, global_context.current_iteration, global_context.num_inference_steps, attention_mask, norm_hidden_states, norm_encoder_hidden_states, hidden_rotary_emb, encoder_rotary_emb, apply_rope)
