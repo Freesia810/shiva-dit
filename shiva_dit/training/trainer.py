@@ -104,6 +104,7 @@ except ImportError:
     )
 
 from baselines.diffcr import DiffCRDitBlockHook
+from baselines.neuralsort import NeuralSortDitBlockHook
 from baselines.dy_dit import DynamicDiTBlockHook
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
 from shiva_dit.hook import HookManager
@@ -393,6 +394,8 @@ class DiffusionModelTrainer:
                 self.hook_type = "dydit"
             elif hook_class.__name__ == "DiffCRDitBlockHook":
                 self.hook_type = "diffcr"
+            elif hook_class.__name__ == "NeuralSortDitBlockHook":
+                self.hook_type = "neuralsort"
             elif hook_class.__name__ == "SparseDiTBlockHook":
                 self.hook_type = "sparse"
             elif hook_class.__name__ == "ShivaDitBlockHook":
