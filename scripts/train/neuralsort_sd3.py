@@ -5,7 +5,7 @@ HookType = NeuralSortDitBlockHook
 
 hook_config = {
     "tau": 8.0,
-    "target_ratio": 0.8,
+    "target_ratio": 0.65,
 }
 
 lora_config = {
