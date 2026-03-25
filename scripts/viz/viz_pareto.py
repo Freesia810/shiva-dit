@@ -58,19 +58,10 @@ plt.scatter(ours['Latency_ms'], ours['FID'],
             c=COLOR_OURS, s=120, marker='*', 
             edgecolors='white', linewidth=0.5, label='Shiva (Ours)', zorder=10)
 
-# --- 6. Pareto Frontier ---
-pareto_candidates = pd.concat([ours, teacher]) 
-points = pareto_candidates[['Latency_ms', 'FID']].sort_values(by='Latency_ms').values
-frontier_x, frontier_y = [], []
-current_min_fid = float('inf')
+pareto_points = pd.concat([ours, teacher]).sort_values(by='Latency_ms', ascending=False)
+plt.plot(pareto_points['Latency_ms'], pareto_points['FID'], 
+         color=COLOR_OURS, linestyle='--', linewidth=1.0, alpha=0.5, zorder=1)
 
-for x, y in points:
-    if y <= current_min_fid:
-        frontier_x.append(x)
-        frontier_y.append(y)
-        current_min_fid = y
-
-plt.plot(frontier_x, frontier_y, color=COLOR_OURS, linestyle='--', linewidth=1.0, alpha=0.5, zorder=1)
 plt.axhline(y=teacher['FID'].values[0], color=COLOR_TEACHER, linestyle=':', linewidth=1.0, alpha=0.4, zorder=0)
 
 # --- 7. Annotations (Same as before) ---
@@ -79,8 +70,11 @@ offset_map = {
     'ToMeSD': (-4, 0, 'right', 'center'), 'ToFu': (4, 0, 'left', 'center'),
     'SDTM': (0, -6, 'center', 'top'), 'ToMA': (4, 0, 'left', 'center'),
     'IBTM': (4, 0, 'left', 'center'), 'DiffCR': (0, 5, 'center', 'bottom'), 
-    'DyDiT': (-4, 4, 'right', 'bottom'), 'Shiva-80%': (-5, -4, 'right', 'bottom'),   
+    'DyDiT': (-4, 4, 'right', 'bottom'), 
+    'Shiva-80%': (-3, 10, 'right', 'top'),   
     'Shiva-60%': (0, 5, 'center', 'bottom'), 
+    'Shiva-70%': (0, -5, 'center', 'top'), 
+    'Shiva-90%': (0, 5, 'left', 'bottom'), 
 }
 
 for i, row in df.iterrows():
