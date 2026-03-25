@@ -43,6 +43,7 @@ trainer_config = {
     "logging_steps": 40,
     "save_steps": 1750,
     "save_best": True,
+    "distillation_final_weight": 1.0,
     "run_validation": True,
     "validation_steps": 875,
     "val_batch_size": 1,

@@ -62,45 +62,63 @@ class NeuralSortDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
     def _soft_topk(self, x, scores, k):
         """
-        Differentiable top-k via NeuralSort (training, single forward).
-        x:      (B, N, D)  — may be fp16/bf16
-        scores: (B, N)     — fp32
-        k:      int
-
-        P_hat is saved for reconstruction via P_hat^T in scatter-back.
-
-        Numerical note:
-            The original NeuralSort was designed for N<=15. At N=4096 the logits
-            inside P_max scale as O(N * score_range), causing NaN in backward.
-            We normalize scores to zero-mean unit-variance before feeding to
-            NeuralSort, keeping the logits at a stable magnitude regardless of N.
+        Differentiable top-k via NeuralSort (Identity-Preserving version).
+        
+        Fix: 
+            Instead of reordering tokens via bmm(P, x), we calculate the 
+            probability of each token being in the top-k and use STE to 
+            perform physical truncation while maintaining original order.
         """
         B, N, D = x.shape
         original_dtype = x.dtype
 
-        # --- Normalize scores to prevent O(N)-scale logits ---
+        # 1. --- Normalize scores to prevent O(N)-scale logits ---
         s = scores.unsqueeze(-1)                           # (B, N, 1), fp32
         s_mean = s.mean(dim=1, keepdim=True)
         s_std = s.std(dim=1, keepdim=True).clamp(min=1e-6)
         s_norm = (s - s_mean) / s_std                      # zero-mean, unit-var
+        s_norm = s_norm.clamp(-5.0, 5.0)
 
+        # 2. --- Generate Relaxed Permutation Matrix P_hat ---
         P_hat = deterministic_neuralsort(s_norm, self.tau * N)  # (B, N, N), fp32
-        # tau scaled by N: with normalized scores, P_max logits are O(N),
-        # so effective_tau = tau * N keeps softmax inputs at O(1).
-        # User-facing tau stays in the original paper's range (1~16).
 
-        x_f32 = x.float()                                  # (B, N, D), fp32
+        # 3. --- Calculate Soft Gate (Probability of being in Top-K) ---
+        soft_gate = P_hat[:, :k, :].sum(dim=1)             # (B, N)
 
-        P_topk = P_hat[:, :k, :]                           # (B, k, N)
-        x_sel = torch.bmm(P_topk, x_f32).to(original_dtype)  # (B, k, D)
+        # 4. --- Hard Selection (Identity-Preserving) ---
+        _, topk_idx = torch.topk(scores, k, dim=1, sorted=False)
+        sorted_topk_idx, _ = torch.sort(topk_idx, dim=1)   # (B, k)
 
+        # 5. --- Straight-Through Estimator (STE) ---
+        mask_hard = torch.zeros_like(soft_gate)
+        mask_hard.scatter_(1, sorted_topk_idx, 1.0)
+        gate = soft_gate + (mask_hard - soft_gate).detach()
+
+        # 6. --- Physical Truncation ---
+        x_f32 = x.float()
+        x_sel_raw = torch.gather(x_f32, 1, sorted_topk_idx.unsqueeze(-1).expand(-1, -1, D))
+        gate_sel = torch.gather(gate, 1, sorted_topk_idx).unsqueeze(-1)
+        x_sel = (x_sel_raw * gate_sel).to(original_dtype)
+
+        # 7. --- Handle Remaining Tokens (x_rej) ---
         if k < N:
-            P_rest = P_hat[:, k:, :]                       # (B, N-k, N)
-            x_rej = torch.bmm(P_rest, x_f32).to(original_dtype)  # (B, N-k, D)
+            all_idx = torch.arange(N, device=x.device).unsqueeze(0).expand(B, N)
+            mask_rej = torch.ones(B, N, dtype=torch.bool, device=x.device)
+            mask_rej.scatter_(1, sorted_topk_idx, False)
+            rej_idx = all_idx[mask_rej].view(B, N - k)
+            
+            x_rej_raw = torch.gather(x_f32, 1, rej_idx.unsqueeze(-1).expand(-1, -1, D))
+            gate_rej = torch.gather(gate, 1, rej_idx).unsqueeze(-1)
+            x_rej = (x_rej_raw * gate_rej).to(original_dtype)
+            
+            self._cached_rej_idx = rej_idx
         else:
             x_rej = x.new_empty(B, 0, D)
+            self._cached_rej_idx = None
 
+        # 8. --- Cache for delegated_call and scatter_back ---
         self._cached_P_hat = P_hat
+        self._cached_sel_idx = sorted_topk_idx
         self._cached_k = k
 
         return x_sel, x_rej
@@ -138,15 +156,13 @@ class NeuralSortDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         token_scores = self.hidden_router(hidden_states.to(self.dtype)).squeeze(-1)  # (B, N)
         token_scores = token_scores.clamp(-10.0, 10.0)
 
-        # --- Select ---
         if self.training:
             x_sel, x_rej = self._soft_topk(hidden_states, token_scores, k)
-            sel_idx = None
+            sel_idx = self._cached_sel_idx
         else:
             x_sel, x_rej, sel_idx = self._hard_topk(hidden_states, token_scores, k)
 
-        # --- RoPE gather (hard indices, inference only) ---
-        if image_rotary_emb is not None and not self.training:
+        if image_rotary_emb is not None:
             assert hidden_states.shape[0] == 1, "image_rotary_emb only supports batch size 1"
             hidden_emb, encoder_emb, _ = parse_image_rotary_emb(
                 self.model_type,
@@ -179,20 +195,18 @@ class NeuralSortDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         # --- Scatter back ---
         if self.training:
-            # Soft mode: P_hat^T to map back to (B, N, D)
-            P_hat = self._cached_P_hat                          # (B, N, N), fp32
-            k_ = self._cached_k
-
-            P_topk_T = P_hat[:, :k_, :].transpose(1, 2)        # (B, N, k)
-            full_hidden = torch.bmm(P_topk_T, hid_out.float()) # (B, N, D)
-
+            B, k_, D = hid_out.shape
+            N = hidden_states.shape[1]
+            full_hidden = torch.zeros(B, N, D, device=hid_out.device, dtype=hid_out.dtype)
+            sel_idx_train = self._cached_sel_idx
+            full_hidden.scatter_(1, sel_idx_train.unsqueeze(-1).expand(-1, -1, D), hid_out)
             if x_rej.shape[1] > 0:
-                P_rest_T = P_hat[:, k_:, :].transpose(1, 2)    # (B, N, N-k)
-                full_hidden = full_hidden + torch.bmm(P_rest_T, x_rej.float())
-
-            full_hidden = full_hidden.to(hid_out.dtype)
+                rej_idx_train = self._cached_rej_idx
+                full_hidden.scatter_(1, rej_idx_train.unsqueeze(-1).expand(-1, -1, D), x_rej.to(hid_out.dtype))
 
             self._cached_P_hat = None
+            self._cached_sel_idx = None
+            self._cached_rej_idx = None
             self._cached_k = None
         else:
             # Hard mode: standard scatter
@@ -217,7 +231,7 @@ if __name__ == "__main__":
     pipe, model_attrs = get_pipeline(model_type)
 
     neuralsort_config = {
-        "target_ratio": 0.6,
+        "target_ratio": 1.0,
         "tau": 8.0,
     }
 
