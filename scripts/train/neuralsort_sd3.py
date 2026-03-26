@@ -4,8 +4,8 @@ from baselines.neuralsort import NeuralSortDitBlockHook
 HookType = NeuralSortDitBlockHook
 
 hook_config = {
-    "tau": 8.0,
-    "target_ratio": 0.65,
+    "tau": 1.0,
+    "target_ratio": 0.85,
 }
 
 lora_config = {
@@ -40,7 +40,7 @@ trainer_config = {
     "optimizer": "AdamW",
     "weight_decay": 1e-2,
     "seed": 42,
-    "logging_steps": 40,
+    "logging_steps": 1,
     "save_steps": 1750,
     "save_best": True,
     "distillation_final_weight": 1.0,
