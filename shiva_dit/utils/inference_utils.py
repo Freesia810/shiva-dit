@@ -13,6 +13,7 @@ from baselines.tofu import ToFuDitBlockHook
 from baselines.ibtm import IBTMDiTBlockHook
 from baselines.sdtm import SDTMDiTBlockHook
 from baselines.toma import ToMADitBlockHook
+from baselines.neuralsort import NeuralSortDitBlockHook
 from baselines.diffcr import DiffCRDitBlockHook
 from baselines.dy_dit import DynamicDiTBlockHook
 from baselines.sparse_dit import SparseDiTBlockHook
@@ -23,6 +24,7 @@ HOOK_CLASS_MAP = {
     "IBTMDiTBlockHook": IBTMDiTBlockHook,
     "SDTMDiTBlockHook": SDTMDiTBlockHook,
     "ToMADitBlockHook": ToMADitBlockHook,
+    "NeuralSortDitBlockHook": NeuralSortDitBlockHook,
     "DiffCRDitBlockHook": DiffCRDitBlockHook,
     "DynamicDiTBlockHook": DynamicDiTBlockHook,
     "SparseDiTBlockHook": SparseDiTBlockHook,
