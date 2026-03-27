@@ -71,9 +71,9 @@ offset_map = {
     'SDTM': (0, -6, 'center', 'top'), 'ToMA': (4, 0, 'left', 'center'),
     'IBTM': (4, 0, 'left', 'center'), 'DiffCR': (0, 5, 'center', 'bottom'), 
     'DyDiT': (-4, 4, 'right', 'bottom'), 
-    'Shiva-80%': (-3, 10, 'right', 'top'),   
+    'Shiva-80%': (0, -10, 'right', 'bottom'),   
     'Shiva-60%': (0, 5, 'center', 'bottom'), 
-    'Shiva-70%': (0, -5, 'center', 'top'), 
+    'Shiva-70%': (0, 5, 'center', 'bottom'), 
     'Shiva-90%': (0, 5, 'left', 'bottom'), 
 }
 
