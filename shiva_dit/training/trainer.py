@@ -322,10 +322,15 @@ class DiffusionModelTrainer:
             if self.accelerator.is_main_process:
                 print("Distillation loss enabled. Loading static teacher model...")
 
+            # Load the teacher pipeline on CPU, then move ONLY its DiT to the GPU.
+            # get_pipeline() otherwise puts a full second pipeline (incl. another
+            # T5-XXL) on the GPU before `del teacher_pipe`, a transient spike that
+            # OOMs smaller cards at startup. We only ever need the teacher DiT.
             teacher_pipe, teacher_attrs = get_pipeline(
                 self.model_type,
                 model_path=config.model_path,
                 dtype=DiffusionModelTrainer._get_dtype(config.mixed_precision),
+                device=torch.device("cpu"),
             )
             self.teacher_model = getattr(teacher_pipe, teacher_attrs[0])
             assert (
@@ -377,11 +382,14 @@ class DiffusionModelTrainer:
         # freeze vae and text encoder(s)
         self.vae.requires_grad_(False)
         self.vae.eval()
+        # Frozen text encoders are cast to the training dtype instead of fp32.
+        # SD3's text_encoder_3 is T5-XXL (4.7B): fp32 = ~19GB VRAM, bf16 = ~9.5GB.
+        # Keeping fp32 makes the recipe overflow a 24GB card at load; bf16 matches
+        # how SD3 runs these encoders at inference, so quality is unaffected.
+        te_dtype = DiffusionModelTrainer._get_dtype(self.config.mixed_precision)
         for text_encoder in self.text_encoders:
             text_encoder.requires_grad_(False)
-            text_encoder.to(
-                dtype=torch.float32
-            )  # keep text encoder in fp32 for stability
+            text_encoder.to(dtype=te_dtype)
             text_encoder.eval()
 
     def _setup_hooks(self):

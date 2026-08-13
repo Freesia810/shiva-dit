@@ -15,14 +15,15 @@ pipe = QwenImagePipeline.from_pretrained(model_name, torch_dtype=torch_dtype)
 pipe = pipe.to(device)
 
 positive_magic = {
-    "en": ", Ultra HD, 4K, cinematic composition.", # for english prompt
-    "zh": ", 超清，4K，电影级构图." # for chinese prompt
+    "en": ", Ultra HD, 4K, cinematic composition.",
 }
 
 # Generate image
-prompt = '''A coffee shop entrance features a chalkboard sign reading "Qwen Coffee 😊 $2 per cup," with a neon light beside it displaying "通义千问". Next to it hangs a poster showing a beautiful Chinese woman, and beneath the poster is written "π≈3.1415926-53589793-23846264-33832795-02384197". Ultra HD, 4K, cinematic composition'''
+prompt = """A coffee shop entrance features a chalkboard sign reading "Qwen Coffee - $2 per cup," with a neon light beside it displaying "Ask More". Next to it hangs a portrait poster, and beneath the poster is written "pi = 3.1415926". Ultra HD, 4K, cinematic composition"""
 
-negative_prompt = " " # using an empty string if you do not have specific concept to remove
+negative_prompt = (
+    " "  # using an empty string if you do not have specific concept to remove
+)
 
 
 # Generate with different aspect ratios
@@ -45,7 +46,7 @@ image = pipe(
     height=height,
     num_inference_steps=50,
     true_cfg_scale=4.0,
-    generator=torch.Generator(device="cuda").manual_seed(42)
+    generator=torch.Generator(device="cuda").manual_seed(42),
 ).images[0]
 
 image.save("qwen_image.png")

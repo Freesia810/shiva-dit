@@ -8,6 +8,7 @@ import numpy as np
 
 from shiva_dit.utils.ste import ShivaTopkFunc
 
+
 class ToyModel(nn.Module):
     def __init__(
         self, N, D, init_k, learn_k=False, init_logits_noise=0.1, ts=5.0, tk=10.0
@@ -33,7 +34,7 @@ class ToyModel(nn.Module):
 def experiment_unified():
     print("\n>>> Running Unified Experiment: Sorting & Budgeting (Dotted Style)...")
 
-    # === 1. 训练逻辑 (保持不变) ===
+    # Training setup.
     N, D = 100, 16
     True_Signal_Count = 20
     Init_K = 50
@@ -115,11 +116,9 @@ def experiment_unified():
         if os.path.exists(font_path):
             prop = fm.FontProperties(fname=font_path, size=12)
             bold_prop = fm.FontProperties(fname=font_path, size=12, weight="bold")
-            title_prop = fm.FontProperties(fname=font_path, size=15)
         else:
             prop = fm.FontProperties(family="serif", size=12)
             bold_prop = fm.FontProperties(family="serif", size=12, weight="bold")
-            title_prop = fm.FontProperties(family="serif", size=15)
 
         fig, ax1 = plt.subplots(figsize=(7, 4.5))
 
@@ -156,7 +155,7 @@ def experiment_unified():
             acc_plot,
             color=color_acc,
             linewidth=2.0,
-            linestyle="-", 
+            linestyle="-",
             label="Score Accuracy",
         )
 
@@ -189,7 +188,7 @@ def experiment_unified():
         )
 
         lines = [line1, line2, line_gt]
-        labels = [l.get_label() for l in lines]
+        labels = [line.get_label() for line in lines]
 
         legend = ax1.legend(
             lines,
@@ -224,6 +223,7 @@ def experiment_unified():
         import traceback
 
         traceback.print_exc()
+
 
 def experiment_3_gradient_consistency():
     print("\n>>> Running Experiment 3: Gradient Sign Consistency (Monte Carlo)...")
@@ -275,12 +275,10 @@ def experiment_3_gradient_consistency():
         font_path = "Times New Roman.ttf"
         if os.path.exists(font_path):
             prop = fm.FontProperties(fname=font_path, size=12)
-            has_font = True
             print(f"[Plot] Loaded local font: {font_path}")
         else:
             prop = fm.FontProperties(family="serif", size=12)
-            has_font = False
-            print(f"[Plot] Local font not found, using system serif.")
+            print("[Plot] Local font not found, using system serif.")
 
         fig, ax = plt.subplots(figsize=(6, 4))
 
@@ -315,9 +313,7 @@ def experiment_3_gradient_consistency():
             label.set_fontproperties(prop)
             label.set_fontsize(10)
 
-        stats_text = (
-            f"Trials: {num_trials}\n" f"Mean: {mean_sim:.3f}\n" f"Std:  {std_sim:.3f}"
-        )
+        stats_text = f"Trials: {num_trials}\nMean: {mean_sim:.3f}\nStd:  {std_sim:.3f}"
 
         props = dict(
             boxstyle="round",

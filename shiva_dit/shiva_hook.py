@@ -1,4 +1,6 @@
 import inspect
+import math
+import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,6 +12,7 @@ from shiva_dit.utils.ste import ceil_ste
 from shiva_dit.utils import parse_image_rotary_emb, join_image_rotary_emb
 
 from shiva_dit.modules.router import ShivaRouter
+from shiva_dit.utils.phase_profiler import phase as _phase
 from shiva_dit.modules.gater import ShivaGaterPolicy, ShivaRatioPolicy
 from shiva_dit.modules.pruner import ShivaContextPruner, ShivaPrunerExpert
 from shiva_dit.modules.fuser import ShivaFuserExpert
@@ -20,6 +23,21 @@ GATER_STAGE = 99
 
 # Hack
 ACCUMULATION_STEPS = 2
+
+# Controlled-variable knob for the ragged-vs-regular study. When non-zero, the budget
+# read from the LUT is perturbed by +/- K_JITTER tokens, resampled on every call. The
+# model, the pruned modules and the MEAN retention are unchanged -- only the regularity
+# of the tensor shapes differs, which is the single variable that study is about.
+K_JITTER = 0
+
+# Round the retained-token count up to a multiple of this. INT8 tensor-core GEMMs
+# (CUTLASS) require the M dimension to be 16-aligned for int8; an unaligned k does not
+# raise, it faults with a misaligned address mid-kernel. Rounding up keeps at most 15
+# extra tokens (<0.4% at N=4096), leaves the schedule static and offline-enumerable,
+# and is a no-op when set to 1.
+K_ALIGN = 1
+_K_RNG = random.Random(1234)
+
 
 class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
@@ -195,7 +213,14 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         return processed_output
 
     def _prepare_inputs(self, func, module_self, *args, **kwargs):
-        sig = inspect.signature(func)
+        # The block's signature never changes, but inspect.signature() rebuilds it by
+        # introspection on every call -- 23 layers x every denoising step. It is slow
+        # in its own right and dynamo cannot trace it, so it also breaks the compiled
+        # graph. Build it once per hook and reuse.
+        sig = getattr(self, "_cached_sig", None)
+        if sig is None:
+            sig = inspect.signature(func)
+            self._cached_sig = sig
         bound = sig.bind_partial(module_self, *args, **kwargs)
         bound.apply_defaults()
 
@@ -310,7 +335,16 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         if ctx_sel is not None:
             pooled_encoder_vector = ctx_sel.mean(dim=1)
         elif encoder_hidden_states is not None:
-            pooled_encoder_vector = encoder_hidden_states.mean(dim=1)
+            # The text embedding is the same tensor for every block within a step, so
+            # its pooled form is computed once and read by the rest of them. Keyed on
+            # storage address and shape, so a new step or a new batch misses the cache.
+            key = (encoder_hidden_states.data_ptr(), tuple(encoder_hidden_states.shape))
+            cached = getattr(global_context, "pooled_encoder_cache", None)
+            if cached is not None and cached[0] == key:
+                pooled_encoder_vector = cached[1]
+            else:
+                pooled_encoder_vector = encoder_hidden_states.mean(dim=1)
+                global_context.pooled_encoder_cache = (key, pooled_encoder_vector)
 
         # --- Image Pruning Logic ---
         x_sel = hidden_states
@@ -326,15 +360,31 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         if self.shiva_mode in ["image", "both"] and self.router is not None:
             # Determine Image Ratio
             predicted_ratio = None
+            k_python = None
             if (
                 self.use_gater_lut
                 and self.ratio_cache is not None
                 and not self.training
             ):
-                current_t_index = global_context.current_iteration
-                predicted_ratio = self.ratio_cache[self.layer_idx, current_t_index]
+                with _phase("ratio (LUT lookup)"):
+                    current_t_index = global_context.current_iteration
+                    # The LUT is fixed for a checkpoint, so read it into Python once
+                    # and index it with plain ints from then on. Reading the tensor
+                    # element per call forced a device sync on every one of the
+                    # 24 x steps calls and stopped the CPU running ahead of the GPU.
+                    if getattr(self, "_ratio_cpu", None) is None:
+                        self._ratio_cpu = self.ratio_cache.detach().float().cpu().tolist()
+                    ratio_f = self._ratio_cpu[self.layer_idx][current_t_index]
+                    ratio_f = min(max(ratio_f, 0.01), 1.0)
+                    k_python = max(1, min(int(math.ceil(ratio_f * N)), N))
+                    if K_ALIGN > 1:
+                        k_python = min(
+                            ((k_python + K_ALIGN - 1) // K_ALIGN) * K_ALIGN, N)
+                    if K_JITTER:
+                        k_python = max(
+                            1, min(k_python + _K_RNG.randint(-K_JITTER, K_JITTER), N))
 
-            if predicted_ratio is None:
+            if predicted_ratio is None and k_python is None:
                 if self.image_ratio_policy is not None:
                     # Adaptive Ratio
                     img_ratio_logits = self.image_ratio_policy(
@@ -363,14 +413,19 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                         self.fixed_image_ratio, device=pure_temb.device, dtype=dtype
                     )
 
-            clamped_ratio = predicted_ratio.clamp(min=0.01, max=1.0)
-            self.current_ratio_for_loss = clamped_ratio
-
-            if self.training:
-                k_float = ceil_ste(clamped_ratio * N)
+            if k_python is not None:
+                # deployed LUT path: k is already a plain int, nothing to sync
+                k_float = k_python
+                self.current_ratio_for_loss = None
             else:
-                with torch.no_grad():
-                    k_float = torch.ceil(clamped_ratio * N)
+                clamped_ratio = predicted_ratio.clamp(min=0.01, max=1.0)
+                self.current_ratio_for_loss = clamped_ratio
+
+                if self.training:
+                    k_float = ceil_ste(clamped_ratio * N)
+                else:
+                    with torch.no_grad():
+                        k_float = torch.ceil(clamped_ratio * N)
 
             # Gater Call
             gate_logits = None
@@ -379,31 +434,64 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             self.current_gate_logits_for_loss = gate_logits
 
             # Router Call
-            router_layer_emb_vector = self.router_layer_embedder(layer_id_tensor).to(dtype)
-            token_scores_logits = self.router(
-                hidden_states=hidden_states,
-                pooled_encoder_states=pooled_encoder_vector,
-                temb=pure_temb,
-                layer_emb=router_layer_emb_vector,
-            )
+            scores_shared = False
+            with _phase("router"):
+                # The layer index never changes for a given hook, so its embedding is
+                # a constant; looking it up on every block of every step is one kernel
+                # launch per call for a value that was already known.
+                # `layer_id_tensor` is broadcast to the batch, so the cache is keyed
+                # on batch and dtype as well; a different batch size must miss it.
+                emb_key = (hidden_states.shape[0], dtype)
+                cached_emb = getattr(self, "_layer_emb_cache", None)
+                if cached_emb is not None and cached_emb[0] == emb_key:
+                    router_layer_emb_vector = cached_emb[1]
+                else:
+                    router_layer_emb_vector = self.router_layer_embedder(
+                        layer_id_tensor).to(dtype)
+                    if not self.training:
+                        self._layer_emb_cache = (emb_key, router_layer_emb_vector)
+                token_scores_logits = self.router(
+                    hidden_states=hidden_states,
+                    pooled_encoder_states=pooled_encoder_vector,
+                    temb=pure_temb,
+                    layer_emb=router_layer_emb_vector,
+                )
 
-            if (
-                token_scores_logits.shape[0] % 2 == 0
-                and token_scores_logits.shape[0] > 1
-            ):
-                scores_uncond, scores_cond = token_scores_logits.chunk(2, dim=0)
-                unified_scores = torch.maximum(scores_uncond, scores_cond)
-                token_scores_logits = torch.cat([unified_scores, unified_scores], dim=0)
+                if (
+                    token_scores_logits.shape[0] % 2 == 0
+                    and token_scores_logits.shape[0] > 1
+                ):
+                    scores_uncond, scores_cond = token_scores_logits.chunk(2, dim=0)
+                    unified_scores = torch.maximum(scores_uncond, scores_cond)
+                    token_scores_logits = torch.cat([unified_scores, unified_scores], dim=0)
+                    scores_shared = True
 
-            self.token_scores_logits = token_scores_logits
+            # Only needed while a loss is being computed. Holding a graph-produced
+            # tensor on self across calls is exactly what breaks CUDA-graph replay (its
+            # buffer is reused on the next step), so drop it at inference. Validation
+            # runs under eval() but still collects hook metrics from these logits, so it
+            # has to be kept there too.
+            keep_logits = self.training or getattr(self, "is_validating", False)
+            self.token_scores_logits = token_scores_logits if keep_logits else None
 
             # Execute Image Pruning
-            x_sel, x_rej, sel_idx, rej_idx = self._select_topk(
-                hidden_states, token_scores_logits, k_float, D
-            )
+            with _phase("topk + gather"):
+                # The discarded tokens are only read by the fuse expert, which the
+                # eval path never reaches, and by the metric collection during
+                # validation. Everywhere else they are restored from `hidden_states`
+                # itself, so neither gathering them nor ordering the whole score
+                # vector is necessary.
+                need_rej = (self.training or getattr(self, "is_validating", False))
+                x_sel, x_rej, sel_idx, rej_idx = self._select_topk(
+                    hidden_states, token_scores_logits, k_float, D, need_rej,
+                    scores_shared
+                )
+                if not need_rej:
+                    self._dense_input = hidden_states
 
         # --- RoPE Gathering ---
-        sel_rope = self._gather_rope(image_rotary_emb, sel_idx, sel_idx_ctx)
+        with _phase("rope gather"):
+            sel_rope = self._gather_rope(image_rotary_emb, sel_idx, sel_idx_ctx)
 
         return (
             bound,
@@ -483,14 +571,17 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 N=x_sel.shape[1] + x_rej.shape[1],
             )
 
-        decision = 0
-        if self.use_gater_lut:
-            current_t_index = global_context.current_iteration
-            decision = self.gater_cache[self.layer_idx, current_t_index].item()
-        else:
-            gater_logits = self.current_gate_logits_for_loss
-            decision = torch.argmax(gater_logits[0], dim=-1).item()
-
+        # `decision` was recomputed here and then unconditionally overwritten with 0
+        # on the next line, so the lookup never affected the result -- but it cost a
+        # `.item()` on every block of every step: one device sync per call, and 517 of
+        # the 530 dynamo graph breaks that made this model compile slower than eager.
+        # Disabled rather than deleted so the fuse path can be restored deliberately.
+        #
+        # if self.use_gater_lut:
+        #     current_t_index = global_context.current_iteration
+        #     decision = self.gater_cache[self.layer_idx, current_t_index].item()
+        # else:
+        #     decision = torch.argmax(self.current_gate_logits_for_loss[0], -1).item()
         decision = 0
         if decision == 0:
             final_topk_states = x_sel
@@ -518,7 +609,8 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         bound.arguments["image_rotary_emb"] = sel_rope
         bound.arguments["encoder_hidden_states"] = final_topk_context
 
-        processed_output = func(*bound.args, **bound.kwargs)
+        with _phase("block (attn+FFN) @ k"):
+            processed_output = func(*bound.args, **bound.kwargs)
 
         if isinstance(processed_output, tuple):
             processed_encoder_states, processed_hidden_states = processed_output
@@ -528,19 +620,33 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         # Scatter Image
         if sel_idx is not None:
-            B, _, D = processed_hidden_states.shape
-            final_hidden_states = torch.empty(
-                (B, N, D),
-                device=processed_hidden_states.device,
-                dtype=processed_hidden_states.dtype,
-            )
-            final_hidden_states.scatter_(
-                1, sel_idx.unsqueeze(-1).expand(-1, -1, D), processed_hidden_states
-            )
-            if x_rej is not None and x_rej.shape[1] > 0:
-                final_hidden_states.scatter_(
-                    1, rej_idx.unsqueeze(-1).expand(-1, -1, D), x_rej
-                )
+            with _phase("scatter"):
+                B, _, D = processed_hidden_states.shape
+                if x_rej is None:
+                    # Untouched positions already hold the right values in the block's
+                    # own input, so one copy plus one scatter replaces the round trip
+                    # that took the discarded tokens out and put them straight back.
+                    dense = self._dense_input
+                    self._dense_input = None
+                    final_hidden_states = dense.to(
+                        processed_hidden_states.dtype).clone()
+                    final_hidden_states.scatter_(
+                        1, sel_idx.unsqueeze(-1).expand(-1, -1, D),
+                        processed_hidden_states)
+                else:
+                    final_hidden_states = torch.empty(
+                        (B, N, D),
+                        device=processed_hidden_states.device,
+                        dtype=processed_hidden_states.dtype,
+                    )
+                    final_hidden_states.scatter_(
+                        1, sel_idx.unsqueeze(-1).expand(-1, -1, D),
+                        processed_hidden_states
+                    )
+                    if x_rej.shape[1] > 0:
+                        final_hidden_states.scatter_(
+                            1, rej_idx.unsqueeze(-1).expand(-1, -1, D), x_rej
+                        )
         else:
             final_hidden_states = processed_hidden_states
 
@@ -567,8 +673,10 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         else:
             return final_hidden_states
 
-    def _select_topk(self, x, token_scores_logits, k, C):
-        x_sel, x_rej, sel_idx, rej_idx = self.prune_expert(x, token_scores_logits, k)
+    def _select_topk(self, x, token_scores_logits, k, C, need_rejected=True,
+                     scores_shared=False):
+        x_sel, x_rej, sel_idx, rej_idx = self.prune_expert(
+            x, token_scores_logits, k, need_rejected, scores_shared)
 
         if getattr(self, "capture_mask_for_viz", False):
             self.last_sel_idx = sel_idx.detach().cpu()  # (B, k)

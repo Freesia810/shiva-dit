@@ -40,7 +40,9 @@ def load_pipeline_for_inference(
     gater_lut_path: str = None,
     optimize_hooks: bool = True,
     merge_lora: bool = True,
-    meta_config: dict = None
+    meta_config: dict = None,
+    skip_layer_indices=None,
+    capture_mask_for_viz: bool = False,
 ):
     checkpoint_state = None
     load_format = "unknown"
@@ -134,7 +136,10 @@ def load_pipeline_for_inference(
         HookClass = HOOK_CLASS_MAP.get(hook_class_name)
         if HookClass:
             if hook_class_name == "ShivaDitBlockHook":
-                hook_kwargs["capture_mask_for_viz"] = True
+                # Copying the selection mask and the token scores to host on every
+                # block of every step is three device syncs per call and exists only
+                # to feed the mask figures, so it stays off unless asked for.
+                hook_kwargs["capture_mask_for_viz"] = capture_mask_for_viz
                 
                 # LUT logic (Keep existing logic)
                 if gater_lut_path and os.path.exists(gater_lut_path):
@@ -145,7 +150,12 @@ def load_pipeline_for_inference(
                         hook_kwargs["shared_ratio_cache"] = lut_data.get("ratio")
 
                 if optimize_hooks:
-                    hook_kwargs["skip_layer_indices"] = [0]
+                    # Block 0 is always left dense. Additional indices can be passed in
+                    # to leave the pruning path out of layers whose learned ratio is so
+                    # close to one that scoring and sorting the full sequence costs more
+                    # than the handful of tokens it removes.
+                    hook_kwargs["skip_layer_indices"] = (
+                        [0] if skip_layer_indices is None else list(skip_layer_indices))
 
             HookManager.configure_hooks(resolved_model_type, default=(HookClass, hook_kwargs))
             HookManager.enable()
@@ -197,4 +207,11 @@ def load_pipeline_for_inference(
             hook.eval().requires_grad_(False)
             
     print("Pipeline ready.")
+
+    if torch.backends.mps.is_available():
+        pipe.vae.to(torch.float32)
+        original_vae_decode = pipe.vae.decode
+        def patched_decode(z, *args, **kwargs):
+            return original_vae_decode(z.float(), *args, **kwargs)
+        pipe.vae.decode = patched_decode
     return pipe

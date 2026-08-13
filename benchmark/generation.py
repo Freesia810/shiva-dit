@@ -78,6 +78,117 @@ from shiva_dit.utils.utils import process_quick_start
 from accelerate.utils import set_seed
 
 
+class DirectClipScore:
+    """CLIP Score computed straight from transformers, as a version-proof fallback.
+
+    torchmetrics' CLIPScore reaches into `model.get_image_features`, whose return type
+    changed in transformers 5.x (tensor -> BaseModelOutputWithPooling), so the metric
+    raises on newer installs. Going through vision_model/text_model plus the projection
+    heads is the canonical CLIP path and has been stable across both. The value matches
+    torchmetrics' definition: 100 * max(cos(img, txt), 0).
+    """
+
+    def __init__(self, model_name_or_path, device):
+        from transformers import CLIPModel, CLIPProcessor
+        self.device = device
+        self.model = CLIPModel.from_pretrained(model_name_or_path).to(device).eval()
+        self.processor = CLIPProcessor.from_pretrained(model_name_or_path)
+
+    def to(self, device):
+        return self
+
+    @torch.no_grad()
+    def __call__(self, images_uint8, prompts):
+        # images_uint8: (B, 3, H, W) uint8 tensor, matching the torchmetrics call site
+        pil = [TF.to_pil_image(img.cpu()) for img in images_uint8]
+        inputs = self.processor(text=list(prompts), images=pil, return_tensors="pt",
+                                padding=True, truncation=True)
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+        vision_out = self.model.vision_model(pixel_values=inputs["pixel_values"])
+        img_emb = self.model.visual_projection(vision_out.pooler_output)
+        text_out = self.model.text_model(
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs.get("attention_mask"),
+        )
+        txt_emb = self.model.text_projection(text_out.pooler_output)
+
+        img_emb = img_emb / img_emb.norm(p=2, dim=-1, keepdim=True)
+        txt_emb = txt_emb / txt_emb.norm(p=2, dim=-1, keepdim=True)
+        cos = (img_emb * txt_emb).sum(dim=-1)
+        return 100.0 * cos.clamp(min=0).mean()
+
+
+SCOPE_MODULES = {
+    "ffn":         ["ff.net.0.proj", "ff.net.2"],
+    "ffn_attnout": ["ff.net.0.proj", "ff.net.2", "attn.to_out.0"],
+    "all":         None,
+}
+
+
+def apply_quantization(pipe, args):
+    """Simulated INT8 on selected transformer blocks.
+
+    Layer choice is not uniform: block 0 is skipped by the pruner outright and block 1
+    is the densest the LUT keeps, and both measured among the worst under INT8
+    (benchmark/quant_calibrated.py), so the default excludes them. Everything else is
+    quantised, which is what a deployment would do -- the point of the experiment is
+    what stacking costs in quality, not a best case.
+    """
+    from optimum.quanto import Calibration, freeze, qint8, quantize
+
+    transformer = pipe.transformer
+    blocks = transformer.transformer_blocks
+    chosen = args.quant_layers
+    if chosen is None:
+        chosen = [i for i in range(len(blocks)) if i not in (0, 1)]
+    include_suffixes = SCOPE_MODULES[args.quant_scope]
+
+    kw = {"weights": qint8}
+    if args.quantize == "w8a8":
+        kw["activations"] = qint8
+
+    n_mod = 0
+    for i in chosen:
+        if i >= len(blocks):
+            continue
+        blk = blocks[i]
+        if include_suffixes is None:
+            quantize(blk, **kw)
+            n_mod += sum(1 for _, m in blk.named_modules()
+                         if isinstance(m, torch.nn.Linear))
+        else:
+            have = {n for n, m in blk.named_modules()
+                    if isinstance(m, torch.nn.Linear)}
+            inc = [t for t in include_suffixes if t in have]
+            if not inc:
+                continue
+            quantize(blk, include=inc, **kw)
+            n_mod += len(inc)
+
+    print(f"[quant] {args.quantize} on {len(chosen)} blocks "
+          f"(scope={args.quant_scope}), {n_mod} Linears")
+
+    if args.quantize == "w8a8":
+        # Activation ranges must come from real traffic, and from prompts other than the
+        # ones being scored -- a range fitted on the evaluation sample flatters itself.
+        calib_prompts = [
+            "a photograph of a busy street market at noon, people and awnings",
+            "an oil painting of a snowy mountain range under a clear sky",
+        ]
+        print(f"[quant] calibrating activation ranges on {len(calib_prompts)} "
+              f"held-out prompts ...")
+        with Calibration(), torch.no_grad():
+            for cp in calib_prompts:
+                pipe(prompt=cp, negative_prompt="",
+                     num_inference_steps=(args.steps if args.steps > 0 else 28),
+                     guidance_scale=7.0, height=args.height, width=args.width,
+                     generator=torch.Generator(device="cpu").manual_seed(0),
+                     output_type="latent")
+    freeze(transformer)
+    print("[quant] frozen")
+
+
 class GenerationEvaluator:
     def __init__(self, device, fid_stats_path=None):
         self.device = device
@@ -88,17 +199,36 @@ class GenerationEvaluator:
         else:
             print("Warning: No .npz provided. FID will be skipped.")
 
+        # The generation boxes keep CLIP checkpoints beside the repo; a scoring-only
+        # machine (e.g. the Mac that computes metrics) has no such directory, so fall
+        # back to the hub id rather than losing CLIP Score and CLIP-IQA entirely.
+        clip_path = "../openai-clip-vit-base-patch16"
+        if not os.path.isdir(clip_path):
+            clip_path = "openai/clip-vit-base-patch16"
+        # Loaded independently: CLIP-IQA breaks on some torchmetrics/transformers
+        # pairings, and sharing one try block would take CLIP Score down with it --
+        # which is the metric the multi-seed comparison actually turns on.
+        # Constructing CLIPScore can succeed while the first update() still raises on a
+        # transformers-version mismatch, so probe it once and swap in the direct
+        # implementation if it cannot actually score.
+        self.clip_score = None
         try:
-            self.clip_score = CLIPScore(
-                model_name_or_path="../openai-clip-vit-base-patch16"
-            ).to(device)
-
+            probe = CLIPScore(model_name_or_path=clip_path).to(device)
+            probe(torch.zeros(1, 3, 64, 64, dtype=torch.uint8, device=device), ["probe"])
+            self.clip_score = probe
+        except Exception as e:
+            print(f"Warning: torchmetrics CLIPScore unusable ({e}); "
+                  f"falling back to a direct transformers implementation.")
+            try:
+                self.clip_score = DirectClipScore(clip_path, device)
+            except Exception as e2:
+                print(f"Warning: Failed to load CLIP Score: {e2}")
+        try:
             self.clip_iqa = CLIPImageQualityAssessment(
-                model_name_or_path="../openai-clip-vit-base-patch16"
+                model_name_or_path=clip_path
             ).to(device)
         except Exception as e:
-            print(f"Warning: Failed to load CLIP metrics: {e}")
-            self.clip_score = None
+            print(f"Warning: Failed to load CLIP-IQA: {e}")
             self.clip_iqa = None
 
         self.ir_model = None
@@ -120,22 +250,23 @@ class GenerationEvaluator:
 
     @torch.no_grad()
     def update_fake(self, generated_pil, prompt=None):
-        if self.clip_score is None:
+        if self.clip_score is None and self.clip_iqa is None and self.ir_model is None:
             return
 
         gen_tensor = self.preprocess(generated_pil)
         gen_uint8 = self.preprocess_uint8(generated_pil)
 
-        if prompt:
+        if prompt and self.clip_score is not None:
             score = self.clip_score(gen_uint8, [prompt])
             self.results["clip_scores"].append(score.item())
 
-        iqa_out = self.clip_iqa(gen_tensor)
-        if isinstance(iqa_out, dict):
-            mean_iqa = torch.stack(list(iqa_out.values())).mean().item()
-            self.results["clip_iqa_scores"].append(mean_iqa)
-        else:
-            self.results["clip_iqa_scores"].append(iqa_out.item())
+        if self.clip_iqa is not None:
+            iqa_out = self.clip_iqa(gen_tensor)
+            if isinstance(iqa_out, dict):
+                mean_iqa = torch.stack(list(iqa_out.values())).mean().item()
+                self.results["clip_iqa_scores"].append(mean_iqa)
+            else:
+                self.results["clip_iqa_scores"].append(iqa_out.item())
 
         if self.ir_model and prompt:
             ir_score = self.ir_model.score(prompt, generated_pil)
@@ -216,6 +347,8 @@ def main(args):
     if torch.cuda.is_available():
         device = f"cuda:{local_rank}"
         torch.cuda.set_device(device)
+    elif torch.backends.mps.is_available():
+        device = "mps"
     else:
         device = "cpu"
 
@@ -259,18 +392,25 @@ def main(args):
     else:
         meta_config = None
 
-    print(f"Loading Pipeline...")
-    pipe = load_pipeline_for_inference(
-        ckpt_path=args.ckpt_path,
-        base_model_path=args.base_model_path,
-        model_type=args.model_type,
-        device=device,
-        dtype=dtype,
-        gater_lut_path=args.gater_lut,
-        optimize_hooks=args.optimize_hooks,
-        merge_lora=args.merge_lora,
-        meta_config=meta_config,
-    )
+    if args.model_type:
+        print(f"Loading Pipeline...")
+        pipe = load_pipeline_for_inference(
+            ckpt_path=args.ckpt_path,
+            base_model_path=args.base_model_path,
+            model_type=args.model_type,
+            device=device,
+            dtype=dtype,
+            gater_lut_path=args.gater_lut,
+            optimize_hooks=args.optimize_hooks,
+            merge_lora=args.merge_lora,
+            meta_config=meta_config,
+        )
+        print(f"Pipeline device: {next(pipe.transformer.parameters()).device}")
+
+        if args.quantize:
+            apply_quantization(pipe, args)
+    else:
+        pipe = None
 
     if args.force_fixed_ratio > 0:
         print(f"[INFO] Disabling Policy Network...")
@@ -466,6 +606,22 @@ if __name__ == "__main__":
         type=str, 
         default=None, 
         help="Path to directory containing pre-dumped latents (e.g. from machine A)."
+    )
+    parser.add_argument(
+        "--quantize", default=None,
+        choices=["w8", "w8a8"],
+        help="simulate INT8 on the DiT before generating. Quality only -- quanto's "
+             "CUDA int8 path is not faster than fp16 here, so latency is measured "
+             "separately in benchmark/quant_latency.py",
+    )
+    parser.add_argument(
+        "--quant_layers", type=int, nargs="+", default=None,
+        help="transformer block indices to quantise; default = all but 0 and 1, "
+             "which the LUT keeps densest and which measured worst under INT8",
+    )
+    parser.add_argument(
+        "--quant_scope", default="ffn", choices=["ffn", "ffn_attnout", "all"],
+        help="which Linears inside each chosen block to quantise",
     )
     parser.add_argument(
         "--skip_metrics", 

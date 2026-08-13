@@ -10,3 +10,10 @@ shiva_env/
 *.ttf
 *.pdf
 *.csv
+pic_*/
+.DS_Store
+
+# Local experiment inputs and outputs
+benchmark/prompts/
+dense_configs.json
+results/

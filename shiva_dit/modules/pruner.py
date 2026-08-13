@@ -5,15 +5,78 @@ import torch.nn.utils.parametrizations as parametrizations
 import numpy as np
 
 from shiva_dit.utils.ste import ShivaTopkFunc
+from shiva_dit.utils.phase_profiler import phase as _phase
+
+
+def hard_topk_select(x, logits, k, need_rejected=True, scores_shared=False):
+    """Forward-only hard top-k: rank the scores, gather the selected tokens.
+
+    `k` may be a plain int -- which is the point. When the ratio comes from the
+    deployed LUT the budget is known without touching the device, so no .item()
+    sync is needed to obtain a sliceable integer.
+
+    `need_rejected` is False whenever the discarded tokens are never read, which at
+    inference is always: they pass through unchanged and the caller can restore them
+    from its own input. That removes their gather, and with it the need for a full
+    ordering, so the selection becomes a top-k rather than a sort of all N scores.
+
+    `scores_shared` says every row of `logits` is a copy of the same vector, which is
+    what classifier-free guidance produces once the conditional and unconditional
+    scores have been reconciled. Ranking it once and reusing the indices halves the
+    selection at no cost to the result.
+    """
+    B, N, D = x.shape
+
+    if isinstance(k, int):
+        k_int = k
+    else:
+        with _phase("  topk: k .item() sync"):
+            k_int = int(torch.ceil(k).item())
+    k_int = max(1, min(k_int, N))
+
+    if not need_rejected:
+        with _phase("  topk: argsort"):
+            src = logits[:1] if scores_shared else logits
+            topk_idx = torch.topk(src, k_int, dim=-1, sorted=False).indices
+            if scores_shared and B > 1:
+                topk_idx = topk_idx.expand(B, k_int)
+        with _phase("  topk: gather"):
+            x_selected = torch.gather(x, 1, topk_idx.unsqueeze(-1).expand(B, k_int, D))
+        return x_selected, None, topk_idx, None
+
+    with _phase("  topk: argsort"):
+        idx_sorted = torch.argsort(logits, dim=-1, descending=True)
+
+    with _phase("  topk: gather"):
+        topk_idx = idx_sorted[:, :k_int]
+        rest_idx = idx_sorted[:, k_int:]
+        x_selected = torch.gather(x, 1, topk_idx.unsqueeze(-1).expand(B, k_int, D))
+        x_rejected = torch.gather(x, 1, rest_idx.unsqueeze(-1).expand(B, N - k_int, D))
+    return x_selected, x_rejected, topk_idx, rest_idx
+
 
 class ShivaPrunerExpert(torch.nn.Module):
-    def __init__(self, init_Ts, init_Tk):
+    def __init__(self, init_Ts, init_Tk, pi_mode: str = "residual", gumbel_tau: float = 1.0):
         super().__init__()
         self.register_buffer("Ts", torch.tensor(float(init_Ts)), persistent=False)
         self.register_buffer("Tk", torch.tensor(float(init_Tk)), persistent=False)
+        # "residual" (ours) or "gumbel" (independent Gumbel-Sigmoid, DyDiT-style).
+        # The forward pass -- hard top-k under the same budget -- is identical either way;
+        # only the backward surrogate for pi_i changes.
+        self.pi_mode = pi_mode
+        self.gumbel_tau = gumbel_tau
 
-    def forward(self, x, logits, k):
-        return ShivaTopkFunc.apply(x, logits, k, self.Ts, self.Tk)
+    def forward(self, x, logits, k, need_rejected=True, scores_shared=False):
+        # Inference needs neither the custom backward nor a differentiable k, and
+        # going through autograd.Function costs real time: the node machinery plus
+        # the .item() that turns k into a sliceable int forces a device sync on
+        # every call (24 layers x 50 steps). Under no_grad we do the hard select
+        # directly; the forward result is bit-identical.
+        if not torch.is_grad_enabled():
+            return hard_topk_select(x, logits, k, need_rejected, scores_shared)
+        return ShivaTopkFunc.apply(
+            x, logits, k, self.Ts, self.Tk, self.pi_mode, self.gumbel_tau
+        )
 
 class ShivaContextPruner(nn.Module):
     def __init__(self, img_dim, txt_dim, proj_dim, init_Ts, init_Tk):

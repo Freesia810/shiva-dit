@@ -5,7 +5,7 @@ from typing import Type, Optional, List
 from shiva_dit.hook.hook_manager import HookManager
 from shiva_dit.utils import global_context
 
-from shiva_dit.modules.router import ShivaRouter
+from shiva_dit.modules.router import ShivaRouter, CONTEXT_SIGNALS
 from shiva_dit.modules.gater import ShivaGaterPolicy, ShivaRatioPolicy
 from shiva_dit.modules.pruner import ShivaContextPruner, ShivaPrunerExpert
 from shiva_dit.modules.fuser import ShivaFuserExpert
@@ -31,6 +31,12 @@ def install_shiva_hooks(
     num_router_groups = kwargs.pop("num_router_groups", 4)
     layer_embed_dim = kwargs.pop("layer_embed_dim", 256)
     fuse_expert_ffn_mult = kwargs.pop("fuse_expert_ffn_mult", 2)
+    # Ablation switches (must be popped: leftover kwargs are forwarded to the hook ctor)
+    router_context_signals = kwargs.pop("router_context_signals", CONTEXT_SIGNALS)
+    pi_mode = kwargs.pop("pi_mode", "residual")
+    gumbel_tau = kwargs.pop("gumbel_tau", 1.0)
+    # Eq. 10 coupling of the ratio policy: "additive" (ours) or "film" (multiplicative)
+    policy_mode = kwargs.pop("policy_mode", "additive")
 
     # Context Configs
     context_ratio_mode = kwargs.pop("context_ratio_mode", "fixed")
@@ -98,10 +104,13 @@ def install_shiva_hooks(
 
         if image_ratio_mode == "adaptive":
             shared_image_ratio_policy = ShivaRatioPolicy(
-                total_layers=num_layers, ratio_bottleneck_dim=ratio_bottleneck_dim, init_ratio=fixed_image_ratio, time_embed_dim=time_embed_dim
+                total_layers=num_layers, ratio_bottleneck_dim=ratio_bottleneck_dim, init_ratio=fixed_image_ratio, time_embed_dim=time_embed_dim,
+                policy_mode=policy_mode
             ).to(device, dtype)
 
-        shared_pruner_expert = ShivaPrunerExpert(init_Ts=init_Ts, init_Tk=init_Tk).to(device, dtype)
+        shared_pruner_expert = ShivaPrunerExpert(
+            init_Ts=init_Ts, init_Tk=init_Tk, pi_mode=pi_mode, gumbel_tau=gumbel_tau
+        ).to(device, dtype)
         shared_fuse_expert = ShivaFuserExpert(
             hidden_dim=model_dim, ffn_mult=fuse_expert_ffn_mult
         ).to(device, dtype)
@@ -113,6 +122,7 @@ def install_shiva_hooks(
                 prompt_embed_dim=prompt_embed_dim,
                 layer_embed_dim=layer_embed_dim,
                 bottleneck_dim=bottleneck_dim,
+                context_signals=router_context_signals,
             )
             for _ in range(num_router_groups)
         ]).to(device, dtype)
@@ -173,7 +183,6 @@ def install_shiva_hooks(
             "shared_gater_cache": shared_gater_cache,
             "shared_ratio_cache": shared_ratio_cache,
             "shared_context_ratio_cache": shared_context_ratio_cache,
-            "total_layers": num_layers,
             **kwargs,
         }
 

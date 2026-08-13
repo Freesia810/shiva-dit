@@ -1,4 +1,14 @@
+import torch
+
 from shiva_dit.training import DiffusionModelTrainer, LoraConfig, TrainerConfig
+
+
+def _auto_grad_ckpt() -> bool:
+    """Checkpoint on <~34GB cards (4090/5090) for headroom; off on A100 40GB+."""
+    if not torch.cuda.is_available():
+        return False
+    return torch.cuda.get_device_properties(0).total_memory < 34 * 1024 ** 3
+
 
 lora_config = {
     "enable": True,
@@ -28,7 +38,8 @@ trainer_config = {
     "training_mode": "lora",
     "lora_config": LoraConfig(**lora_config),
     "caption_dropout_rate": 0.1,
-    "num_epochs": 30,
+    "num_epochs": 2,
+    "enable_gradient_checkpointing": _auto_grad_ckpt(),
     "train_batch_size": 1,
     "gradient_accumulation_steps": 2,
     "optimizer": "AdamW",
@@ -45,7 +56,7 @@ trainer_config = {
     "validation_steps": 875,
     "val_metadata_file": "../dataset/MJHQ-30K/val.jsonl",
     "val_image_dir": "../dataset/MJHQ-30K/",
-    "run_inference_validation": True,
+    "run_inference_validation": False,
     "inference_steps": 1750,
     "inference_metadata_file": "../dataset/MJHQ-30K/test.jsonl",
     "inference_seed": 42,

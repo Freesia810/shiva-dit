@@ -2,7 +2,6 @@ import torch
 from PIL import Image
 from shiva_dit.utils.context import global_context
 from diffusers.utils import load_image
-from diffusers.models.autoencoders import AutoencoderKLWan
 from diffusers.pipelines import (
     StableDiffusion3Pipeline,
     FluxPipeline,
@@ -13,32 +12,33 @@ from diffusers.pipelines import (
     WanPipeline,
 )
 
-def test_global_context(model_type):
-    if model_type == 'sd3':
+
+def run_global_context(model_type):
+    if model_type == "sd3":
         PipelineType = StableDiffusion3Pipeline
         dtype = torch.float16
         model_path = "../stable-diffusion-3-medium-diffusers"
-    elif model_type == 'flux-dev':
+    elif model_type == "flux-dev":
         PipelineType = FluxPipeline
         dtype = torch.bfloat16
         model_path = "../FLUX.1-dev"
-    elif model_type == 'pixart-sigma':
+    elif model_type == "pixart-sigma":
         PipelineType = PixArtSigmaPipeline
         dtype = torch.float16
         model_path = "../PixArt-Sigma-XL-2-1024-MS"
-    elif model_type == 'qwen-image':
+    elif model_type == "qwen-image":
         PipelineType = QwenImagePipeline
         dtype = torch.bfloat16
         model_path = "../Qwen-Image"
-    elif model_type == 'flux-kontext':
+    elif model_type == "flux-kontext":
         PipelineType = FluxKontextPipeline
         dtype = torch.bfloat16
         model_path = "../FLUX.1-Kontext-dev"
-    elif model_type == 'qwen-image-edit':
+    elif model_type == "qwen-image-edit":
         PipelineType = QwenImageEditPipeline
         dtype = torch.bfloat16
         model_path = "../Qwen-Image-Edit"
-    elif model_type == 'wan':
+    elif model_type == "wan":
         PipelineType = WanPipeline
         dtype = torch.bfloat16
         model_path = "../Wan2.2-T2V-A14B-Diffusers"
@@ -79,12 +79,13 @@ def test_global_context(model_type):
         ).images[0]
     elif model_type == "qwen-image":
         positive_magic = {
-            "en": ", Ultra HD, 4K, cinematic composition.", # for english prompt
-            "zh": ", 超清，4K，电影级构图." # for chinese prompt
+            "en": ", Ultra HD, 4K, cinematic composition.",
         }
 
-        prompt = '''A coffee shop entrance features a chalkboard sign reading "Qwen Coffee 😊 $2 per cup," with a neon light beside it displaying "通义千问". Next to it hangs a poster showing a beautiful Chinese woman, and beneath the poster is written "π≈3.1415926-53589793-23846264-33832795-02384197". Ultra HD, 4K, cinematic composition'''
-        negative_prompt = " " # using an empty string if you do not have specific concept to remove
+        prompt = """A coffee shop entrance features a chalkboard sign reading "Qwen Coffee - $2 per cup," with a neon light beside it displaying "Ask More". Next to it hangs a portrait poster, and beneath the poster is written "pi = 3.1415926". Ultra HD, 4K, cinematic composition"""
+        negative_prompt = (
+            " "  # using an empty string if you do not have specific concept to remove
+        )
         aspect_ratios = {
             "1:1": (1328, 1328),
             "16:9": (1664, 928),
@@ -109,9 +110,7 @@ def test_global_context(model_type):
     elif model_type == "flux-kontext":
         input_image = load_image("pic/cat.png")
         image = pipe(
-            image=input_image,
-            prompt="Add a hat to the cat",
-            guidance_scale=2.5
+            image=input_image, prompt="Add a hat to the cat", guidance_scale=2.5
         ).images[0]
     elif model_type == "qwen-image-edit":
         input_image = Image.open("pic/rabbit.png").convert("RGB")
@@ -132,4 +131,4 @@ def test_global_context(model_type):
 
 
 if __name__ == "__main__":
-    test_global_context("qwen-image-edit")
+    run_global_context("qwen-image-edit")

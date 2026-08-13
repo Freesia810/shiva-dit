@@ -201,6 +201,7 @@ def benchmark(args):
 
     pipe = load_pipeline_for_inference(
         ckpt_path=args.ckpt_path,
+        skip_layer_indices=args.skip_layers,
         base_model_path=args.base_model_path,
         model_type=args.model_type,
         device=device,
@@ -290,6 +291,12 @@ def benchmark(args):
         end_event = torch.cuda.Event(enable_timing=True)
         
         kwargs = {"prompt": prompt}
+        if args.batch > 1:
+            # The pruning path costs the same per call whatever the batch, so a larger
+            # batch both amortises it and gives the shortened blocks enough rows to
+            # keep the device busy. Latency is reported per call, so divide by batch
+            # to compare against the single-image runs.
+            kwargs["num_images_per_prompt"] = args.batch
         if args.steps > 0:
             kwargs["num_inference_steps"] = args.steps
         if args.height > 0:
@@ -354,6 +361,9 @@ def benchmark(args):
     print(f"System Performance (Avg over {len(prompts)} runs):")
     print(f"  Peak VRAM:          {avg_memory:.2f} MB")
     print(f"  End-to-End Latency: {avg_latency:.2f} ms ({avg_latency/1000:.2f} s)")
+    if args.batch > 1:
+        print(f"  Per-Image Latency:  {avg_latency/args.batch:.2f} ms "
+              f"(batch {args.batch})")
     print(f"  DiT Latency:       {avg_dit_latency:.2f} ms ({avg_dit_latency/1000:.2f} s)")
     print("=" * 58)
 
@@ -366,6 +376,10 @@ if __name__ == "__main__":
     parser.add_argument("--model_type", type=str, default=None, help="Required if ckpt_path is None (e.g. 'flux-dev').")
     parser.add_argument("--base_model_path", type=str, default=None)
     parser.add_argument("--jsonl_path", type=str, default="test/training/dataset/meta.jsonl", help="Dataset jsonl file")
+    parser.add_argument("--batch", type=int, default=1,
+                        help="images per pipeline call (num_images_per_prompt)")
+    parser.add_argument("--skip_layers", type=int, nargs="+", default=None,
+                        help="block indices to leave dense; defaults to [0]")
     parser.add_argument("--gater_lut", type=str, default=None, help="Path to gater LUT .pt file")
     parser.add_argument("--meta_config", type=str, default=None)
     
