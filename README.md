@@ -2,129 +2,165 @@
 
 Residual-Based Differentiable Top-k Selection for Efficient Diffusion Transformers
 
-Published in Transactions on Machine Learning Research, November 2026. [Paper](https://openreview.net/forum?id=uAAaT1KajI)
+Published in Transactions on Machine Learning Research, November 2026. [TMLR article](https://openreview.net/forum?id=uAAaT1KajI)
 
-Shiva-DiT accelerates diffusion transformers by pruning image tokens within each denoising block. A router ranks the tokens for the current input, and a learned ratio policy sets how many the block will process. Attention and the feed-forward network run on the selected tokens. The other tokens pass through the residual path, and the block restores the full spatial layout for the next layer.
+Shiva-DiT reduces the number of image tokens processed in each block of a diffusion transformer. The **context-aware router** scores tokens using their features, the prompt, the denoising timestep, and the layer. The **adaptive ratio policy** sets the retention budget for that layer and timestep. The block runs attention and the feed-forward network on the top-$k$ image tokens, carries the remaining tokens through the residual path, and restores the original token layout before the next block.
 
-Hard top-k selection makes the number of processed tokens explicit, but the discrete ranking blocks gradients to both the scores and the budget. Shiva-DiT estimates these gradients during the backward pass from the path each token actually took. The same training objective can therefore learn both which tokens to keep and how many to keep, using a single sparse student forward pass.
+During training, a **residual-based straight-through estimator** makes this hard selection learnable. It assigns each token a soft rank and uses its position relative to $k$ to approximate its inclusion probability. Gradients from the path each token took propagate through that probability to both the router scores and the budget. This lets both decisions learn from one sparse student forward pass. At inference, the ratio policy can be exported to a lookup table (LUT) because its outputs depend on the layer and timestep. The router continues to score each input.
 
 ## Environment
 
-Use Python 3.10 and CUDA-enabled PyTorch. The dependencies specify PyTorch 2.6, Transformers 4.57.1, and PEFT 0.17.1. We recommend installing them in a virtual environment.
+The code was tested with **Python 3.10.12**. Use a virtual environment and a CUDA-enabled PyTorch installation for training and GPU benchmarking.
 
-## Install
+## Installation
 
-Run the following command from the repository root.
+Install the dependencies and run the examples from the repository root.
 
 ```bash
-python -m pip install -r requirements.txt
+pip install -r requirements.txt
 ```
 
 ## Usage
 
-### Image generation
+### HookManager
 
-Set the paths to your SD3-Medium base model in Diffusers format and a trained Shiva checkpoint. Run the commands below from the repository root so that Python loads the bundled Diffusers implementation.
+Shiva-DiT and the baselines attach hooks to transformer blocks in the bundled Diffusers pipelines. `HookManager` configures which hook to install, then injects it into the transformer modules. **Callback** hooks intercept points within a block's forward pass. **Delegate** hooks control the block's forward pass. [Hook documentation](shiva_dit/hook/README.md)
+
+### Training-free Methods
+
+Training-free methods can be applied directly to the base model. This example injects the ToMeSD hook into SD3-Medium.
+
+```python
+import torch
+
+from baselines.tome_sd import ToMeSDDitBlockHook
+from shiva_dit.hook import HookManager
+from shiva_dit.utils import get_pipeline, process_quick_start
+
+model_type = "sd3"
+pipe, model_attrs = get_pipeline(
+    model_type,
+    model_path="/path/to/stable-diffusion-3-medium-diffusers",
+    device=torch.device("cuda"),
+)
+
+tomesd_config = {
+    "stride": (2, 2),
+    "merged_ratio": 0.15,
+    "merge_config": {
+        "self-attn": True,
+        "cross-attn": False,
+        "ffn": True,
+        "parallel": False,
+    },
+    "generator": torch.Generator("cuda").manual_seed(0),
+}
+
+HookManager.configure_hooks(
+    model_type=model_type,
+    default=(ToMeSDDitBlockHook, tomesd_config),
+)
+
+with HookManager.enabled():
+    HookManager.inject_hooks(model_type=model_type, pipe=pipe, model_attrs=model_attrs)
+    image = process_quick_start(pipe)
+    image.save("sd3_tomesd.png")
+```
+
+### Training-based Methods (Shiva-DiT)
+
+Load a trained Shiva checkpoint alongside its base model. The loader reads the checkpoint configuration, attaches the corresponding hooks, and loads the trained weights.
+
+```python
+import torch
+
+from shiva_dit.utils import process_quick_start
+from shiva_dit.utils.inference_utils import load_pipeline_for_inference
+
+pipe = load_pipeline_for_inference(
+    ckpt_path="/path/to/shiva-sd3.pt",
+    base_model_path="/path/to/stable-diffusion-3-medium-diffusers",
+    model_type="sd3",
+    device="cuda",
+    dtype=torch.bfloat16,
+    merge_lora=True,
+)
+image = process_quick_start(pipe, prompt="A ceramic teapot beside a window")
+image.save("sd3_shiva.png")
+```
+
+To train a Shiva checkpoint, use the recipes for SD3-Medium, FLUX.1-dev, or PixArt-Sigma. The training guide covers data preparation, router warmup, ratio-policy learning, and joint tuning. [Training documentation](shiva_dit/training/README.md)
+
+### Evaluation
+
+Use `benchmark.lut` to export a learned ratio schedule, `benchmark.generation` to generate images, and `benchmark.infer` to measure latency and FLOPs. The example below uses the same checkpoint and 50-step schedule for generation and timing.
 
 ```bash
 export BASE_MODEL=/path/to/stable-diffusion-3-medium-diffusers
 export SHIVA_CHECKPOINT=/path/to/shiva-sd3.pt
 
-python -m benchmark.generation \
-    --model_type sd3 \
-    --base_model_path "$BASE_MODEL" \
-    --ckpt_path "$SHIVA_CHECKPOINT" \
-    --jsonl_path examples/prompts.jsonl \
-    --output_dir runs/quickstart \
-    --samples_per_prompt 1 --steps 50 --skip_metrics
+python -m benchmark.lut     --base_model_path "$BASE_MODEL" --ckpt_path "$SHIVA_CHECKPOINT"     --steps 50 --output_path runs/shiva-50steps.pt
+
+python -m benchmark.generation     --model_type sd3 --base_model_path "$BASE_MODEL"     --ckpt_path "$SHIVA_CHECKPOINT" --gater_lut runs/shiva-50steps.pt     --jsonl_path examples/prompts.jsonl --output_dir runs/shiva-sd3     --steps 50 --samples_per_prompt 1 --skip_metrics
+
+python -m benchmark.infer     --model_type sd3 --base_model_path "$BASE_MODEL"     --ckpt_path "$SHIVA_CHECKPOINT" --gater_lut runs/shiva-50steps.pt     --jsonl_path examples/prompts.jsonl --steps 50
 ```
 
-The example generates one image per prompt and writes them to `runs/quickstart/`. Replace `examples/prompts.jsonl` with a JSONL file containing a `text` field on each line to generate from your own prompts.
+For image-quality evaluation, generate from the full evaluation prompt file and reuse the same initial latents across methods. The benchmark guide covers matched generation and scoring with FID, ImageReward, CLIP Score, and CLIP-IQA. [Benchmark documentation](benchmark/README.md)
 
-### Exporting a ratio schedule
+## Contribution
+### Baselines
 
-The learned retention ratios depend on the layer and denoising timestep. Export them as a lookup table (LUT) to reuse the same schedule across prompts. During generation, the router still scores tokens for each input.
+The repository includes the following token-reduction methods. Each uses the same hook framework and benchmark entry points.
 
-```bash
-python -m benchmark.lut \
-    --base_model_path "$BASE_MODEL" \
-    --ckpt_path "$SHIVA_CHECKPOINT" \
-    --steps 50 --height 1024 --width 1024 \
-    --output_path runs/shiva-50steps.pt
-```
+<table>
+  <thead>
+    <tr>
+      <th>Category</th>
+      <th>Method</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td rowspan="5"><b>Training-free</b><br>(Instant Injection)</td>
+      <td>ToMeSD<sup>[1]</sup></td>
+    </tr>
+    <tr>
+      <td>ToFu<sup>[2]</sup></td>
+    </tr>
+    <tr>
+      <td>SDTM<sup>[3]</sup></td>
+    </tr>
+    <tr>
+      <td>ToMA<sup>[4]</sup></td>
+    </tr>
+    <tr>
+      <td>IBTM<sup>[5]</sup></td>
+    </tr>
+    <tr>
+      <td rowspan="5"><b>Training-based</b></td>
+      <td>DiffCR<sup>[6]</sup></td>
+    </tr>
+    <tr>
+      <td>DyDiT<sup>[7]</sup></td>
+    </tr>
+    <tr>
+      <td>SparseDiT<sup>[8]</sup></td>
+    </tr>
+    <tr>
+      <td>NeuralSort<sup>[9]</sup></td>
+    </tr>
+    <tr>
+      <td><b>Shiva-DiT</b> (ours)</td>
+    </tr>
+  </tbody>
+</table>
 
-Pass `--gater_lut runs/shiva-50steps.pt` to the generation command. Use the same checkpoint, backbone, scheduler, and denoising step count when exporting and applying the LUT.
+The baseline guide lists the hooks, available configurations, and checkpoint requirements. [Baseline guide](baselines/README.md)
 
-### Training
+### Library
 
-The recipes warm up the router at a range of retention ratios, learn the ratio policy under an average retention target, and then jointly tune the router, policy, and backbone adapters. Distillation from a frozen teacher guides the sparse student. The training JSONL files pair `text` with `file_name`. Image paths are resolved relative to the image directory.
-
-```bash
-accelerate launch --module scripts.train.shiva_sd3_60 \
-    --base-model-path "$BASE_MODEL" \
-    --train-jsonl /path/to/MJHQ-30K/train.jsonl \
-    --image-dir /path/to/MJHQ-30K \
-    --val-jsonl /path/to/MJHQ-30K/val.jsonl \
-    --val-image-dir /path/to/MJHQ-30K \
-    --inference-jsonl /path/to/MJHQ-30K/val.jsonl \
-    --output-dir runs/shiva-sd3-60
-```
-
-The repository also includes `scripts.train.shiva_sd3_80`, `scripts.train.shiva_flux`, and `scripts.train.shiva_pixart` for the other training recipes. Use the resulting checkpoint with the generation and LUT commands above. [Training guide](shiva_dit/training/README.md)
-
-### Evaluation
-
-For a matched image-quality comparison, use the same prompt file and initial latents for every method. The generator restores each latent by prompt and sample index. `--strict_latents` makes the run fail if a required latent is missing or unreadable.
-
-```bash
-torchrun --nproc_per_node=2 -m benchmark.generation \
-    --model_type sd3 --base_model_path "$BASE_MODEL" \
-    --ckpt_path "$SHIVA_CHECKPOINT" --gater_lut runs/shiva-50steps.pt \
-    --jsonl_path /path/to/eval.jsonl --latent_source_dir /path/to/latents \
-    --output_dir runs/shiva-eval --steps 50 --samples_per_prompt 5 \
-    --strict_latents --skip_metrics
-
-python -m benchmark.evaluate \
-    --image_dir runs/shiva-eval --jsonl_path /path/to/eval.jsonl \
-    --fid_stats /path/to/mjhq_30k_stats.npz
-```
-
-The evaluator supports FID, ImageReward, CLIP Score, and CLIP-IQA. It uses the FID reference statistics supplied by `--fid_stats`. To measure latency, use the inference benchmark with the same denoising settings.
-
-```bash
-python -m benchmark.infer \
-    --model_type sd3 --base_model_path "$BASE_MODEL" \
-    --ckpt_path "$SHIVA_CHECKPOINT" --gater_lut runs/shiva-50steps.pt \
-    --jsonl_path examples/prompts.jsonl --steps 50 --height 1024 --width 1024
-```
-
-The benchmark reports end-to-end latency, DiT latency, peak allocated GPU memory, and average FLOPs per denoising step. [Benchmark guide](benchmark/README.md)
-
-## Features
-
-### Residual-based differentiable top-k
-
-The forward pass gathers the top-$k$ tokens by score and scatters their updated features back to the original positions. In the backward pass, pairwise comparisons give each token a soft rank. Comparing that rank with $k$ defines a differentiable inclusion probability. The estimator uses gradients from the executed path to train the router scores and the budget through this probability. [Pruner](shiva_dit/modules/pruner.py) · [Estimator](shiva_dit/utils/ste.py)
-
-### Context-aware router and adaptive ratio policy
-
-The router combines per-token features with pooled text, timestep, and layer embeddings. The ratio policy adds the outputs of separate layer and timestep branches and passes the sum with a bias through a sigmoid. At layer $\ell$ and timestep $t$, the resulting ratio $r_{\ell,t}$ gives a budget of $k = \lceil r_{\ell,t}N \rceil$ for $N$ image tokens. During training, an exponential moving average tracks retention and guides it toward the target while allowing different layers and denoising steps to use different budgets. [Router](shiva_dit/modules/router.py) · [Ratio policy](shiva_dit/modules/gater.py)
-
-## Contributing
-
-### Other Methods for Diffusion Models
-
-For comparison, we implement the training-free methods ToMeSD<sup>[1]</sup>, ToFu<sup>[2]</sup>, SDTM<sup>[3]</sup>, ToMA<sup>[4]</sup>, and IBTM<sup>[5]</sup>, as well as the trained methods DiffCR<sup>[6]</sup>, DyDiT<sup>[7]</sup>, SparseDiT<sup>[8]</sup>, and NeuralSort<sup>[9]</sup>. [Baseline guide](baselines/README.md)
-
-These methods use the same generation and benchmark entry points as Shiva-DiT. For example, the following command benchmarks ToMeSD using the bundled configuration.
-
-```bash
-python -m benchmark.infer \
-    --base_model_path "$BASE_MODEL" --meta_config benchmark/meta_config/tome_sd.json \
-    --jsonl_path examples/prompts.jsonl --steps 50 --height 1024 --width 1024
-```
-
-For a trained baseline, pass its compatible checkpoint with `--ckpt_path`. Use the same hardware, precision, prompts, and sampling settings for timing comparisons. The settings used in the paper are in Appendix B.4. [Paper](https://openreview.net/forum?id=uAAaT1KajI)
+The repository includes a modified subset of Hugging Face Diffusers with block and pipeline adaptations for the hooks. [Third-party notices](THIRD_PARTY.md)
 
 ## Citation
 
@@ -141,20 +177,20 @@ For a trained baseline, pass its compatible checkpoint with `--ckpt_path`. Use t
 
 ## References
 
-[1] Daniel Bolya and Judy Hoffman. *Token Merging for Fast Stable Diffusion.* CVPR Workshops, 2023. [Paper](https://openaccess.thecvf.com/content/CVPR2023W/ECV/html/Bolya_Token_Merging_for_Fast_Stable_Diffusion_CVPRW_2023_paper.html)
+[1] Bolya, D., and Hoffman, J. Token Merging for Fast Stable Diffusion. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops (CVPRW), pp. 4599–4603, 2023.
 
-[2] Minchul Kim, Shangqian Gao, Yen-Chang Hsu, Yilin Shen, and Hongxia Jin. *Token Fusion: Bridging the Gap Between Token Pruning and Token Merging.* WACV, 2024. [Paper](https://openaccess.thecvf.com/content/WACV2024/html/Kim_Token_Fusion_Bridging_the_Gap_Between_Token_Pruning_and_Token_WACV_2024_paper.html)
+[2] Kim, M., Gao, S., Hsu, Y.-C., Shen, Y., and Jin, H. Token Fusion: Bridging the Gap Between Token Pruning and Token Merging. In Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision (WACV), pp. 1383–1392, 2024.
 
-[3] Haipeng Fang, Sheng Tang, Juan Cao, Enshuo Zhang, Fan Tang, and Tong-Yee Lee. *Attend to Not Attended: Structure-then-Detail Token Merging for Post-training DiT Acceleration.* CVPR, 2025. [Paper](https://arxiv.org/abs/2505.11707)
+[3] Fang, H., Tang, S., Cao, J., Zhang, E., Tang, F., and Lee, T.-Y. Attend to Not Attended: Structure-then-Detail Token Merging for Post-training DiT Acceleration. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp. 18083–18092, 2025.
 
-[4] Wenbo Lu, Shaoyi Zheng, Yuxuan Xia, and Shengjie Wang. *ToMA: Token Merge with Attention for Diffusion Models.* ICML, 2025. [Paper](https://proceedings.mlr.press/v267/lu25v.html)
+[4] Lu, W., Zheng, S., Xia, Y., and Wang, S. ToMA: Token Merge with Attention for Diffusion Models. In Proceedings of the 42nd International Conference on Machine Learning (ICML), Proceedings of Machine Learning Research, vol. 267, pp. 40930–40951, 2025.
 
-[5] Haoyu Wu, Jingyi Xu, Hieu Le, and Dimitris Samaras. *Importance-Based Token Merging for Efficient Image and Video Generation.* ICCV, 2025. [Paper](https://openaccess.thecvf.com/content/ICCV2025/html/Wu_Importance-Based_Token_Merging_for_Efficient_Image_and_Video_Generation_ICCV_2025_paper.html)
+[5] Wu, H., Xu, J., Le, H., and Samaras, D. Importance-Based Token Merging for Efficient Image and Video Generation. In Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV), pp. 4983–4995, 2025.
 
-[6] Haoran You et al. *Layer- and Timestep-Adaptive Differentiable Token Compression Ratios for Efficient Diffusion Transformers.* CVPR, 2025. [Paper](https://arxiv.org/abs/2412.16822)
+[6] You, H., Barnes, C., Zhou, Y., Kang, Y., Du, Z., Zhou, W., Zhang, L., Nitzan, Y., Liu, X., Lin, Z., Shechtman, E., Amirghodsi, S., and Lin, Y. C. Layer- and Timestep-Adaptive Differentiable Token Compression Ratios for Efficient Diffusion Transformers. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pp. 18072–18082, 2025.
 
-[7] Wangbo Zhao et al. *Dynamic Diffusion Transformer.* ICLR, 2025. [Paper](https://proceedings.iclr.cc/paper_files/paper/2025/hash/a44a70acd5d0abc1a252ada9719dd06d-Abstract-Conference.html)
+[7] Zhao, W., Han, Y., Tang, J., Wang, K., Song, Y., Huang, G., Wang, F., and You, Y. Dynamic Diffusion Transformer. In Proceedings of the 13th International Conference on Learning Representations (ICLR), 2025.
 
-[8] Shuning Chang, Pichao Wang, Jiasheng Tang, Fan Wang, and Yi Yang. *SparseDiT: Token Sparsification for Efficient Diffusion Transformer.* NeurIPS, 2025. [Paper](https://proceedings.neurips.cc/paper_files/paper/2025/hash/83fe5a77502e3d4cfab5960aed0ee6c3-Abstract-Conference.html)
+[8] Chang, S., Wang, P., Tang, J., Wang, F., and Yang, Y. SparseDiT: Token Sparsification for Efficient Diffusion Transformer. In Advances in Neural Information Processing Systems (NeurIPS), vol. 38, 2025.
 
-[9] Aditya Grover, Eric Wang, Aaron Zweig, and Stefano Ermon. *Stochastic Optimization of Sorting Networks via Continuous Relaxations.* ICLR, 2019. [Paper](https://arxiv.org/abs/1903.08850)
+[9] Grover, A., Wang, E., Zweig, A., and Ermon, S. Stochastic Optimization of Sorting Networks via Continuous Relaxations. In Proceedings of the 7th International Conference on Learning Representations (ICLR), 2019.
