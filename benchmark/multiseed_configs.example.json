@@ -1,7 +1,0 @@
-{
-  "vanilla":   {"model_type": "sd3"},
-  "finetuned": {"model_type": "sd3", "ckpt_path": "/root/autodl-tmp/assets/models/finetuned-lora.pt"},
-  "shiva90":   {"model_type": "sd3", "ckpt_path": "/root/autodl-tmp/assets/models/shiva-sd3-80.pt", "gater_lut": "/root/autodl-tmp/assets/lut/lut-80_90.pt"},
-  "shiva80":   {"model_type": "sd3", "ckpt_path": "/root/autodl-tmp/assets/models/shiva-sd3-80.pt", "gater_lut": "/root/autodl-tmp/assets/lut/lut-80.pt"},
-  "shiva60":   {"model_type": "sd3", "ckpt_path": "/root/autodl-tmp/assets/models/shiva-sd3-60.pt", "gater_lut": "/root/autodl-tmp/assets/lut/lut-60.pt"}
-}

@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from shiva_dit.utils.phase_profiler import phase as _phase
 
 class CeilSTE(torch.autograd.Function):
     @staticmethod
@@ -73,20 +72,17 @@ class ShivaTopkFunc(torch.autograd.Function):
         B, N, D = x.shape
         ctx.pi_mode = pi_mode
         ctx.gumbel_tau = gumbel_tau
-        with _phase("  topk: argsort"):
-            idx_sorted = torch.argsort(logits, dim=-1, descending=True)
+        idx_sorted = torch.argsort(logits, dim=-1, descending=True)
 
         # .item() forces a device sync, so this is timed apart from the sort itself
-        with _phase("  topk: k .item() sync"):
-            k_int = int(torch.ceil(k_float).item())
-            k_int = max(1, min(k_int, N))
+        k_int = int(torch.ceil(k_float).item())
+        k_int = max(1, min(k_int, N))
 
-        with _phase("  topk: gather"):
-            topk_idx = idx_sorted[:, :k_int]
-            rest_idx = idx_sorted[:, k_int:]
+        topk_idx = idx_sorted[:, :k_int]
+        rest_idx = idx_sorted[:, k_int:]
 
-            x_selected = torch.gather(x, 1, topk_idx.unsqueeze(-1).expand(B, k_int, D))
-            x_rejected = torch.gather(x, 1, rest_idx.unsqueeze(-1).expand(B, N - k_int, D))
+        x_selected = torch.gather(x, 1, topk_idx.unsqueeze(-1).expand(B, k_int, D))
+        x_rejected = torch.gather(x, 1, rest_idx.unsqueeze(-1).expand(B, N - k_int, D))
         ctx.save_for_backward(x, logits, k_float, Ts, Tk, topk_idx, rest_idx)
         return x_selected, x_rejected, topk_idx.detach(), rest_idx.detach()
 

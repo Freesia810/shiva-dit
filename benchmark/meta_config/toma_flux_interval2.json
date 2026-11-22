@@ -1,0 +1,23 @@
+{
+  "training_mode": "hook_only",
+  "model_type": "flux-dev",
+  "hook_info": {
+    "class_name": "ToMADitBlockHook",
+    "config": {
+      "tile_nums": [
+        16,
+        16
+      ],
+      "merged_ratio": 0.5,
+      "merge_config": {
+        "self-attn": true,
+        "cross-attn": false,
+        "ffn": false,
+        "parallel": true
+      },
+      "skip_layer_nums": 5,
+      "skip_single_layer_nums": 5,
+      "merge_step_interval": 2
+    }
+  }
+}

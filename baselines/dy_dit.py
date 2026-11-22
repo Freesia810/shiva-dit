@@ -6,7 +6,6 @@ import torch.nn as nn
 from diffusers.models.transformers.transformer_flux import FluxSingleTransformerBlock
 from shiva_dit.hook import BaseDiTBlockHook, BaseDelegator, HookManager
 from shiva_dit.utils import global_context, get_pipeline, process_quick_start
-from shiva_dit.utils.phase_profiler import phase as _phase
 
 
 def _gumbel_sigmoid(logits, tau=1, hard=False, eps=1e-10, training=True, threshold=0.5):
@@ -191,8 +190,7 @@ class DynamicDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 # every step. A fixed-k budget needs no such round trip. Timed apart
                 # so the cost of "asking the device how many tokens survived" is
                 # attributable on its own.
-                with _phase("selector: .nonzero() sync"):
-                    self.token_idx = token_mask_for_indexing.nonzero()[:, 0]
+                self.token_idx = token_mask_for_indexing.nonzero()[:, 0]
             else:
                 self.token_idx = None
                 self.f_dynamic_batch = None

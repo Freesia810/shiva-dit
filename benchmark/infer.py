@@ -13,6 +13,8 @@ from accelerate.utils import set_seed
 
 def load_prompts(jsonl_path, limit=None):
     prompts = []
+    if jsonl_path is None:
+        return None
     if not os.path.exists(jsonl_path):
         print(f"Warning: JSONL file not found at {jsonl_path}. Using default prompt.")
         return None
@@ -187,10 +189,12 @@ class DiTProfiler:
              return self.cpu_accumulated * 1000
 
 def benchmark(args):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float16
+    if not torch.cuda.is_available():
+        raise RuntimeError("Latency and peak-memory measurement require CUDA")
+    device = "cuda"
+    dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[args.dtype]
 
-    if args.meta_config and os.path.exists(args.meta_config):
+    if args.meta_config:
         print(f"Found metadata config at {args.meta_config}")
         with open(args.meta_config, "r") as f:
             meta_config = json.load(f)
@@ -210,6 +214,7 @@ def benchmark(args):
         optimize_hooks=args.optimize_hooks,
         merge_lora=args.merge_lora,
         meta_config=meta_config,
+        expected_lut_steps=args.steps if args.steps > 0 else None,
     )
     
     model = None
@@ -223,9 +228,14 @@ def benchmark(args):
         total_p = count_parameters(model)
     
     prompts = load_prompts(args.jsonl_path, args.limit)
+    if prompts is None and args.jsonl_path is not None:
+        raise ValueError(f"Could not read prompts from {args.jsonl_path}")
     if prompts is None:
         prompts = ["A high quality photo of a cat", "A dog playing in the park"]
         if args.limit: prompts = prompts[:args.limit]
+
+    if not prompts:
+        raise ValueError("No prompts to benchmark")
 
     avg_flops_val = None
     avg_macs_val = None
@@ -235,7 +245,7 @@ def benchmark(args):
         flops_measurer = AverageFlopsMeasurer(model)
         flops_measurer.enable()
         
-        kwargs = {"prompt": prompts[0]}
+        kwargs = {"prompt": prompts[0], "num_images_per_prompt": args.batch}
         if args.steps > 0: kwargs["num_inference_steps"] = args.steps
         if args.height > 0: kwargs["height"] = args.height
         if args.width > 0: kwargs["width"] = args.width
@@ -261,8 +271,11 @@ def benchmark(args):
 
     print("-" * 50)
     print("Warming up (Clean run)...")
-    warmup_steps = 4 
-    _ = process_quick_start(pipe, prompt=prompts[0], num_inference_steps=warmup_steps)
+    warmup_steps = min(4, args.steps) if args.steps > 0 else 4
+    _ = process_quick_start(
+        pipe, prompt=prompts[0], num_inference_steps=warmup_steps,
+        height=args.height, width=args.width, num_images_per_prompt=args.batch,
+    )
     torch.cuda.synchronize()
 
     if dit_profiler:
@@ -375,7 +388,7 @@ if __name__ == "__main__":
     parser.add_argument("--ckpt_path", type=str, default=None, help="Path to checkpoint.pt. If None, runs baseline.")
     parser.add_argument("--model_type", type=str, default=None, help="Required if ckpt_path is None (e.g. 'flux-dev').")
     parser.add_argument("--base_model_path", type=str, default=None)
-    parser.add_argument("--jsonl_path", type=str, default="test/training/dataset/meta.jsonl", help="Dataset jsonl file")
+    parser.add_argument("--jsonl_path", type=str, default=None, help="Dataset jsonl file")
     parser.add_argument("--batch", type=int, default=1,
                         help="images per pipeline call (num_images_per_prompt)")
     parser.add_argument("--skip_layers", type=int, nargs="+", default=None,
@@ -395,11 +408,13 @@ if __name__ == "__main__":
     parser.add_argument("--merge_lora", action="store_true", default=True, help="Merge LoRA weights for speed")
     parser.add_argument("--no_merge_lora", action="store_false", dest="merge_lora")
     
-    parser.add_argument("--measure_flops", action="store_true", default=True, help="Enable FLOPs measurement (requires calflops)")
+    parser.add_argument("--measure_flops", action="store_true", default=True, help="Enable FLOPs measurement")
     parser.add_argument("--no_measure_flops", action="store_false", dest="measure_flops")
     
     parser.add_argument("--save_images", action="store_true", help="Save generated images to disk")
     
     args = parser.parse_args()
+    if args.gater_lut and args.steps < 1:
+        parser.error("--gater_lut requires --steps matching the exported schedule")
         
     benchmark(args)

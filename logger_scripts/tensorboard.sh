@@ -1,1 +1,0 @@
-nohup tensorboard --logdir=checkpoints/logs/ --max_reload_threads 4 --port=6006 > tb.log 2>&1 &

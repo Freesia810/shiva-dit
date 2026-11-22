@@ -1,4 +1,5 @@
-from shiva_dit.training import DiffusionModelTrainer, LoraConfig, TrainerConfig
+from shiva_dit.training import LoraConfig
+from scripts.train.run_shiva import train
 from shiva_dit.shiva_hook import ShivaDitBlockHook
 
 HookType = ShivaDitBlockHook
@@ -143,11 +144,6 @@ trainer_config = {
     "log_with_tensorboard": True,
 }
 
-if __name__ == "__main__":
-    print(hook_config)
-    print(lora_config)
-    print(trainer_config)
 
-    config = TrainerConfig(**trainer_config)
-    trainer = DiffusionModelTrainer(config=config)
-    trainer.train()
+if __name__ == "__main__":
+    train(trainer_config)

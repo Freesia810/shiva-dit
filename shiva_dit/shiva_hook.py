@@ -12,7 +12,6 @@ from shiva_dit.utils.ste import ceil_ste
 from shiva_dit.utils import parse_image_rotary_emb, join_image_rotary_emb
 
 from shiva_dit.modules.router import ShivaRouter
-from shiva_dit.utils.phase_profiler import phase as _phase
 from shiva_dit.modules.gater import ShivaGaterPolicy, ShivaRatioPolicy
 from shiva_dit.modules.pruner import ShivaContextPruner, ShivaPrunerExpert
 from shiva_dit.modules.fuser import ShivaFuserExpert
@@ -366,23 +365,22 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 and self.ratio_cache is not None
                 and not self.training
             ):
-                with _phase("ratio (LUT lookup)"):
-                    current_t_index = global_context.current_iteration
-                    # The LUT is fixed for a checkpoint, so read it into Python once
-                    # and index it with plain ints from then on. Reading the tensor
-                    # element per call forced a device sync on every one of the
-                    # 24 x steps calls and stopped the CPU running ahead of the GPU.
-                    if getattr(self, "_ratio_cpu", None) is None:
-                        self._ratio_cpu = self.ratio_cache.detach().float().cpu().tolist()
-                    ratio_f = self._ratio_cpu[self.layer_idx][current_t_index]
-                    ratio_f = min(max(ratio_f, 0.01), 1.0)
-                    k_python = max(1, min(int(math.ceil(ratio_f * N)), N))
-                    if K_ALIGN > 1:
-                        k_python = min(
-                            ((k_python + K_ALIGN - 1) // K_ALIGN) * K_ALIGN, N)
-                    if K_JITTER:
-                        k_python = max(
-                            1, min(k_python + _K_RNG.randint(-K_JITTER, K_JITTER), N))
+                current_t_index = global_context.current_iteration
+                # The LUT is fixed for a checkpoint, so read it into Python once
+                # and index it with plain ints from then on. Reading the tensor
+                # element per call forced a device sync on every one of the
+                # 24 x steps calls and stopped the CPU running ahead of the GPU.
+                if getattr(self, "_ratio_cpu", None) is None:
+                    self._ratio_cpu = self.ratio_cache.detach().float().cpu().tolist()
+                ratio_f = self._ratio_cpu[self.layer_idx][current_t_index]
+                ratio_f = min(max(ratio_f, 0.01), 1.0)
+                k_python = max(1, min(int(math.ceil(ratio_f * N)), N))
+                if K_ALIGN > 1:
+                    k_python = min(
+                        ((k_python + K_ALIGN - 1) // K_ALIGN) * K_ALIGN, N)
+                if K_JITTER:
+                    k_python = max(
+                        1, min(k_python + _K_RNG.randint(-K_JITTER, K_JITTER), N))
 
             if predicted_ratio is None and k_python is None:
                 if self.image_ratio_policy is not None:
@@ -435,36 +433,35 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
             # Router Call
             scores_shared = False
-            with _phase("router"):
-                # The layer index never changes for a given hook, so its embedding is
-                # a constant; looking it up on every block of every step is one kernel
-                # launch per call for a value that was already known.
-                # `layer_id_tensor` is broadcast to the batch, so the cache is keyed
-                # on batch and dtype as well; a different batch size must miss it.
-                emb_key = (hidden_states.shape[0], dtype)
-                cached_emb = getattr(self, "_layer_emb_cache", None)
-                if cached_emb is not None and cached_emb[0] == emb_key:
-                    router_layer_emb_vector = cached_emb[1]
-                else:
-                    router_layer_emb_vector = self.router_layer_embedder(
-                        layer_id_tensor).to(dtype)
-                    if not self.training:
-                        self._layer_emb_cache = (emb_key, router_layer_emb_vector)
-                token_scores_logits = self.router(
-                    hidden_states=hidden_states,
-                    pooled_encoder_states=pooled_encoder_vector,
-                    temb=pure_temb,
-                    layer_emb=router_layer_emb_vector,
-                )
+            # The layer index never changes for a given hook, so its embedding is
+            # a constant; looking it up on every block of every step is one kernel
+            # launch per call for a value that was already known.
+            # `layer_id_tensor` is broadcast to the batch, so the cache is keyed
+            # on batch and dtype as well; a different batch size must miss it.
+            emb_key = (hidden_states.shape[0], dtype)
+            cached_emb = getattr(self, "_layer_emb_cache", None)
+            if cached_emb is not None and cached_emb[0] == emb_key:
+                router_layer_emb_vector = cached_emb[1]
+            else:
+                router_layer_emb_vector = self.router_layer_embedder(
+                    layer_id_tensor).to(dtype)
+                if not self.training:
+                    self._layer_emb_cache = (emb_key, router_layer_emb_vector)
+            token_scores_logits = self.router(
+                hidden_states=hidden_states,
+                pooled_encoder_states=pooled_encoder_vector,
+                temb=pure_temb,
+                layer_emb=router_layer_emb_vector,
+            )
 
-                if (
-                    token_scores_logits.shape[0] % 2 == 0
-                    and token_scores_logits.shape[0] > 1
-                ):
-                    scores_uncond, scores_cond = token_scores_logits.chunk(2, dim=0)
-                    unified_scores = torch.maximum(scores_uncond, scores_cond)
-                    token_scores_logits = torch.cat([unified_scores, unified_scores], dim=0)
-                    scores_shared = True
+            if (
+                token_scores_logits.shape[0] % 2 == 0
+                and token_scores_logits.shape[0] > 1
+            ):
+                scores_uncond, scores_cond = token_scores_logits.chunk(2, dim=0)
+                unified_scores = torch.maximum(scores_uncond, scores_cond)
+                token_scores_logits = torch.cat([unified_scores, unified_scores], dim=0)
+                scores_shared = True
 
             # Only needed while a loss is being computed. Holding a graph-produced
             # tensor on self across calls is exactly what breaks CUDA-graph replay (its
@@ -475,23 +472,21 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             self.token_scores_logits = token_scores_logits if keep_logits else None
 
             # Execute Image Pruning
-            with _phase("topk + gather"):
-                # The discarded tokens are only read by the fuse expert, which the
-                # eval path never reaches, and by the metric collection during
-                # validation. Everywhere else they are restored from `hidden_states`
-                # itself, so neither gathering them nor ordering the whole score
-                # vector is necessary.
-                need_rej = (self.training or getattr(self, "is_validating", False))
-                x_sel, x_rej, sel_idx, rej_idx = self._select_topk(
-                    hidden_states, token_scores_logits, k_float, D, need_rej,
-                    scores_shared
-                )
-                if not need_rej:
-                    self._dense_input = hidden_states
+            # The discarded tokens are only read by the fuse expert, which the
+            # eval path never reaches, and by the metric collection during
+            # validation. Everywhere else they are restored from `hidden_states`
+            # itself, so neither gathering them nor ordering the whole score
+            # vector is necessary.
+            need_rej = (self.training or getattr(self, "is_validating", False))
+            x_sel, x_rej, sel_idx, rej_idx = self._select_topk(
+                hidden_states, token_scores_logits, k_float, D, need_rej,
+                scores_shared
+            )
+            if not need_rej:
+                self._dense_input = hidden_states
 
         # --- RoPE Gathering ---
-        with _phase("rope gather"):
-            sel_rope = self._gather_rope(image_rotary_emb, sel_idx, sel_idx_ctx)
+        sel_rope = self._gather_rope(image_rotary_emb, sel_idx, sel_idx_ctx)
 
         return (
             bound,
@@ -609,8 +604,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         bound.arguments["image_rotary_emb"] = sel_rope
         bound.arguments["encoder_hidden_states"] = final_topk_context
 
-        with _phase("block (attn+FFN) @ k"):
-            processed_output = func(*bound.args, **bound.kwargs)
+        processed_output = func(*bound.args, **bound.kwargs)
 
         if isinstance(processed_output, tuple):
             processed_encoder_states, processed_hidden_states = processed_output
@@ -620,33 +614,32 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         # Scatter Image
         if sel_idx is not None:
-            with _phase("scatter"):
-                B, _, D = processed_hidden_states.shape
-                if x_rej is None:
-                    # Untouched positions already hold the right values in the block's
-                    # own input, so one copy plus one scatter replaces the round trip
-                    # that took the discarded tokens out and put them straight back.
-                    dense = self._dense_input
-                    self._dense_input = None
-                    final_hidden_states = dense.to(
-                        processed_hidden_states.dtype).clone()
+            B, _, D = processed_hidden_states.shape
+            if x_rej is None:
+                # Untouched positions already hold the right values in the block's
+                # own input, so one copy plus one scatter replaces the round trip
+                # that took the discarded tokens out and put them straight back.
+                dense = self._dense_input
+                self._dense_input = None
+                final_hidden_states = dense.to(
+                    processed_hidden_states.dtype).clone()
+                final_hidden_states.scatter_(
+                    1, sel_idx.unsqueeze(-1).expand(-1, -1, D),
+                    processed_hidden_states)
+            else:
+                final_hidden_states = torch.empty(
+                    (B, N, D),
+                    device=processed_hidden_states.device,
+                    dtype=processed_hidden_states.dtype,
+                )
+                final_hidden_states.scatter_(
+                    1, sel_idx.unsqueeze(-1).expand(-1, -1, D),
+                    processed_hidden_states
+                )
+                if x_rej.shape[1] > 0:
                     final_hidden_states.scatter_(
-                        1, sel_idx.unsqueeze(-1).expand(-1, -1, D),
-                        processed_hidden_states)
-                else:
-                    final_hidden_states = torch.empty(
-                        (B, N, D),
-                        device=processed_hidden_states.device,
-                        dtype=processed_hidden_states.dtype,
+                        1, rej_idx.unsqueeze(-1).expand(-1, -1, D), x_rej
                     )
-                    final_hidden_states.scatter_(
-                        1, sel_idx.unsqueeze(-1).expand(-1, -1, D),
-                        processed_hidden_states
-                    )
-                    if x_rej.shape[1] > 0:
-                        final_hidden_states.scatter_(
-                            1, rej_idx.unsqueeze(-1).expand(-1, -1, D), x_rej
-                        )
         else:
             final_hidden_states = processed_hidden_states
 

@@ -19,7 +19,7 @@ except ImportError:
     )
 
 
-LOCAL_BERT_PATH = "../bert-base-uncased"
+LOCAL_BERT_PATH = os.environ.get("SHIVA_METRIC_BERT_PATH", "../bert-base-uncased")
 from transformers import BertTokenizer, BertModel
 
 _original_tokenizer_from_pretrained = BertTokenizer.from_pretrained
@@ -119,76 +119,6 @@ class DirectClipScore:
         return 100.0 * cos.clamp(min=0).mean()
 
 
-SCOPE_MODULES = {
-    "ffn":         ["ff.net.0.proj", "ff.net.2"],
-    "ffn_attnout": ["ff.net.0.proj", "ff.net.2", "attn.to_out.0"],
-    "all":         None,
-}
-
-
-def apply_quantization(pipe, args):
-    """Simulated INT8 on selected transformer blocks.
-
-    Layer choice is not uniform: block 0 is skipped by the pruner outright and block 1
-    is the densest the LUT keeps, and both measured among the worst under INT8
-    (benchmark/quant_calibrated.py), so the default excludes them. Everything else is
-    quantised, which is what a deployment would do -- the point of the experiment is
-    what stacking costs in quality, not a best case.
-    """
-    from optimum.quanto import Calibration, freeze, qint8, quantize
-
-    transformer = pipe.transformer
-    blocks = transformer.transformer_blocks
-    chosen = args.quant_layers
-    if chosen is None:
-        chosen = [i for i in range(len(blocks)) if i not in (0, 1)]
-    include_suffixes = SCOPE_MODULES[args.quant_scope]
-
-    kw = {"weights": qint8}
-    if args.quantize == "w8a8":
-        kw["activations"] = qint8
-
-    n_mod = 0
-    for i in chosen:
-        if i >= len(blocks):
-            continue
-        blk = blocks[i]
-        if include_suffixes is None:
-            quantize(blk, **kw)
-            n_mod += sum(1 for _, m in blk.named_modules()
-                         if isinstance(m, torch.nn.Linear))
-        else:
-            have = {n for n, m in blk.named_modules()
-                    if isinstance(m, torch.nn.Linear)}
-            inc = [t for t in include_suffixes if t in have]
-            if not inc:
-                continue
-            quantize(blk, include=inc, **kw)
-            n_mod += len(inc)
-
-    print(f"[quant] {args.quantize} on {len(chosen)} blocks "
-          f"(scope={args.quant_scope}), {n_mod} Linears")
-
-    if args.quantize == "w8a8":
-        # Activation ranges must come from real traffic, and from prompts other than the
-        # ones being scored -- a range fitted on the evaluation sample flatters itself.
-        calib_prompts = [
-            "a photograph of a busy street market at noon, people and awnings",
-            "an oil painting of a snowy mountain range under a clear sky",
-        ]
-        print(f"[quant] calibrating activation ranges on {len(calib_prompts)} "
-              f"held-out prompts ...")
-        with Calibration(), torch.no_grad():
-            for cp in calib_prompts:
-                pipe(prompt=cp, negative_prompt="",
-                     num_inference_steps=(args.steps if args.steps > 0 else 28),
-                     guidance_scale=7.0, height=args.height, width=args.width,
-                     generator=torch.Generator(device="cpu").manual_seed(0),
-                     output_type="latent")
-    freeze(transformer)
-    print("[quant] frozen")
-
-
 class GenerationEvaluator:
     def __init__(self, device, fid_stats_path=None):
         self.device = device
@@ -202,9 +132,7 @@ class GenerationEvaluator:
         # The generation boxes keep CLIP checkpoints beside the repo; a scoring-only
         # machine (e.g. the Mac that computes metrics) has no such directory, so fall
         # back to the hub id rather than losing CLIP Score and CLIP-IQA entirely.
-        clip_path = "../openai-clip-vit-base-patch16"
-        if not os.path.isdir(clip_path):
-            clip_path = "openai/clip-vit-base-patch16"
+        clip_path = os.environ.get("SHIVA_METRIC_CLIP_PATH", "openai/clip-vit-base-patch16")
         # Loaded independently: CLIP-IQA breaks on some torchmetrics/transformers
         # pairings, and sharing one try block would take CLIP Score down with it --
         # which is the metric the multi-seed comparison actually turns on.
@@ -235,7 +163,11 @@ class GenerationEvaluator:
         if RM:
             print("Loading ImageReward model...")
             try:
-                self.ir_model = RM.load("../ImageReward/ImageReward.pt", device=device, med_config="../ImageReward/med_config.json")
+                self.ir_model = RM.load(
+                    os.environ.get("SHIVA_METRIC_IR_PATH", "ImageReward-v1.0"),
+                    device=device,
+                    med_config=os.environ.get("SHIVA_METRIC_IR_CONFIG"),
+                )
             except Exception as e:
                 print(f"Error loading ImageReward: {e}")
 
@@ -315,6 +247,8 @@ def load_data(jsonl_path, image_dir, limit=None):
             for i, line in enumerate(f):
                 if limit and i >= limit:
                     break
+                if not line.strip():
+                    continue
                 item = json.loads(line)
 
                 img_rel_path = (
@@ -352,7 +286,7 @@ def main(args):
     else:
         device = "cpu"
 
-    dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float16
+    dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[args.dtype]
 
     print(f"[Process {rank}/{world_size}] Initialized on {device}")
 
@@ -373,27 +307,27 @@ def main(args):
     # Or initialize on all if we want real-time feedback per card (but final compute is tricky)
     # Here we initialize on all for simplicity, but only Rank 0 prints final aggregation.
     evaluator = None
-    if not args.skip_metrics:
+    if not args.skip_metrics and world_size == 1:
         evaluator = GenerationEvaluator(device, fid_stats_path=args.fid_stats)
 
     # Load ALL data first
     all_data_items = load_data(args.jsonl_path, args.image_dir, args.limit)
     if not all_data_items:
-        return
+        raise ValueError(f"No prompts loaded from {args.jsonl_path}")
 
     # --- [MODIFIED] Data Sharding ---
     data_items = all_data_items[rank::world_size]
     print(f"[Process {rank}] Processing {len(data_items)} items (subset of {len(all_data_items)})")
 
-    if args.meta_config and os.path.exists(args.meta_config):
+    if args.meta_config:
         print(f"Found metadata config at {args.meta_config}")
         with open(args.meta_config, "r") as f:
             meta_config = json.load(f)
     else:
         meta_config = None
 
-    if args.model_type:
-        print(f"Loading Pipeline...")
+    if args.model_type or args.ckpt_path or meta_config:
+        print("Loading pipeline...")
         pipe = load_pipeline_for_inference(
             ckpt_path=args.ckpt_path,
             base_model_path=args.base_model_path,
@@ -404,13 +338,12 @@ def main(args):
             optimize_hooks=args.optimize_hooks,
             merge_lora=args.merge_lora,
             meta_config=meta_config,
+            strict_checkpoint=args.strict_checkpoint,
+            expected_lut_steps=args.steps if args.steps > 0 else None,
         )
         print(f"Pipeline device: {next(pipe.transformer.parameters()).device}")
-
-        if args.quantize:
-            apply_quantization(pipe, args)
     else:
-        pipe = None
+        raise ValueError("Provide --model_type, --ckpt_path, or --meta_config")
 
     if args.force_fixed_ratio > 0:
         print(f"[INFO] Disabling Policy Network...")
@@ -466,9 +399,8 @@ def main(args):
             # Skip existing files
             if os.path.exists(file_path):
                 try:
-                    gen_image = Image.open(file_path).convert("RGB")
-                    # Force verify image is valid
-                    gen_image.load() 
+                    with Image.open(file_path) as saved_image:
+                        gen_image = saved_image.convert("RGB")
                 except Exception as e:
                     print(f"[Rank {rank}] Error loading {file_name}, will regenerate: {e}")
                     gen_image = None
@@ -483,12 +415,18 @@ def main(args):
                     
                     if os.path.exists(latent_path):
                         try:
-                            latents = torch.load(latent_path, map_location=device)
+                            latents = torch.load(latent_path, map_location=device, weights_only=True)
                             latents = latents.to(dtype=dtype)
+                            if args.strict_latents and not torch.isfinite(latents).all():
+                                raise ValueError("Latent contains non-finite values")
                         except Exception as e:
+                            if args.strict_latents:
+                                raise RuntimeError(f"Cannot load required latent {latent_path}") from e
                             print(f"[Rank {rank}] Error loading latent {latent_path}: {e}")
                             latents = None
                     else:
+                        if args.strict_latents:
+                            raise FileNotFoundError(latent_path)
                         if rank == 0:
                             print(f"[Warning] Latent file not found: {latent_path}. Falling back to random.")
 
@@ -519,26 +457,24 @@ def main(args):
 
     pbar.close()
     
-    if evaluator and not args.skip_metrics:
-        if world_size > 1:
-            print(f"[Process {rank}] Generation finished. Skipping aggregated metrics calculation in multi-GPU mode.")
-            print(f"Please run a standalone evaluation script on '{save_dir}' once all processes are done.")
-        else:
-            print(f"\nComputing final metrics on {total_samples} samples...")
-            metrics = evaluator.compute(generated_images_dir=save_dir)
+    if world_size > 1 and rank == 0:
+        print(f"Run benchmark.evaluate on '{save_dir}' after all processes finish.")
+    if evaluator:
+        print(f"\nComputing final metrics on {total_samples} samples...")
+        metrics = evaluator.compute(generated_images_dir=save_dir)
 
-            print("\n" + "=" * 20 + " Benchmark Report " + "=" * 20)
-            print(f"Model: {args.ckpt_path or args.model_type}")
-            print(f"Config: {'FIXED ' + str(args.force_fixed_ratio) if args.force_fixed_ratio > 0 else 'ADAPTIVE'}")
-            print(f"Total Samples: {total_samples}")
-            print("-" * 30)
-            for k, v in metrics.items():
-                print(f"{k:<15}: {v:.4f}")
-            print("=" * 56)
+        print("\n" + "=" * 20 + " Benchmark Report " + "=" * 20)
+        print(f"Model: {args.ckpt_path or args.model_type}")
+        print(f"Config: {'FIXED ' + str(args.force_fixed_ratio) if args.force_fixed_ratio > 0 else 'ADAPTIVE'}")
+        print(f"Total Samples: {total_samples}")
+        print("-" * 30)
+        for k, v in metrics.items():
+            print(f"{k:<15}: {v:.4f}")
+        print("=" * 56)
 
-            # Save metrics to json
-            with open(os.path.join(save_dir, "metrics.json"), "w") as f:
-                json.dump(metrics, f, indent=4)
+        # Save metrics to json
+        with open(os.path.join(save_dir, "metrics.json"), "w") as f:
+            json.dump(metrics, f, indent=4)
 
 
 if __name__ == "__main__":
@@ -583,7 +519,7 @@ if __name__ == "__main__":
     parser.add_argument("--steps", type=int, default=-1)
     parser.add_argument("--height", type=int, default=1024)
     parser.add_argument("--width", type=int, default=1024)
-    parser.add_argument("--dtype", type=str, default="bf16")
+    parser.add_argument("--dtype", choices=("bf16", "fp16", "fp32"), default="bf16")
 
     # Shiva
     parser.add_argument("--optimize_hooks", action="store_true", default=True)
@@ -607,22 +543,10 @@ if __name__ == "__main__":
         default=None, 
         help="Path to directory containing pre-dumped latents (e.g. from machine A)."
     )
-    parser.add_argument(
-        "--quantize", default=None,
-        choices=["w8", "w8a8"],
-        help="simulate INT8 on the DiT before generating. Quality only -- quanto's "
-             "CUDA int8 path is not faster than fp16 here, so latency is measured "
-             "separately in benchmark/quant_latency.py",
-    )
-    parser.add_argument(
-        "--quant_layers", type=int, nargs="+", default=None,
-        help="transformer block indices to quantise; default = all but 0 and 1, "
-             "which the LUT keeps densest and which measured worst under INT8",
-    )
-    parser.add_argument(
-        "--quant_scope", default="ffn", choices=["ffn", "ffn_attnout", "all"],
-        help="which Linears inside each chosen block to quantise",
-    )
+    parser.add_argument("--strict_latents", action="store_true",
+                        help="fail on missing/unreadable fixed latents instead of drawing random noise")
+    parser.add_argument("--strict_checkpoint", action="store_true",
+                        help="fail if checkpoint contains tensors that the loaded model does not use")
     parser.add_argument(
         "--skip_metrics", 
         action="store_true", 
@@ -630,5 +554,14 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+
+    if args.samples_per_prompt < 1:
+        parser.error("--samples_per_prompt must be positive")
+    if args.gater_lut and args.steps < 1:
+        parser.error("--gater_lut requires --steps matching the exported schedule")
+    if args.force_fixed_ratio > 1 or (args.force_fixed_ratio > 0 and args.gater_lut):
+        parser.error("A fixed ratio must be at most 1 and cannot be combined with --gater_lut")
+    if args.strict_latents and not args.latent_source_dir:
+        parser.error("--strict_latents requires --latent_source_dir")
 
     main(args)

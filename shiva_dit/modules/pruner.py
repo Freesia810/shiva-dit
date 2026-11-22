@@ -5,7 +5,6 @@ import torch.nn.utils.parametrizations as parametrizations
 import numpy as np
 
 from shiva_dit.utils.ste import ShivaTopkFunc
-from shiva_dit.utils.phase_profiler import phase as _phase
 
 
 def hard_topk_select(x, logits, k, need_rejected=True, scores_shared=False):
@@ -30,28 +29,23 @@ def hard_topk_select(x, logits, k, need_rejected=True, scores_shared=False):
     if isinstance(k, int):
         k_int = k
     else:
-        with _phase("  topk: k .item() sync"):
-            k_int = int(torch.ceil(k).item())
+        k_int = int(torch.ceil(k).item())
     k_int = max(1, min(k_int, N))
 
     if not need_rejected:
-        with _phase("  topk: argsort"):
-            src = logits[:1] if scores_shared else logits
-            topk_idx = torch.topk(src, k_int, dim=-1, sorted=False).indices
-            if scores_shared and B > 1:
-                topk_idx = topk_idx.expand(B, k_int)
-        with _phase("  topk: gather"):
-            x_selected = torch.gather(x, 1, topk_idx.unsqueeze(-1).expand(B, k_int, D))
+        src = logits[:1] if scores_shared else logits
+        topk_idx = torch.topk(src, k_int, dim=-1, sorted=False).indices
+        if scores_shared and B > 1:
+            topk_idx = topk_idx.expand(B, k_int)
+        x_selected = torch.gather(x, 1, topk_idx.unsqueeze(-1).expand(B, k_int, D))
         return x_selected, None, topk_idx, None
 
-    with _phase("  topk: argsort"):
-        idx_sorted = torch.argsort(logits, dim=-1, descending=True)
+    idx_sorted = torch.argsort(logits, dim=-1, descending=True)
 
-    with _phase("  topk: gather"):
-        topk_idx = idx_sorted[:, :k_int]
-        rest_idx = idx_sorted[:, k_int:]
-        x_selected = torch.gather(x, 1, topk_idx.unsqueeze(-1).expand(B, k_int, D))
-        x_rejected = torch.gather(x, 1, rest_idx.unsqueeze(-1).expand(B, N - k_int, D))
+    topk_idx = idx_sorted[:, :k_int]
+    rest_idx = idx_sorted[:, k_int:]
+    x_selected = torch.gather(x, 1, topk_idx.unsqueeze(-1).expand(B, k_int, D))
+    x_rejected = torch.gather(x, 1, rest_idx.unsqueeze(-1).expand(B, N - k_int, D))
     return x_selected, x_rejected, topk_idx, rest_idx
 
 
