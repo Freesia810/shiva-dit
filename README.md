@@ -60,6 +60,7 @@ flowchart LR
 | Hook injection, sparse block execution, and restoration | [Installer](shiva_dit/shiva_installer.py) · [Block hook](shiva_dit/shiva_hook.py) |
 | Staged training and checkpoint saving | [Training guide](shiva_dit/training/README.md) |
 | Generation, evaluation, and latency | [Benchmark guide](benchmark/README.md) |
+| Paper figures | [Plotting guide](scripts/viz/README.md) |
 
 ## Models and data
 

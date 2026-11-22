@@ -290,10 +290,6 @@ def main(args):
 
     print(f"[Process {rank}/{world_size}] Initialized on {device}")
 
-    if args.force_fixed_ratio > 0:
-        if "fixed" not in args.output_dir:
-            args.output_dir = f"{args.output_dir}_fixed_{args.force_fixed_ratio}"
-    
     save_dir = args.output_dir
     # Only Rank 0 creates directory to avoid race conditions
     if rank == 0:
@@ -345,32 +341,11 @@ def main(args):
     else:
         raise ValueError("Provide --model_type, --ckpt_path, or --meta_config")
 
-    if args.force_fixed_ratio > 0:
-        print(f"[INFO] Disabling Policy Network...")
-        print(f"[INFO] Forcing Fixed Ratio: {args.force_fixed_ratio}")
-        from shiva_dit.hook import HookManager
-        
-        hooks_modified = 0
-
-        for hook in HookManager.get_all_hooks().values():
-            if hook.__class__.__name__ == "ShivaDitBlockHook":
-                hook.image_ratio_policy = None
-                hook.fixed_image_ratio = args.force_fixed_ratio
-                hooks_modified += 1
-        
-        if hooks_modified == 0:
-            raise Exception("[Error] Could not find 'shiva_hook' on pipeline. Please check hook registration.")
-        else:
-            print(f"[SUCCESS] Modified {hooks_modified} hook(s) for Fixed Baseline.")
-    else:
-        print(f"\n[INFO] Inference Mode: Adaptive (Policy Enabled)")
-
     total_samples = len(data_items) * args.samples_per_prompt
     
     if rank == 0:
         print("-" * 50)
         print(f"Starting Benchmark: {args.model_type}")
-        print(f"Mode: {'FIXED ' + str(args.force_fixed_ratio) if args.force_fixed_ratio > 0 else 'ADAPTIVE'}")
         print(f"Global Prompts: {len(all_data_items)}")
         print(f"Local Prompts (Rank {rank}): {len(data_items)}")
         print(f"Samples per Prompt: {args.samples_per_prompt}")
@@ -465,7 +440,6 @@ def main(args):
 
         print("\n" + "=" * 20 + " Benchmark Report " + "=" * 20)
         print(f"Model: {args.ckpt_path or args.model_type}")
-        print(f"Config: {'FIXED ' + str(args.force_fixed_ratio) if args.force_fixed_ratio > 0 else 'ADAPTIVE'}")
         print(f"Total Samples: {total_samples}")
         print("-" * 30)
         for k, v in metrics.items():
@@ -531,13 +505,6 @@ if __name__ == "__main__":
     )
     
     parser.add_argument(
-        "--force_fixed_ratio", 
-        type=float, 
-        default=-1.0, 
-        help="If > 0, disables Policy and forces a fixed ratio. (e.g. 0.64)"
-    )
-
-    parser.add_argument(
         "--latent_source_dir", 
         type=str, 
         default=None, 
@@ -559,8 +526,6 @@ if __name__ == "__main__":
         parser.error("--samples_per_prompt must be positive")
     if args.gater_lut and args.steps < 1:
         parser.error("--gater_lut requires --steps matching the exported schedule")
-    if args.force_fixed_ratio > 1 or (args.force_fixed_ratio > 0 and args.gater_lut):
-        parser.error("A fixed ratio must be at most 1 and cannot be combined with --gater_lut")
     if args.strict_latents and not args.latent_source_dir:
         parser.error("--strict_latents requires --latent_source_dir")
 
