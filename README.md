@@ -1,5 +1,10 @@
 # Shiva-DiT
 
+[![TMLR 2026](https://img.shields.io/badge/TMLR-2026-blue.svg)](https://openreview.net/forum?id=uAAaT1KajI)
+[![arXiv 2602.05605](https://img.shields.io/badge/arXiv-2602.05605-b31b1b.svg)](https://arxiv.org/abs/2602.05605)
+[![GitHub repository](https://img.shields.io/badge/GitHub-Repository-black)](https://github.com/Freesia810/shiva-dit)
+[![Apache 2.0 license](https://img.shields.io/badge/License-Apache--2.0-green.svg)](LICENSE)
+
 Residual-Based Differentiable Top-k Selection for Efficient Diffusion Transformers
 
 Published in Transactions on Machine Learning Research, November 2026. [TMLR article](https://openreview.net/forum?id=uAAaT1KajI)
