@@ -6,13 +6,38 @@ import numpy as np
 
 from shiva_dit.utils.ste import ShivaTopkFunc
 
+
+def hard_topk_select(x, logits, k, need_rejected=True):
+    """Select tokens without invoking the custom backward function."""
+    B, N, D = x.shape
+
+    if isinstance(k, int):
+        k_int = k
+    else:
+        k_int = int(torch.ceil(k).item())
+    k_int = max(1, min(k_int, N))
+
+    # Match the training path's order and choices at tied scores.
+    idx_sorted = torch.argsort(logits, dim=-1, descending=True)
+    topk_idx = idx_sorted[:, :k_int]
+    x_selected = torch.gather(x, 1, topk_idx.unsqueeze(-1).expand(B, k_int, D))
+    if not need_rejected:
+        return x_selected, None, topk_idx, None
+
+    rest_idx = idx_sorted[:, k_int:]
+    x_rejected = torch.gather(x, 1, rest_idx.unsqueeze(-1).expand(B, N - k_int, D))
+    return x_selected, x_rejected, topk_idx, rest_idx
+
+
 class ShivaPrunerExpert(torch.nn.Module):
     def __init__(self, init_Ts, init_Tk):
         super().__init__()
         self.register_buffer("Ts", torch.tensor(float(init_Ts)), persistent=False)
         self.register_buffer("Tk", torch.tensor(float(init_Tk)), persistent=False)
 
-    def forward(self, x, logits, k):
+    def forward(self, x, logits, k, need_rejected=True):
+        if not torch.is_grad_enabled():
+            return hard_topk_select(x, logits, k, need_rejected)
         return ShivaTopkFunc.apply(x, logits, k, self.Ts, self.Tk)
 
 class ShivaContextPruner(nn.Module):

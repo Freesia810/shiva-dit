@@ -20,6 +20,7 @@ class ToMADitBlockHook(BaseDiTBlockHook):
         merge_config=None,
         skip_layer_nums: int = 10,
         skip_single_layer_nums: Optional[int] = None,
+        merge_step_interval: int = 1,
         **kwargs,
     ):
         super().__init__()
@@ -41,6 +42,18 @@ class ToMADitBlockHook(BaseDiTBlockHook):
 
         self.skip_layer_nums = skip_layer_nums
         self.skip_single_layer_nums = skip_single_layer_nums
+        if not isinstance(merge_step_interval, int) or merge_step_interval < 1:
+            raise ValueError("merge_step_interval must be a positive integer")
+        self.merge_step_interval = merge_step_interval
+
+    def _merge_this_step(self):
+        # Same iteration-modulo mechanism as SDTM's protected steps. ToMA
+        # enables merging on 0, interval, 2*interval, ... instead of protecting
+        # those steps. Default 1 preserves the previous every-step behavior.
+        return self.enable and (
+            self.merge_step_interval == 1
+            or global_context.current_iteration % self.merge_step_interval == 0
+        )
     
     @staticmethod
     def fold_with_indices(x: torch.Tensor, h_tile_num: int, w_tile_num: int):
@@ -149,7 +162,7 @@ class ToMADitBlockHook(BaseDiTBlockHook):
 
         if self.layer_idx < self.skip_layer_nums:
             self.enable = False
-        if self.single_layer_idx is not None and self.single_layer_idx < self.skip_single_layer_nums:
+        if self.single_layer_idx is not None and self.single_layer_idx < (self.skip_single_layer_nums or 0):
             self.enable = False
 
     def hook_pre_norm(
@@ -160,8 +173,9 @@ class ToMADitBlockHook(BaseDiTBlockHook):
         image_rotary_emb=None,
         temb=None,
     ):
-        if module_name in ("self-attn", "parallel") and self.enable:
+        if module_name in ("self-attn", "parallel"):
             self._clean()
+        if module_name in ("self-attn", "parallel") and self._merge_this_step():
             def _gather_rope_with_tile(rope_pair, dst_idx):
                 if rope_pair is None: return None
                 res = []
@@ -170,7 +184,12 @@ class ToMADitBlockHook(BaseDiTBlockHook):
                     x_folded = ToMADitBlockHook.fold_with_indices(x, self.h_tile_num, self.w_tile_num)
                     idx_expanded = dst_idx.unsqueeze(-1).expand(-1, -1, -1, x.shape[-1])
                     x_gathered = torch.gather(x_folded, 2, idx_expanded)
-                    res.append(x_gathered.reshape(x_gathered.shape[0], -1, x_gathered.shape[-1]))
+                    gathered = x_gathered.reshape(x_gathered.shape[0], -1, x_gathered.shape[-1])
+                    if self.model_type == "flux-dev":
+                        if gathered.shape[0] != 1:
+                            raise ValueError("Flux ToMA currently supports batch=1")
+                        gathered = gathered[0]
+                    res.append(gathered)
                 return tuple(res)
 
             if global_context.hidden_extra_seq_len is not None:
@@ -211,7 +230,7 @@ class ToMADitBlockHook(BaseDiTBlockHook):
         norm_encoder_hidden_states=None,
         image_rotary_emb=None,
     ):
-        if self.merge_config.get(module_name, False) and self.enable:
+        if self.merge_config.get(module_name, False) and self._merge_this_step():
 
             if global_context.hidden_extra_seq_len is not None:
                 h1, h2 = norm_hidden_states.split(
@@ -231,7 +250,7 @@ class ToMADitBlockHook(BaseDiTBlockHook):
         hidden_output,
         encoder_hidden_output=None,
     ):
-        if self.merge_config.get(module_name, False) and self.enable:
+        if self.merge_config.get(module_name, False) and self._merge_this_step():
             if global_context.hidden_extra_seq_len is not None:
                 r = self.context_dict["A"].shape[2]
                 split_len = self.num_tiles * r

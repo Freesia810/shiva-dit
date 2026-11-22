@@ -1,92 +1,57 @@
+"""Render Figure 4(a) from exported validation MSE curves."""
+
+import argparse
+from pathlib import Path
+
 import matplotlib.pyplot as plt
-import pandas as pd
-import numpy as np
-import os
 from matplotlib import font_manager
+import numpy as np
+import pandas as pd
 
-file_adaptive = 'adaptive_val_loss.csv'
-file_fixed = 'fix_val_loss.csv'
-font_path = 'Times New Roman.ttf' 
 
-col_step = 'step'
-col_loss = 'value'
+def load_curve(path):
+    curve = pd.read_csv(path, usecols=["step", "value"])
+    if curve.empty or not np.isfinite(curve.to_numpy(dtype=float)).all():
+        raise ValueError(f"Expected finite step and value columns in {path}")
+    return curve.iloc[8:] if len(curve) > 8 else curve
 
-plt.rcParams['mathtext.fontset'] = 'stix'
-plt.rcParams['font.family'] = 'STIXGeneral'
 
-if not os.path.exists(font_path):
-    print("Warning: Font file not found, using default font")
-    plt.rcParams['font.family'] = 'serif'
-else:
-    try:
-        font_manager.fontManager.addfont(font_path)
-        prop = font_manager.FontProperties(fname=font_path)
-        print(f"✅ Loaded font: {font_path}")
-        print(f"   Font name: {prop.get_name()}")
-        
-        plt.rcParams['font.family'] = prop.get_name()
-        plt.rcParams['axes.unicode_minus'] = False
-        
-    except Exception as e:
-        print(f"⚠️ Error loading font: {e}")
-        plt.rcParams['font.family'] = 'serif'
+def render_figure(adaptive_csv, fixed_csv, output, font=None):
+    adaptive, fixed = load_curve(adaptive_csv), load_curve(fixed_csv)
+    if font is not None:
+        font_manager.fontManager.addfont(font)
+    font_family = font_manager.FontProperties(fname=font).get_name() if font else "STIXGeneral"
+    style = {
+        "font.family": font_family, "mathtext.fontset": "stix", "font.size": 14,
+        "axes.linewidth": 1.5, "xtick.major.width": 1.5, "ytick.major.width": 1.5,
+        "xtick.direction": "in", "ytick.direction": "in", "grid.alpha": 0.3,
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with plt.rc_context(style):
+        fig, ax = plt.subplots(figsize=(6, 4.5))
+        ax.plot(fixed.step, fixed.value, label=r"Fixed Ratio ($r=0.6$)",
+                color="#d62728", linestyle="--", linewidth=2, alpha=0.8)
+        ax.plot(adaptive.step, adaptive.value, label=r"Ours (Adaptive, $\bar{r}=0.6$)",
+                color="#1f77b4", linewidth=2.5)
+        ax.set_xlabel("Training Steps", fontsize=16)
+        ax.set_ylabel("Validation MSE Loss", fontsize=16)
+        ax.legend(fontsize=14, frameon=True, fancybox=False, edgecolor="black")
+        ax.grid(True, linestyle="--", linewidth=0.5)
+        fig.tight_layout()
+        fig.savefig(output.with_suffix(".pdf"), dpi=300, bbox_inches="tight")
+        fig.savefig(output.with_suffix(".png"), dpi=300, bbox_inches="tight")
+        plt.close(fig)
 
-plt.rcParams['font.size'] = 14
-plt.rcParams['axes.linewidth'] = 1.5
-plt.rcParams['xtick.major.width'] = 1.5
-plt.rcParams['ytick.major.width'] = 1.5
-plt.rcParams['xtick.direction'] = 'in'
-plt.rcParams['ytick.direction'] = 'in'
-plt.rcParams['grid.alpha'] = 0.3
 
-def read_data(filename):
-    try:
-        df = pd.read_csv(filename)
-        return df
-    except Exception as e:
-        print(f"Load data from {filename}: {e}")
-        return pd.DataFrame()
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--adaptive", required=True, type=Path)
+    parser.add_argument("--fixed", required=True, type=Path)
+    parser.add_argument("--output", type=Path, default=Path("runs/figures/fig4a"))
+    parser.add_argument("--font", type=Path)
+    args = parser.parse_args()
+    render_figure(args.adaptive, args.fixed, args.output, args.font)
 
-df_adaptive = read_data(file_adaptive)
-df_fixed = read_data(file_fixed)
 
-START_IDX = 8
-if len(df_adaptive) > START_IDX:
-    df_adaptive = df_adaptive.iloc[START_IDX:].reset_index(drop=True)
-if len(df_fixed) > START_IDX:
-    df_fixed = df_fixed.iloc[START_IDX:].reset_index(drop=True)
-
-fig, ax = plt.subplots(figsize=(6, 4.5))
-
-color_ours = '#1f77b4'  # Deep Blue
-color_base = '#d62728'  # Brick Red
-
-if not df_adaptive.empty and not df_fixed.empty:
-    steps_adap = df_adaptive[col_step]
-    loss_adap = df_adaptive[col_loss]
-    
-    steps_fixed = df_fixed[col_step]
-    loss_fixed = df_fixed[col_loss]
-    
-    ax.plot(steps_fixed, loss_fixed, label='Fixed Ratio ($r=0.6$)', 
-            color=color_base, linestyle='--', linewidth=2, alpha=0.8)
-    ax.plot(steps_adap, loss_adap, label=r"Ours (Adaptive, $\bar{r}=0.6$)", 
-            color=color_ours, linestyle='-', linewidth=2.5)
-else:
-    print("❌ Empty dataframe")
-
-ax.set_xlabel('Training Steps', fontsize=16)
-ax.set_ylabel('Validation MSE Loss', fontsize=16)
-
-ax.legend(fontsize=14, frameon=True, fancybox=False, edgecolor='black')
-
-ax.grid(True, linestyle='--', linewidth=0.5)
-plt.tight_layout()
-
-output_pdf = 'ablation_ratio_convergence.pdf'
-output_png = 'ablation_ratio_convergence.png'
-
-print(f"Saving figure to {output_pdf} ...")
-plt.savefig(output_pdf, dpi=300, bbox_inches='tight')
-plt.savefig(output_png, dpi=300, bbox_inches='tight')
-print("✅ Convergence figure saved.")
+if __name__ == "__main__":
+    main()

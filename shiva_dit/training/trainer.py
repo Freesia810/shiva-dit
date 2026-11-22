@@ -180,24 +180,35 @@ class DiffusionModelTrainer:
 
         if self.accelerator.is_main_process and load_evaluators:
             self.evaluators = {}
-            if CLIPScore:
+            clip_path = "../openai-clip-vit-base-patch16"
+            has_clip = os.path.isdir(clip_path)
+            if (CLIPScore or CLIPImageQualityAssessment) and not has_clip:
+                print(f"Warning: {clip_path} is missing. Skipping CLIP Score and CLIP-IQA.")
+
+            if CLIPScore and has_clip:
                 print("Loading CLIP Score model...")
                 self.evaluators["clip"] = CLIPScore(
-                    model_name_or_path="../openai-clip-vit-base-patch16",
+                    model_name_or_path=clip_path,
                     sync_on_compute=False,
                 ).to(self.device)
             if RM:
-                print("Loading ImageReward model...")
-                self.evaluators["image_reward"] = RM.load(
-                    "../ImageReward/ImageReward.pt",
-                    device=self.device,
-                    med_config="../ImageReward/med_config.json",
-                )
+                reward_path = "../ImageReward/ImageReward.pt"
+                reward_config = "../ImageReward/med_config.json"
+                if os.path.isfile(reward_path) and os.path.isfile(reward_config):
+                    print("Loading ImageReward model...")
+                    self.evaluators["image_reward"] = RM.load(
+                        reward_path, device=self.device, med_config=reward_config
+                    )
+                else:
+                    print(
+                        f"Warning: Expected {reward_path} and {reward_config}. "
+                        "Skipping ImageReward."
+                    )
 
-            if CLIPImageQualityAssessment:
+            if CLIPImageQualityAssessment and has_clip:
                 print("Loading CLIP IQA model...")
                 self.evaluators["clip_iqa"] = CLIPImageQualityAssessment(
-                    model_name_or_path="../openai-clip-vit-base-patch16",
+                    model_name_or_path=clip_path,
                     sync_on_compute=False,
                 ).to(self.device)
 
@@ -322,10 +333,15 @@ class DiffusionModelTrainer:
             if self.accelerator.is_main_process:
                 print("Distillation loss enabled. Loading static teacher model...")
 
+            # Load the teacher pipeline on CPU, then move ONLY its DiT to the GPU.
+            # get_pipeline() otherwise puts a full second pipeline (incl. another
+            # T5-XXL) on the GPU before `del teacher_pipe`, a transient spike that
+            # OOMs smaller cards at startup. We only ever need the teacher DiT.
             teacher_pipe, teacher_attrs = get_pipeline(
                 self.model_type,
                 model_path=config.model_path,
                 dtype=DiffusionModelTrainer._get_dtype(config.mixed_precision),
+                device=torch.device("cpu"),
             )
             self.teacher_model = getattr(teacher_pipe, teacher_attrs[0])
             assert (

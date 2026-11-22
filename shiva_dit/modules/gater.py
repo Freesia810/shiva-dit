@@ -52,13 +52,13 @@ class ShivaRatioPolicy(nn.Module):
         self, 
         total_layers: int,
         time_embed_dim: int,
-        ratio_bottleneck_dim: int, 
+        ratio_bottleneck_dim: int,
         init_ratio: float,
         **kwargs
     ):
         super().__init__()
         self.init_ratio_val = init_ratio
-        
+
         self.layer_emb = nn.Embedding(total_layers, ratio_bottleneck_dim)
         self.layer_mlp = nn.Sequential(
             nn.Linear(ratio_bottleneck_dim, ratio_bottleneck_dim),
@@ -136,7 +136,7 @@ class ShivaRatioPolicy(nn.Module):
 
         if is_time_stage:
             final_logits = logits_l + logits_t + self.global_bias
-            noise_scale = 1.0 
+            noise_scale = 1.0
             noise = torch.randn_like(final_logits) * noise_scale
             final_logits = final_logits + noise
         elif is_layer_stage:

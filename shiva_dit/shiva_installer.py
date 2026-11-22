@@ -98,7 +98,8 @@ def install_shiva_hooks(
 
         if image_ratio_mode == "adaptive":
             shared_image_ratio_policy = ShivaRatioPolicy(
-                total_layers=num_layers, ratio_bottleneck_dim=ratio_bottleneck_dim, init_ratio=fixed_image_ratio, time_embed_dim=time_embed_dim
+                total_layers=num_layers, ratio_bottleneck_dim=ratio_bottleneck_dim,
+                init_ratio=fixed_image_ratio, time_embed_dim=time_embed_dim,
             ).to(device, dtype)
 
         shared_pruner_expert = ShivaPrunerExpert(init_Ts=init_Ts, init_Tk=init_Tk).to(device, dtype)
@@ -173,7 +174,6 @@ def install_shiva_hooks(
             "shared_gater_cache": shared_gater_cache,
             "shared_ratio_cache": shared_ratio_cache,
             "shared_context_ratio_cache": shared_context_ratio_cache,
-            "total_layers": num_layers,
             **kwargs,
         }
 

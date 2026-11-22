@@ -80,7 +80,7 @@ class DiffCRDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         def _process(kept_ratio, hidden_states, encoder_hidden_states, image_rotary_emb):
             capacity = ceil_ste(kept_ratio * seq_len).to(torch.int32)
             k = torch.min(capacity, torch.tensor(seq_len, device=hidden_states.device))
-            token_scores = self.hidden_router(hidden_states.to(self.dtype)).squeeze(-1)  # (batch, seq_len)
+            token_scores = self.hidden_router(hidden_states.to(self.hidden_router.weight.dtype)).squeeze(-1)  # (batch, seq_len)
             self.token_scores, topk_x, remaining_x, sorted_indices, self.index = (
                 self._select_topk_and_remaining_tokens(
                     hidden_states, token_scores, k, hidden_states.shape[-1]

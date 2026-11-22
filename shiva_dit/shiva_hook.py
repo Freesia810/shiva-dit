@@ -21,6 +21,7 @@ GATER_STAGE = 99
 # Hack
 ACCUMULATION_STEPS = 2
 
+
 class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
     def __init__(
@@ -102,6 +103,35 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
 
         self.capture_mask_for_viz = capture_mask_for_viz
 
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if mode:
+            self._layer_emb_cache = None
+        return self
+
+    def _get_lut_keep_count(self, num_tokens, step):
+        lut = self.ratio_cache
+        key = (None if lut.is_inference() else lut._version, num_tokens)
+        cached = getattr(self, "_lut_keep_counts", None)
+        if cached is None or cached[0] is not lut or cached[1] != key:
+            # Compute once per token grid, in the LUT's original dtype.
+            ratios = lut[self.layer_idx].detach().cpu().clamp(min=0.01, max=1.0)
+            counts = torch.ceil(ratios * num_tokens).tolist()
+            cached = lut, key, counts
+            self._lut_keep_counts = cached
+        return int(cached[2][step])
+
+    def _get_inference_layer_embedding(self, layer_ids, dtype):
+        weight = self.router_layer_embedder.weight
+        if weight.is_inference():
+            return self.router_layer_embedder(layer_ids).to(dtype)
+        key = (id(weight), weight._version, layer_ids.device, layer_ids.shape[0], dtype)
+        cached = getattr(self, "_layer_emb_cache", None)
+        if cached is None or cached[0] != key:
+            cached = key, self.router_layer_embedder(layer_ids).to(dtype)
+            self._layer_emb_cache = cached
+        return cached[1]
+
     def _get_stratified_ratio_val(self, device):
         step_idx = getattr(global_context, "train_step_idx", 0)
         if step_idx is None:
@@ -169,9 +199,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             if self.training:
                 final_topk_states = self._forward_train_image(x_sel, x_rej, N)
             else:
-                final_topk_states = self._forward_eval_image(
-                    x_sel, x_rej, pure_temb, layer_id_tensor
-                )
+                final_topk_states = self._forward_eval_image(x_sel, x_rej)
 
         # 2. Context Pruning Forward (Text)
         final_topk_context = ctx_sel
@@ -195,7 +223,14 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         return processed_output
 
     def _prepare_inputs(self, func, module_self, *args, **kwargs):
-        sig = inspect.signature(func)
+        # The block's signature never changes, but inspect.signature() rebuilds it by
+        # introspection on every call -- 23 layers x every denoising step. It is slow
+        # in its own right and dynamo cannot trace it, so it also breaks the compiled
+        # graph. Build it once per hook and reuse.
+        sig = getattr(self, "_cached_sig", None)
+        if sig is None:
+            sig = inspect.signature(func)
+            self._cached_sig = sig
         bound = sig.bind_partial(module_self, *args, **kwargs)
         bound.apply_defaults()
 
@@ -324,17 +359,26 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         self.token_scores_logits = None
 
         if self.shiva_mode in ["image", "both"] and self.router is not None:
+            fast_inference = (
+                not self.training
+                and not torch.is_grad_enabled()
+                and not getattr(self, "is_validating", False)
+            )
             # Determine Image Ratio
             predicted_ratio = None
+            k_python = None
             if (
                 self.use_gater_lut
                 and self.ratio_cache is not None
                 and not self.training
             ):
-                current_t_index = global_context.current_iteration
-                predicted_ratio = self.ratio_cache[self.layer_idx, current_t_index]
+                step = global_context.current_iteration
+                if fast_inference:
+                    k_python = self._get_lut_keep_count(N, step)
+                else:
+                    predicted_ratio = self.ratio_cache[self.layer_idx, step].to(device)
 
-            if predicted_ratio is None:
+            if predicted_ratio is None and k_python is None:
                 if self.image_ratio_policy is not None:
                     # Adaptive Ratio
                     img_ratio_logits = self.image_ratio_policy(
@@ -363,14 +407,17 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                         self.fixed_image_ratio, device=pure_temb.device, dtype=dtype
                     )
 
-            clamped_ratio = predicted_ratio.clamp(min=0.01, max=1.0)
-            self.current_ratio_for_loss = clamped_ratio
-
-            if self.training:
-                k_float = ceil_ste(clamped_ratio * N)
+            if k_python is not None:
+                k_float = k_python
             else:
-                with torch.no_grad():
-                    k_float = torch.ceil(clamped_ratio * N)
+                clamped_ratio = predicted_ratio.clamp(min=0.01, max=1.0)
+                self.current_ratio_for_loss = clamped_ratio
+
+                if self.training:
+                    k_float = ceil_ste(clamped_ratio * N)
+                else:
+                    with torch.no_grad():
+                        k_float = torch.ceil(clamped_ratio * N)
 
             # Gater Call
             gate_logits = None
@@ -379,7 +426,14 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
             self.current_gate_logits_for_loss = gate_logits
 
             # Router Call
-            router_layer_emb_vector = self.router_layer_embedder(layer_id_tensor).to(dtype)
+            if fast_inference:
+                router_layer_emb_vector = self._get_inference_layer_embedding(
+                    layer_id_tensor, dtype
+                )
+            else:
+                router_layer_emb_vector = self.router_layer_embedder(
+                    layer_id_tensor
+                ).to(dtype)
             token_scores_logits = self.router(
                 hidden_states=hidden_states,
                 pooled_encoder_states=pooled_encoder_vector,
@@ -395,11 +449,12 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 unified_scores = torch.maximum(scores_uncond, scores_cond)
                 token_scores_logits = torch.cat([unified_scores, unified_scores], dim=0)
 
-            self.token_scores_logits = token_scores_logits
+            self.token_scores_logits = None if fast_inference else token_scores_logits
 
             # Execute Image Pruning
             x_sel, x_rej, sel_idx, rej_idx = self._select_topk(
-                hidden_states, token_scores_logits, k_float, D
+                hidden_states, token_scores_logits, k_float,
+                need_rejected=not fast_inference,
             )
 
         # --- RoPE Gathering ---
@@ -472,9 +527,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         )
         return final_topk_states
 
-    def _forward_eval_image(self, x_sel, x_rej, pure_temb, layer_id_tensor):
-        dtype = x_sel.dtype
-
+    def _forward_eval_image(self, x_sel, x_rej):
         if getattr(self, "is_validating", False):
             self._collect_training_metrics_image(
                 load_balancing_loss=torch.tensor(0.0, device=x_sel.device),
@@ -483,20 +536,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 N=x_sel.shape[1] + x_rej.shape[1],
             )
 
-        decision = 0
-        if self.use_gater_lut:
-            current_t_index = global_context.current_iteration
-            decision = self.gater_cache[self.layer_idx, current_t_index].item()
-        else:
-            gater_logits = self.current_gate_logits_for_loss
-            decision = torch.argmax(gater_logits[0], dim=-1).item()
-
-        decision = 0
-        if decision == 0:
-            final_topk_states = x_sel
-        else:
-            final_topk_states = self.fuse_expert(x_sel, x_rej)
-        return final_topk_states
+        return x_sel
 
     def _process_outputs(
         self,
@@ -514,6 +554,7 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         rej_idx_ctx,
         L,
     ):
+        dense_input = bound.arguments["hidden_states"] if x_rej is None else None
         bound.arguments["hidden_states"] = final_topk_states
         bound.arguments["image_rotary_emb"] = sel_rope
         bound.arguments["encoder_hidden_states"] = final_topk_context
@@ -529,18 +570,29 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         # Scatter Image
         if sel_idx is not None:
             B, _, D = processed_hidden_states.shape
-            final_hidden_states = torch.empty(
-                (B, N, D),
-                device=processed_hidden_states.device,
-                dtype=processed_hidden_states.dtype,
-            )
-            final_hidden_states.scatter_(
-                1, sel_idx.unsqueeze(-1).expand(-1, -1, D), processed_hidden_states
-            )
-            if x_rej is not None and x_rej.shape[1] > 0:
+            if x_rej is None:
+                # Untouched positions already hold the right values in the block's
+                # own input, so one copy plus one scatter replaces the round trip
+                # that took the discarded tokens out and put them straight back.
+                final_hidden_states = dense_input.to(
+                    processed_hidden_states.dtype).clone()
                 final_hidden_states.scatter_(
-                    1, rej_idx.unsqueeze(-1).expand(-1, -1, D), x_rej
+                    1, sel_idx.unsqueeze(-1).expand(-1, -1, D),
+                    processed_hidden_states)
+            else:
+                final_hidden_states = torch.empty(
+                    (B, N, D),
+                    device=processed_hidden_states.device,
+                    dtype=processed_hidden_states.dtype,
                 )
+                final_hidden_states.scatter_(
+                    1, sel_idx.unsqueeze(-1).expand(-1, -1, D),
+                    processed_hidden_states
+                )
+                if x_rej.shape[1] > 0:
+                    final_hidden_states.scatter_(
+                        1, rej_idx.unsqueeze(-1).expand(-1, -1, D), x_rej
+                    )
         else:
             final_hidden_states = processed_hidden_states
 
@@ -567,8 +619,9 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
         else:
             return final_hidden_states
 
-    def _select_topk(self, x, token_scores_logits, k, C):
-        x_sel, x_rej, sel_idx, rej_idx = self.prune_expert(x, token_scores_logits, k)
+    def _select_topk(self, x, token_scores_logits, k, need_rejected=True):
+        x_sel, x_rej, sel_idx, rej_idx = self.prune_expert(
+            x, token_scores_logits, k, need_rejected)
 
         if getattr(self, "capture_mask_for_viz", False):
             self.last_sel_idx = sel_idx.detach().cpu()  # (B, k)

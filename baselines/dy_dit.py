@@ -184,6 +184,12 @@ class DynamicDiTBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                     -1, *token_mask_for_indexing.shape[2:]
                 )  # (B * N, 1)
 
+                # `.nonzero()` produces a tensor whose LENGTH depends on the data, so
+                # the host cannot know the resulting shape without reading back from
+                # the device -- this call is a mandatory device sync on every block,
+                # every step. A fixed-k budget needs no such round trip. Timed apart
+                # so the cost of "asking the device how many tokens survived" is
+                # attributable on its own.
                 self.token_idx = token_mask_for_indexing.nonzero()[:, 0]
             else:
                 self.token_idx = None

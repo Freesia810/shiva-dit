@@ -90,7 +90,7 @@ class ShivaTopkFunc(torch.autograd.Function):
             N_float = float(N)
 
             dist_to_k = k_detached.unsqueeze(-1) - soft_ranks
-            z = Tk * dist_to_k / N_float 
+            z = Tk * dist_to_k / N_float
             selection_probs = torch.sigmoid(z)
 
             grads = torch.autograd.grad(

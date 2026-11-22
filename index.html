@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Shiva-DiT: Residual-Based Differentiable Top-k Selection for Efficient Diffusion Transformers. Transactions on Machine Learning Research, 2026.">
+  <title>Shiva-DiT: Residual-Based Differentiable Top-k Selection for Efficient Diffusion Transformers</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Google+Sans:400,500,600%7CNoto+Sans:400,600,700&amp;display=swap">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.7.2/css/all.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/jpswalsh/academicons@1/css/academicons.min.css">
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: #4a4a4a;
+      background: #fff;
+      font: 1rem/1.5 "Noto Sans", sans-serif;
+    }
+    a { color: #3273dc; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    :focus-visible { outline: 2px solid #3273dc; outline-offset: 3px; }
+    h1, h2 { color: #363636; font-weight: 600; }
+    h1 { margin: 0 0 1.5rem; font-size: 3rem; line-height: 1.125; }
+    h2 { margin: 0 0 1.5rem; font-size: 2rem; line-height: 1.125; }
+    sup { font-size: 70%; line-height: 0; }
+    p { margin: 0 0 1rem; }
+    p:last-child { margin-bottom: 0; }
+
+    .navbar {
+      display: flex;
+      justify-content: center;
+      min-height: 3.25rem;
+    }
+    .navbar a, .more-research summary {
+      display: flex;
+      align-items: center;
+      padding: .5rem .75rem;
+      color: #4a4a4a;
+      text-decoration: none;
+    }
+    .navbar a:hover, .more-research summary:hover { color: #3273dc; background: #fafafa; }
+    .more-research { position: relative; }
+    .more-research summary {
+      min-height: 3.25rem;
+      padding-right: 2.25rem;
+      cursor: pointer;
+      list-style: none;
+    }
+    .more-research summary::-webkit-details-marker { display: none; }
+    .more-research summary::after {
+      position: absolute;
+      right: 1.125rem;
+      width: .55rem;
+      height: .55rem;
+      margin-top: -.25rem;
+      border: solid #3273dc;
+      border-width: 0 2px 2px 0;
+      content: "";
+      transform: rotate(45deg);
+    }
+    .research-links {
+      position: absolute;
+      z-index: 1;
+      top: 100%;
+      left: 0;
+      min-width: max-content;
+      padding: .5rem 0;
+      border-top: 2px solid #dbdbdb;
+      border-radius: 0 0 6px 6px;
+      background: #fff;
+      box-shadow: 0 8px 8px rgb(10 10 10 / 10%);
+      font-size: .875rem;
+    }
+
+    .hero, .section { padding: 3rem 1.5rem; }
+    .container { max-width: 960px; margin: 0 auto; }
+    .hero, .abstract h2, footer { text-align: center; }
+    .publication-title, .publication-authors { font-family: "Google Sans", "Noto Sans", sans-serif; }
+    .publication-authors { font-size: 1.25rem; }
+    .author-block { display: inline-block; }
+    .publication-authors a { color: hsl(204 86% 46%); }
+    .publication-links {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: .25rem;
+      margin-top: 1rem;
+    }
+    .publication-links a {
+      display: inline-flex;
+      align-items: center;
+      gap: .45rem;
+      min-height: 2.5rem;
+      padding: .45rem 1.2rem;
+      border-radius: 999px;
+      background: #363636;
+      color: #fff;
+    }
+    .publication-links a:hover { background: #292929; text-decoration: none; }
+    .abstract {
+      max-width: 768px;
+      margin: 0 auto;
+      text-align: justify;
+    }
+    .citation h2 { font-size: 1.75rem; }
+    pre {
+      margin: 0;
+      padding: 1.25rem 1.5rem;
+      overflow-x: auto;
+      background: #f5f5f5;
+      color: #4a4a4a;
+      font-size: .875rem;
+    }
+    footer { padding: 3rem 1.5rem 6rem; background: #fafafa; }
+    .footer-links { margin-bottom: 1rem; font-size: 1.55rem; }
+    .footer-links a { padding: .25rem; color: #000; }
+    .footer-links a:hover { color: #3273dc; }
+    .footer-note { max-width: 768px; margin: 0 auto; text-align: left; }
+
+    @media (max-width: 768px) {
+      h1 { font-size: 2rem; }
+      h2 { font-size: 1.75rem; }
+      .hero, .section { padding: 2.25rem 1.25rem; }
+      .publication-authors { font-size: 1.1rem; }
+      .abstract { text-align: left; }
+      footer { padding: 2.25rem 1.25rem 3rem; }
+    }
+  </style>
+</head>
+<body>
+  <nav class="navbar" aria-label="Main navigation">
+    <a href="https://orcid.org/0009-0006-0739-7188" aria-label="Jiaji Zhang's ORCID profile">
+      <i class="fa-solid fa-house" aria-hidden="true"></i>
+    </a>
+    <details class="more-research">
+      <summary>More Research</summary>
+      <div class="research-links">
+        <a href="https://optisys-zju.github.io/segquant/">SegQuant</a>
+        <a href="https://github.com/OptiSys-ZJU/Cache-Coliseum">Cache-Coliseum</a>
+      </div>
+    </details>
+  </nav>
+
+  <main>
+    <header class="hero">
+      <div class="container">
+        <h1 class="publication-title">Shiva-DiT: Residual-Based Differentiable Top-<i>k</i> Selection for Efficient Diffusion Transformers</h1>
+        <div class="publication-authors">
+          <span class="author-block"><a href="https://github.com/Freesia810">Jiaji Zhang</a><sup>1</sup>,</span>
+          <span class="author-block"><a href="https://hliangzhao.me/">Hailiang Zhao</a><sup>1</sup>,</span>
+          <span class="author-block">Jiaju Wu<sup>2</sup>,</span>
+          <span class="author-block">Ruichao Sun<sup>1</sup>,</span>
+          <span class="author-block">Xinkui Zhao<sup>1</sup>,</span>
+          <span class="author-block"><a href="https://person.zju.edu.cn/en/shuiguang">Shuiguang Deng</a><sup>1</sup></span>
+        </div>
+        <div class="publication-authors">
+          <span class="author-block"><sup>1</sup>Zhejiang University,</span>
+          <span class="author-block"><sup>2</sup>Nanyang Technological University</span>
+        </div>
+        <div class="publication-links">
+          <a href="https://openreview.net/forum?id=uAAaT1KajI">
+            <i class="fa-solid fa-file-pdf" aria-hidden="true"></i><span>Paper</span>
+          </a>
+          <a href="https://arxiv.org/abs/2602.05605">
+            <i class="ai ai-arxiv" aria-hidden="true"></i><span>arXiv</span>
+          </a>
+          <a href="https://github.com/Freesia810/shiva-dit">
+            <i class="fa-brands fa-github" aria-hidden="true"></i><span>Code</span>
+          </a>
+        </div>
+      </div>
+    </header>
+
+    <section class="section" aria-labelledby="abstract-title">
+      <div class="abstract">
+        <h2 id="abstract-title">Abstract</h2>
+        <p>
+          Diffusion Transformers (DiTs) are costly at high resolution because self-attention scales
+          quadratically with token sequence length. Existing pruning methods do not jointly provide
+          end-to-end learnability, low training overhead, and deterministic token counts for predictable
+          token-dependent computation.
+        </p>
+        <p>
+          We propose <strong>Shiva-DiT</strong>, based on <strong>Residual-Based Differentiable Top-<i>k</i> Selection</strong>.
+          Its forward pass executes hard top-<i>k</i> selection, while a residual-aware straight-through
+          estimator propagates gradients to both token scores and the budget <i>k</i> without evaluating
+          a second backbone path. A <strong>Context-Aware Router</strong> ranks tokens based on the input,
+          while an <strong>Adaptive Ratio Policy</strong> learns layer- and timestep-dependent retention
+          ratios under a target average budget.
+        </p>
+        <p>
+          Experiments on SD3-Medium, Flux.1-dev, and PixArt-Σ show consistent reductions in FLOPs and
+          measured latency. On SD3-Medium, Shiva-DiT provides four fidelity-latency operating points
+          and reaches a 1.54× wall-clock speedup with competitive fidelity.
+        </p>
+      </div>
+    </section>
+
+    <section class="section citation" id="BibTeX" aria-labelledby="citation-title">
+      <div class="container">
+        <h2 id="citation-title">BibTeX</h2>
+        <pre><code>@article{zhang2026shivadit,
+  title   = {Shiva-DiT: Residual-Based Differentiable Top-k Selection for Efficient Diffusion Transformers},
+  author  = {Zhang, Jiaji and Zhao, Hailiang and Wu, Jiaju and Sun, Ruichao and Zhao, Xinkui and Deng, Shuiguang},
+  journal = {Transactions on Machine Learning Research},
+  year    = {2026},
+  month   = nov,
+  url     = {https://openreview.net/forum?id=uAAaT1KajI}
+}</code></pre>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="footer-links">
+      <a href="https://arxiv.org/abs/2602.05605" aria-label="Shiva-DiT on arXiv">
+        <i class="fa-solid fa-file-pdf" aria-hidden="true"></i>
+      </a>
+      <a href="https://github.com/Freesia810" aria-label="Jiaji Zhang on GitHub">
+        <i class="fa-brands fa-github" aria-hidden="true"></i>
+      </a>
+    </div>
+    <div class="footer-note">
+      <p>Website template adapted from <a href="https://optisys-zju.github.io/segquant/">SegQuant</a> and
+        <a href="https://nerfies.github.io/">Nerfies</a>.</p>
+      <p>This page is licensed under <a href="https://creativecommons.org/licenses/by-sa/4.0/">CC BY-SA 4.0</a>.</p>
+    </div>
+  </footer>
+</body>
+</html>

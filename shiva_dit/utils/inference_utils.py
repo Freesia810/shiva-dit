@@ -2,6 +2,7 @@ import torch
 import os
 import glob
 import json
+from pathlib import Path
 from peft import LoraConfig as PeftLoraConfig, get_peft_model
 
 from shiva_dit.utils import get_pipeline
@@ -31,6 +32,21 @@ HOOK_CLASS_MAP = {
     "ShivaDitBlockHook": ShivaDitBlockHook,
 }
 
+
+def load_gater_lut(path):
+    lut = torch.load(Path(path).expanduser(), map_location="cpu", weights_only=True)
+    if not isinstance(lut, dict):
+        raise ValueError("Expected a LUT dictionary containing 'gater' and 'ratio'")
+    gater, ratio = lut.get("gater"), lut.get("ratio")
+    if not isinstance(gater, torch.Tensor) or not isinstance(ratio, torch.Tensor):
+        raise ValueError("LUT must contain 'gater' and 'ratio' tensors")
+    if ratio.ndim != 2 or not ratio.numel() or gater.shape != ratio.shape:
+        raise ValueError("LUT tensors must have the same non-empty [layers, steps] shape")
+    if not torch.isfinite(ratio).all() or not ((ratio > 0) & (ratio <= 1)).all():
+        raise ValueError("LUT ratios must be finite and in (0, 1]")
+    return lut
+
+
 def load_pipeline_for_inference(
     ckpt_path: str = None,
     base_model_path: str = None, 
@@ -40,19 +56,30 @@ def load_pipeline_for_inference(
     gater_lut_path: str = None,
     optimize_hooks: bool = True,
     merge_lora: bool = True,
-    meta_config: dict = None
+    meta_config: dict = None,
+    skip_layer_indices=None,
+    capture_mask_for_viz: bool = False,
+    strict_checkpoint: bool = False,
+    expected_lut_steps: int | None = None,
 ):
+    lut_data = load_gater_lut(gater_lut_path) if gater_lut_path else None
+    if lut_data is not None and expected_lut_steps is not None:
+        lut_steps = lut_data["ratio"].shape[1]
+        if lut_steps != expected_lut_steps:
+            raise ValueError(f"LUT contains {lut_steps} steps, requested {expected_lut_steps}")
     checkpoint_state = None
-    load_format = "unknown"
 
     if ckpt_path is None:
         if meta_config is None:
             if model_type is None:
                 raise ValueError("Baseline mode: 'model_type' required.")
+            if lut_data is not None:
+                raise ValueError("A Shiva LUT requires a Shiva checkpoint or hook configuration")
             
             print(f"Loading Baseline Pipeline for: {model_type}")
-            pipe, model_attrs = get_pipeline(model_type, model_path=base_model_path, dtype=dtype)
-            pipe.to(device)
+            pipe, _ = get_pipeline(
+                model_type, model_path=base_model_path, dtype=dtype, device=device
+            )
             return pipe
         else:
             if 'model_type' in meta_config:
@@ -73,13 +100,23 @@ def load_pipeline_for_inference(
             
             modular_dir = os.path.join(ckpt_path, "modular_weights")
             if os.path.exists(modular_dir):
-                load_format = "modular"
                 print("Detected Format 2: Modular Weights Directory")
+                weight_files = sorted(glob.glob(os.path.join(modular_dir, "*.pt")))
+                if not weight_files:
+                    raise ValueError(f"No checkpoint tensors found in {modular_dir}")
+                checkpoint_state = {}
+                for weights_path in weight_files:
+                    try:
+                        part_state = torch.load(weights_path, map_location="cpu")
+                    except Exception as exc:
+                        raise ValueError(f"Could not load checkpoint part {weights_path}") from exc
+                    if not isinstance(part_state, dict) or not part_state:
+                        raise ValueError(f"No checkpoint tensors found in {weights_path}")
+                    checkpoint_state.update(part_state)
             else:
                 potential_weights = glob.glob(os.path.join(ckpt_path, "*model*.safetensors")) + \
                                     glob.glob(os.path.join(ckpt_path, "*model*.bin"))
                 if potential_weights:
-                    load_format = "accelerator"
                     weights_path = potential_weights[0]
                     print(f"Detected Format 1: Accelerator State Directory (Found {os.path.basename(weights_path)})")
                     
@@ -92,7 +129,6 @@ def load_pipeline_for_inference(
                     raise ValueError("Could not determine checkpoint format.")
 
         elif os.path.isfile(ckpt_path):
-            load_format = "single_file"
             print("Detected Format 3: Single PT File")
             checkpoint_state = torch.load(ckpt_path, map_location="cpu")
             if isinstance(checkpoint_state, dict):
@@ -108,14 +144,23 @@ def load_pipeline_for_inference(
                     raise ValueError("Could not determine checkpoint format.")
             else:
                 raise ValueError("Could not determine checkpoint format.")
+
+        if not isinstance(checkpoint_state, dict) or not checkpoint_state:
+            raise ValueError(f"No checkpoint tensors found in {ckpt_path}")
         
-    resolved_model_type = meta_config.get("model_type", model_type)
+    meta_config = meta_config or {}
+    resolved_model_type = meta_config.get("model_type") or model_type
     if resolved_model_type is None:
         raise ValueError("Could not determine 'model_type' from checkpoint or arguments.")
     
     training_mode = meta_config.get("training_mode", "finetune") # Default assumption
     hook_info = meta_config.get("hook_info")
     lora_info = meta_config.get("lora_info")
+    hook_class_name = hook_info.get("class_name") if hook_info else None
+    if hook_class_name and hook_class_name not in HOOK_CLASS_MAP:
+        raise ValueError(f"Unknown hook class: {hook_class_name}")
+    if lut_data is not None and hook_class_name != "ShivaDitBlockHook":
+        raise ValueError("A Shiva LUT requires a ShivaDitBlockHook")
 
     print(f"  - Model Type: {resolved_model_type}")
     print(f"  - Training Mode: {training_mode}")
@@ -124,28 +169,41 @@ def load_pipeline_for_inference(
         resolved_model_type,
         model_path=base_model_path,
         dtype=dtype,
+        device=device,
     )
+    if lut_data is not None and resolved_model_type in {"sd3", "flux-dev", "pixart-sigma"}:
+        config = pipe.transformer.config
+        layers = config.num_layers + getattr(config, "num_single_layers", 0)
+        if lut_data["ratio"].shape[0] != layers:
+            raise ValueError(f"LUT must have one row per transformer block ({layers} rows)")
     
+    inference_skip_layers = set()
     if hook_info:
-        hook_class_name = hook_info.get("class_name")
-        hook_kwargs = hook_info.get("config", {})
+        hook_kwargs = dict(hook_info.get("config", {}))
         print(f"  - Configuring Hook: {hook_class_name}")
 
         HookClass = HOOK_CLASS_MAP.get(hook_class_name)
         if HookClass:
             if hook_class_name == "ShivaDitBlockHook":
-                hook_kwargs["capture_mask_for_viz"] = True
+                # Copying the selection mask and the token scores to host on every
+                # block of every step is three device syncs per call and exists only
+                # to feed the mask figures, so it stays off unless asked for.
+                hook_kwargs["capture_mask_for_viz"] = capture_mask_for_viz
                 
                 # LUT logic (Keep existing logic)
-                if gater_lut_path and os.path.exists(gater_lut_path):
-                    lut_data = torch.load(gater_lut_path, map_location=device)
+                if lut_data is not None:
                     hook_kwargs["use_gater_lut"] = True
-                    if isinstance(lut_data, dict):
-                        hook_kwargs["shared_gater_cache"] = lut_data.get("gater")
-                        hook_kwargs["shared_ratio_cache"] = lut_data.get("ratio")
+                    hook_kwargs["shared_gater_cache"] = lut_data["gater"]
+                    hook_kwargs["shared_ratio_cache"] = lut_data["ratio"]
 
                 if optimize_hooks:
-                    hook_kwargs["skip_layer_indices"] = [0]
+                    inference_skip_layers.update(
+                        [0] if skip_layer_indices is None else skip_layer_indices
+                    )
+                    if checkpoint_state is None:
+                        hook_kwargs["skip_layer_indices"] = sorted(
+                            inference_skip_layers.union(hook_kwargs.get("skip_layer_indices") or ())
+                        )
 
             HookManager.configure_hooks(resolved_model_type, default=(HookClass, hook_kwargs))
             HookManager.enable()
@@ -155,6 +213,7 @@ def load_pipeline_for_inference(
 
     if training_mode == "lora" and lora_info:
         print("  - Applying LoRA adapter...")
+        lora_info = dict(lora_info)
         if "rank" in lora_info and "r" not in lora_info: lora_info["r"] = lora_info["rank"]
         peft_valid_keys = set(PeftLoraConfig.__annotations__.keys())
         filtered_lora_info = {k: v for k, v in lora_info.items() if k in peft_valid_keys or k == 'r'}
@@ -163,23 +222,23 @@ def load_pipeline_for_inference(
 
     print("  - Loading weights...")
     
-    if load_format in ["single_file", "accelerator"] and checkpoint_state is not None:
-        model.load_state_dict(checkpoint_state, strict=False)
-    
-    elif load_format in ["modular", "modular_flat"]:
-        target_dir = modular_dir if load_format == "modular" else ckpt_path
-        pt_files = glob.glob(os.path.join(target_dir, "*.pt"))
-        print(f"    Found {len(pt_files)} modular files in {target_dir}")
-        
-        full_sd = {}
-        for pt_f in pt_files:
-            try:
-                part_sd = torch.load(pt_f, map_location="cpu")
-                full_sd.update(part_sd)
-            except Exception as e:
-                print(f"    Error loading {pt_f}: {e}")
-        
-        model.load_state_dict(full_sd, strict=False)
+    if checkpoint_state is not None:
+        load_result = model.load_state_dict(checkpoint_state, strict=False)
+        if not checkpoint_state.keys() - set(load_result.unexpected_keys):
+            raise ValueError(f"No checkpoint tensors matched the model in {ckpt_path}")
+        print(f"Checkpoint load: {len(load_result.missing_keys)} missing base/buffer keys, "
+              f"{len(load_result.unexpected_keys)} unexpected keys")
+        if strict_checkpoint and load_result.unexpected_keys:
+            raise RuntimeError(f"Unused checkpoint tensors: {load_result.unexpected_keys[:20]}")
+
+        if inference_skip_layers:
+            # Training exports may store a shared tensor only under a skipped block.
+            # Keep all trained hooks until their weights have been loaded.
+            for attr in model_attrs:
+                for name, block in getattr(pipe, attr).named_modules():
+                    hook = getattr(block, "_hook", None)
+                    if isinstance(hook, ShivaDitBlockHook) and hook.layer_idx in inference_skip_layers:
+                        HookManager.remove_hook(f"{attr}.{name}")
 
     if training_mode == "lora" and merge_lora:
         print("  - Merging LoRA weights...")
@@ -197,4 +256,11 @@ def load_pipeline_for_inference(
             hook.eval().requires_grad_(False)
             
     print("Pipeline ready.")
+
+    if torch.device(device).type == "mps":
+        pipe.vae.to(torch.float32)
+        original_vae_decode = pipe.vae.decode
+        def patched_decode(z, *args, **kwargs):
+            return original_vae_decode(z.float(), *args, **kwargs)
+        pipe.vae.decode = patched_decode
     return pipe

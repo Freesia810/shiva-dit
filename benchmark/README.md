@@ -1,105 +1,53 @@
-# Benchmark & Evaluation
+# Generation and evaluation
 
-This directory contains three core scripts for comprehensive evaluation of Shiva-DiT and related baselines, covering image generation quality, system inference performance (Latency/FLOPs), and acceleration LUT generation.
+Run the following commands from the repository root. Set `BASE_MODEL` and `SHIVA_CHECKPOINT` as in the [quick start](../README.md).
 
-## Image Generation (`generation.py`)
+## Export an inference LUT
 
-This script is used for batch image generation and supports calculating quality metrics such as FID, CLIP Score, and ImageReward. It supports multi-GPU parallel generation for efficiency.
-
-### Features
-* **Batch Generation**: Supports reading prompt lists in JSONL format.
-* **Multi-GPU Parallelism**: Automatically distributes tasks via `torchrun` to accelerate large-scale sampling.
-* **Metrics Calculation**: Integrates `pytorch-fid`, `torchmetrics` (CLIP), and `ImageReward`.
-* **Shiva Support**: Supports loading trained Shiva checkpoints or using baseline methods.
-
-### Usage Examples
-
-**Single GPU Generation:**
-```bash
-python -m benchmark.generation \
-    --model_type sd3 \
-    --ckpt_path /path/to/shiva_ckpt.pt \
-    --jsonl_path /path/to/prompts.jsonl \
-    --output_dir results/shiva_sd3 \
-    --samples_per_prompt 4 \
-    --seed 42
-```
-
-**Multi-GPU Parallel Generation (Recommended):**
-```bash
-torchrun --nproc_per_node=8 -m benchmark.generation \
-    --model_type sd3 \
-    --ckpt_path /path/to/shiva_ckpt.pt \
-    --jsonl_path /path/to/prompts.jsonl \
-    --output_dir results/shiva_sd3 \
-    --samples_per_prompt 4 \
-    --skip_metrics  # Recommended to skip online metrics calculation in multi-GPU mode
-```
-
-**Arguments:**
-* `--ckpt_path`: Path to the trained Shiva Checkpoint (optional for baselines).
-* `--model_type`: Model architecture (e.g., `sd3`, `flux-dev`, `pixart-sigma`).
-* `--jsonl_path`: Data file containing prompts (must include a `"text"` field).
-* `--fid_stats`: (Optional) Path to reference `.npz` file for FID calculation.
-
----
-
-## System Performance Benchmark (`infer.py`)
-
-This script accurately measures model inference performance, including End-to-End Latency, DiT Module Latency, Peak Memory usage, and Computational Cost (FLOPs/MACs).
-
-### Features
-* **Precise Timing**: Uses `torch.cuda.Event` for millisecond-level accuracy.
-* **FLOPs Statistics**: Integrates `fvcore` to automatically count actual inference FLOPs.
-* **Breakdown**: Distinguishes between end-to-end time and pure DiT computation time.
-
-### Usage Examples
-
-```bash
-python -m benchmark.infer \
-    --model_type flux-dev \
-    --ckpt_path /path/to/shiva_ckpt.pt \
-    --height 1024 \
-    --width 1024 \
-    --steps 20 \
-    --measure_flops
-```
-
-**Output Example:**
-```text
-System Performance (Avg over 50 runs):
-  Peak VRAM:          14500.25 MB
-  End-to-End Latency: 2150.40 ms
-  DiT Latency:        1850.10 ms
-Computational Cost:
-  Avg FLOPs: 15.4 TFLOPs
-```
-
----
-
-## Look-Up Table (LUT) Generation (`lut.py`)
-
-After training Shiva-DiT, the decisions of the Policy Network can be "frozen" for inference. This script records all decisions (Merge Ratio) by running a pre-inference pass and saves them as a `.pt` file.
-
-In deployment, loading the LUT allows skipping the Policy network computation, further improving inference speed.
-
-### Usage Examples
+Export the learned schedule from an adaptive Shiva checkpoint. Use the same backbone, scheduler, and denoising grid to generate images with the LUT. Pass its step count explicitly with `--steps`.
 
 ```bash
 python -m benchmark.lut \
-    --ckpt_path /path/to/shiva_ckpt.pt \
-    --output_path shiva_lut_20steps.pt \
-    --steps 20 \
-    --height 1024 \
-    --width 1024
+    --base_model_path "$BASE_MODEL" \
+    --ckpt_path "$SHIVA_CHECKPOINT" \
+    --steps 50 --height 1024 --width 1024 \
+    --output_path runs/shiva-50steps.pt
 ```
 
-**Using the Generated LUT:**
-Load via the `--gater_lut` argument in `generation.py` or `infer.py`:
+The file stores `ratio` and `gater` tensors of shape `[layers, steps]`. The deployed image pruning path uses the ratio entries for hard top-k. Dense layers skipped by the hook have ratio 1.
+
+## Generate matched samples
+
+Use a JSONL file with a `text` field on each line. With fixed latents, the index of a prompt in the file determines both its latent and image filename. Use a fresh output directory for each method or configuration. Generation resumes by using readable images already present at their expected paths.
+
+```bash
+torchrun --nproc_per_node=2 -m benchmark.generation \
+    --model_type sd3 --base_model_path "$BASE_MODEL" \
+    --ckpt_path "$SHIVA_CHECKPOINT" --gater_lut runs/shiva-50steps.pt \
+    --jsonl_path /path/to/eval.jsonl --latent_source_dir /path/to/latents \
+    --strict_latents --output_dir runs/shiva-mjhq \
+    --steps 50 --samples_per_prompt 5 --skip_metrics
+```
+
+Input latents are named `latent_p000000_s00.pt` and images are named `p0000_s00.png`. For a new evaluation, `python -m scripts.utils.dump_latents --help` lists the options for generating a reusable set of initial latents. The paper protocol pairs five fixed latents per prompt across methods.
+
+## Score generated images
+
+```bash
+python -m benchmark.evaluate \
+    --image_dir runs/shiva-mjhq --jsonl_path /path/to/eval.jsonl \
+    --fid_stats /path/to/mjhq_30k_stats.npz
+```
+
+This entry point computes FID, ImageReward, CLIP Score, and CLIP-IQA. It uses the same file selection for all four metrics. With 2,000 prompts and five latents each, score all 10,000 images in a single pass for pooled FID. Provide locally cached metric assets through `SHIVA_METRIC_IR_PATH`, `SHIVA_METRIC_IR_CONFIG`, `SHIVA_METRIC_BERT_PATH`, and `SHIVA_METRIC_CLIP_PATH` when needed.
+
+## Measure inference cost
 
 ```bash
 python -m benchmark.infer \
-    --ckpt_path /path/to/shiva_ckpt.pt \
-    --gater_lut shiva_lut_20steps.pt \
-    ...
+    --model_type sd3 --base_model_path "$BASE_MODEL" \
+    --ckpt_path "$SHIVA_CHECKPOINT" --gater_lut runs/shiva-50steps.pt \
+    --jsonl_path examples/prompts.jsonl --steps 50 --height 1024 --width 1024
 ```
+
+This CUDA benchmark reports end-to-end latency, DiT latency, peak allocated memory, and average FLOPs per denoising step. Match the GPU, precision, batch, prompt set, resolution, and sampling settings across comparisons. See [baseline configurations](../baselines/README.md) and Appendix B.4 for the paper's comparison settings. [Paper](https://openreview.net/forum?id=uAAaT1KajI)

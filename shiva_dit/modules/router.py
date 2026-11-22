@@ -47,15 +47,15 @@ class ShivaRouter(nn.Module):
         layer_feat = self.layer_proj(layer_emb).unsqueeze(1)
         context_feat_unnorm = time_feat + prompt_feat + layer_feat
         context_feat = self.context_norm(context_feat_unnorm)
-        
+
         token_feat = self.token_proj(hidden_states)  # (B, N, c)
 
         fused_hidden_pre_norm = token_feat + context_feat
-        
+
         fused_hidden = F.silu(fused_hidden_pre_norm)
-        
+
         fused_hidden = self.fused_norm(fused_hidden)
-        
+
         token_scores = self.router_head(fused_hidden)
-        
+
         return token_scores.squeeze(-1)

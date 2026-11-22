@@ -3,6 +3,8 @@ import os
 import sys
 import json
 import argparse
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from PIL import Image
 from tqdm import tqdm
 from types import ModuleType
@@ -19,7 +21,7 @@ except ImportError:
     )
 
 
-LOCAL_BERT_PATH = "../bert-base-uncased"
+LOCAL_BERT_PATH = os.environ.get("SHIVA_METRIC_BERT_PATH", "../bert-base-uncased")
 from transformers import BertTokenizer, BertModel
 
 _original_tokenizer_from_pretrained = BertTokenizer.from_pretrained
@@ -78,6 +80,47 @@ from shiva_dit.utils.utils import process_quick_start
 from accelerate.utils import set_seed
 
 
+class DirectClipScore:
+    """CLIP Score computed straight from transformers, as a version-proof fallback.
+
+    torchmetrics' CLIPScore reaches into `model.get_image_features`, whose return type
+    changed in transformers 5.x (tensor -> BaseModelOutputWithPooling), so the metric
+    raises on newer installs. Going through vision_model/text_model plus the projection
+    heads is the canonical CLIP path and has been stable across both. The value matches
+    torchmetrics' definition: 100 * max(cos(img, txt), 0).
+    """
+
+    def __init__(self, model_name_or_path, device):
+        from transformers import CLIPModel, CLIPProcessor
+        self.device = device
+        self.model = CLIPModel.from_pretrained(model_name_or_path).to(device).eval()
+        self.processor = CLIPProcessor.from_pretrained(model_name_or_path)
+
+    def to(self, device):
+        return self
+
+    @torch.no_grad()
+    def __call__(self, images_uint8, prompts):
+        # images_uint8: (B, 3, H, W) uint8 tensor, matching the torchmetrics call site
+        pil = [TF.to_pil_image(img.cpu()) for img in images_uint8]
+        inputs = self.processor(text=list(prompts), images=pil, return_tensors="pt",
+                                padding=True, truncation=True)
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
+        vision_out = self.model.vision_model(pixel_values=inputs["pixel_values"])
+        img_emb = self.model.visual_projection(vision_out.pooler_output)
+        text_out = self.model.text_model(
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs.get("attention_mask"),
+        )
+        txt_emb = self.model.text_projection(text_out.pooler_output)
+
+        img_emb = img_emb / img_emb.norm(p=2, dim=-1, keepdim=True)
+        txt_emb = txt_emb / txt_emb.norm(p=2, dim=-1, keepdim=True)
+        cos = (img_emb * txt_emb).sum(dim=-1)
+        return 100.0 * cos.clamp(min=0).mean()
+
+
 class GenerationEvaluator:
     def __init__(self, device, fid_stats_path=None):
         self.device = device
@@ -88,24 +131,45 @@ class GenerationEvaluator:
         else:
             print("Warning: No .npz provided. FID will be skipped.")
 
+        # The generation boxes keep CLIP checkpoints beside the repo; a scoring-only
+        # machine (e.g. the Mac that computes metrics) has no such directory, so fall
+        # back to the hub id rather than losing CLIP Score and CLIP-IQA entirely.
+        clip_path = os.environ.get("SHIVA_METRIC_CLIP_PATH", "openai/clip-vit-base-patch16")
+        # Loaded independently: CLIP-IQA breaks on some torchmetrics/transformers
+        # pairings, and sharing one try block would take CLIP Score down with it --
+        # which is the metric the multi-seed comparison actually turns on.
+        # Constructing CLIPScore can succeed while the first update() still raises on a
+        # transformers-version mismatch, so probe it once and swap in the direct
+        # implementation if it cannot actually score.
+        self.clip_score = None
         try:
-            self.clip_score = CLIPScore(
-                model_name_or_path="../openai-clip-vit-base-patch16"
-            ).to(device)
-
+            probe = CLIPScore(model_name_or_path=clip_path).to(device)
+            probe(torch.zeros(1, 3, 64, 64, dtype=torch.uint8, device=device), ["probe"])
+            self.clip_score = probe
+        except Exception as e:
+            print(f"Warning: torchmetrics CLIPScore unusable ({e}); "
+                  f"falling back to a direct transformers implementation.")
+            try:
+                self.clip_score = DirectClipScore(clip_path, device)
+            except Exception as e2:
+                print(f"Warning: Failed to load CLIP Score: {e2}")
+        try:
             self.clip_iqa = CLIPImageQualityAssessment(
-                model_name_or_path="../openai-clip-vit-base-patch16"
+                model_name_or_path=clip_path
             ).to(device)
         except Exception as e:
-            print(f"Warning: Failed to load CLIP metrics: {e}")
-            self.clip_score = None
+            print(f"Warning: Failed to load CLIP-IQA: {e}")
             self.clip_iqa = None
 
         self.ir_model = None
         if RM:
             print("Loading ImageReward model...")
             try:
-                self.ir_model = RM.load("../ImageReward/ImageReward.pt", device=device, med_config="../ImageReward/med_config.json")
+                self.ir_model = RM.load(
+                    os.environ.get("SHIVA_METRIC_IR_PATH", "ImageReward-v1.0"),
+                    device=device,
+                    med_config=os.environ.get("SHIVA_METRIC_IR_CONFIG"),
+                )
             except Exception as e:
                 print(f"Error loading ImageReward: {e}")
 
@@ -120,22 +184,23 @@ class GenerationEvaluator:
 
     @torch.no_grad()
     def update_fake(self, generated_pil, prompt=None):
-        if self.clip_score is None:
+        if self.clip_score is None and self.clip_iqa is None and self.ir_model is None:
             return
 
         gen_tensor = self.preprocess(generated_pil)
         gen_uint8 = self.preprocess_uint8(generated_pil)
 
-        if prompt:
+        if prompt and self.clip_score is not None:
             score = self.clip_score(gen_uint8, [prompt])
             self.results["clip_scores"].append(score.item())
 
-        iqa_out = self.clip_iqa(gen_tensor)
-        if isinstance(iqa_out, dict):
-            mean_iqa = torch.stack(list(iqa_out.values())).mean().item()
-            self.results["clip_iqa_scores"].append(mean_iqa)
-        else:
-            self.results["clip_iqa_scores"].append(iqa_out.item())
+        if self.clip_iqa is not None:
+            iqa_out = self.clip_iqa(gen_tensor)
+            if isinstance(iqa_out, dict):
+                mean_iqa = torch.stack(list(iqa_out.values())).mean().item()
+                self.results["clip_iqa_scores"].append(mean_iqa)
+            else:
+                self.results["clip_iqa_scores"].append(iqa_out.item())
 
         if self.ir_model and prompt:
             ir_score = self.ir_model.score(prompt, generated_pil)
@@ -172,6 +237,15 @@ class GenerationEvaluator:
         return metrics
 
 
+def compute_metrics_for_images(evaluator, image_paths, fid_stats_path):
+    # FID reads a directory. Expose only the images scored in this run.
+    with TemporaryDirectory(prefix="shiva-fid-") as temp_dir:
+        if fid_stats_path:
+            for path in map(Path, image_paths):
+                (Path(temp_dir) / path.name.lower()).symlink_to(path.resolve())
+        return evaluator.compute(generated_images_dir=temp_dir)
+
+
 def load_data(jsonl_path, image_dir, limit=None):
     data_items = []
     if not os.path.exists(jsonl_path):
@@ -184,6 +258,8 @@ def load_data(jsonl_path, image_dir, limit=None):
             for i, line in enumerate(f):
                 if limit and i >= limit:
                     break
+                if not line.strip():
+                    continue
                 item = json.loads(line)
 
                 img_rel_path = (
@@ -216,88 +292,65 @@ def main(args):
     if torch.cuda.is_available():
         device = f"cuda:{local_rank}"
         torch.cuda.set_device(device)
+    elif torch.backends.mps.is_available():
+        device = "mps"
     else:
         device = "cpu"
 
-    dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float16
+    dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[args.dtype]
 
     print(f"[Process {rank}/{world_size}] Initialized on {device}")
 
-    if args.force_fixed_ratio > 0:
-        if "fixed" not in args.output_dir:
-            args.output_dir = f"{args.output_dir}_fixed_{args.force_fixed_ratio}"
-    
     save_dir = args.output_dir
-    # Only Rank 0 creates directory to avoid race conditions
+    os.makedirs(save_dir, exist_ok=True)
     if rank == 0:
-        os.makedirs(save_dir, exist_ok=True)
         print(f"Output Directory: {save_dir}")
-    
-    # Simple barrier-like mechanism: wait for dir creation (optional, usually OS handles exist_ok=True fine)
-    # But for strict safety with metrics file later, we utilize rank checks.
 
-    # Only initialize evaluator on Rank 0 if we are strictly calculating metrics
-    # Or initialize on all if we want real-time feedback per card (but final compute is tricky)
-    # Here we initialize on all for simplicity, but only Rank 0 prints final aggregation.
     evaluator = None
-    if not args.skip_metrics:
+    scored_image_paths = []
+    if not args.skip_metrics and world_size == 1:
         evaluator = GenerationEvaluator(device, fid_stats_path=args.fid_stats)
 
     # Load ALL data first
     all_data_items = load_data(args.jsonl_path, args.image_dir, args.limit)
     if not all_data_items:
-        return
+        raise ValueError(f"No prompts loaded from {args.jsonl_path}")
 
     # --- [MODIFIED] Data Sharding ---
     data_items = all_data_items[rank::world_size]
     print(f"[Process {rank}] Processing {len(data_items)} items (subset of {len(all_data_items)})")
 
-    if args.meta_config and os.path.exists(args.meta_config):
+    if args.meta_config:
         print(f"Found metadata config at {args.meta_config}")
         with open(args.meta_config, "r") as f:
             meta_config = json.load(f)
     else:
         meta_config = None
 
-    print(f"Loading Pipeline...")
-    pipe = load_pipeline_for_inference(
-        ckpt_path=args.ckpt_path,
-        base_model_path=args.base_model_path,
-        model_type=args.model_type,
-        device=device,
-        dtype=dtype,
-        gater_lut_path=args.gater_lut,
-        optimize_hooks=args.optimize_hooks,
-        merge_lora=args.merge_lora,
-        meta_config=meta_config,
-    )
-
-    if args.force_fixed_ratio > 0:
-        print(f"[INFO] Disabling Policy Network...")
-        print(f"[INFO] Forcing Fixed Ratio: {args.force_fixed_ratio}")
-        from shiva_dit.hook import HookManager
-        
-        hooks_modified = 0
-
-        for hook in HookManager.get_all_hooks().values():
-            if hook.__class__.__name__ == "ShivaDitBlockHook":
-                hook.image_ratio_policy = None
-                hook.fixed_image_ratio = args.force_fixed_ratio
-                hooks_modified += 1
-        
-        if hooks_modified == 0:
-            raise Exception("[Error] Could not find 'shiva_hook' on pipeline. Please check hook registration.")
-        else:
-            print(f"[SUCCESS] Modified {hooks_modified} hook(s) for Fixed Baseline.")
+    if args.model_type or args.ckpt_path or meta_config:
+        print("Loading pipeline...")
+        pipe = load_pipeline_for_inference(
+            ckpt_path=args.ckpt_path,
+            base_model_path=args.base_model_path,
+            model_type=args.model_type,
+            device=device,
+            dtype=dtype,
+            gater_lut_path=args.gater_lut,
+            optimize_hooks=args.optimize_hooks,
+            merge_lora=args.merge_lora,
+            meta_config=meta_config,
+            strict_checkpoint=args.strict_checkpoint,
+            expected_lut_steps=args.steps if args.steps > 0 else None,
+        )
+        print(f"Pipeline device: {next(pipe.transformer.parameters()).device}")
     else:
-        print(f"\n[INFO] Inference Mode: Adaptive (Policy Enabled)")
+        raise ValueError("Provide --model_type, --ckpt_path, or --meta_config")
 
     total_samples = len(data_items) * args.samples_per_prompt
     
     if rank == 0:
         print("-" * 50)
         print(f"Starting Benchmark: {args.model_type}")
-        print(f"Mode: {'FIXED ' + str(args.force_fixed_ratio) if args.force_fixed_ratio > 0 else 'ADAPTIVE'}")
         print(f"Global Prompts: {len(all_data_items)}")
         print(f"Local Prompts (Rank {rank}): {len(data_items)}")
         print(f"Samples per Prompt: {args.samples_per_prompt}")
@@ -326,9 +379,8 @@ def main(args):
             # Skip existing files
             if os.path.exists(file_path):
                 try:
-                    gen_image = Image.open(file_path).convert("RGB")
-                    # Force verify image is valid
-                    gen_image.load() 
+                    with Image.open(file_path) as saved_image:
+                        gen_image = saved_image.convert("RGB")
                 except Exception as e:
                     print(f"[Rank {rank}] Error loading {file_name}, will regenerate: {e}")
                     gen_image = None
@@ -343,12 +395,18 @@ def main(args):
                     
                     if os.path.exists(latent_path):
                         try:
-                            latents = torch.load(latent_path, map_location=device)
+                            latents = torch.load(latent_path, map_location=device, weights_only=True)
                             latents = latents.to(dtype=dtype)
+                            if args.strict_latents and not torch.isfinite(latents).all():
+                                raise ValueError("Latent contains non-finite values")
                         except Exception as e:
+                            if args.strict_latents:
+                                raise RuntimeError(f"Cannot load required latent {latent_path}") from e
                             print(f"[Rank {rank}] Error loading latent {latent_path}: {e}")
                             latents = None
                     else:
+                        if args.strict_latents:
+                            raise FileNotFoundError(latent_path)
                         if rank == 0:
                             print(f"[Warning] Latent file not found: {latent_path}. Falling back to random.")
 
@@ -374,31 +432,29 @@ def main(args):
 
             if evaluator:
                 evaluator.update_fake(gen_image, prompt)
+                scored_image_paths.append(file_path)
             
             pbar.update(1)
 
     pbar.close()
     
-    if evaluator and not args.skip_metrics:
-        if world_size > 1:
-            print(f"[Process {rank}] Generation finished. Skipping aggregated metrics calculation in multi-GPU mode.")
-            print(f"Please run a standalone evaluation script on '{save_dir}' once all processes are done.")
-        else:
-            print(f"\nComputing final metrics on {total_samples} samples...")
-            metrics = evaluator.compute(generated_images_dir=save_dir)
+    if world_size > 1 and rank == 0:
+        print(f"Run benchmark.evaluate on '{save_dir}' after all processes finish.")
+    if evaluator:
+        print(f"\nComputing final metrics on {total_samples} samples...")
+        metrics = compute_metrics_for_images(evaluator, scored_image_paths, args.fid_stats)
 
-            print("\n" + "=" * 20 + " Benchmark Report " + "=" * 20)
-            print(f"Model: {args.ckpt_path or args.model_type}")
-            print(f"Config: {'FIXED ' + str(args.force_fixed_ratio) if args.force_fixed_ratio > 0 else 'ADAPTIVE'}")
-            print(f"Total Samples: {total_samples}")
-            print("-" * 30)
-            for k, v in metrics.items():
-                print(f"{k:<15}: {v:.4f}")
-            print("=" * 56)
+        print("\n" + "=" * 20 + " Benchmark Report " + "=" * 20)
+        print(f"Model: {args.ckpt_path or args.model_type}")
+        print(f"Total Samples: {total_samples}")
+        print("-" * 30)
+        for k, v in metrics.items():
+            print(f"{k:<15}: {v:.4f}")
+        print("=" * 56)
 
-            # Save metrics to json
-            with open(os.path.join(save_dir, "metrics.json"), "w") as f:
-                json.dump(metrics, f, indent=4)
+        # Save metrics to json
+        with open(os.path.join(save_dir, "metrics.json"), "w") as f:
+            json.dump(metrics, f, indent=4)
 
 
 if __name__ == "__main__":
@@ -443,7 +499,7 @@ if __name__ == "__main__":
     parser.add_argument("--steps", type=int, default=-1)
     parser.add_argument("--height", type=int, default=1024)
     parser.add_argument("--width", type=int, default=1024)
-    parser.add_argument("--dtype", type=str, default="bf16")
+    parser.add_argument("--dtype", choices=("bf16", "fp16", "fp32"), default="bf16")
 
     # Shiva
     parser.add_argument("--optimize_hooks", action="store_true", default=True)
@@ -455,18 +511,15 @@ if __name__ == "__main__":
     )
     
     parser.add_argument(
-        "--force_fixed_ratio", 
-        type=float, 
-        default=-1.0, 
-        help="If > 0, disables Policy and forces a fixed ratio. (e.g. 0.64)"
-    )
-
-    parser.add_argument(
         "--latent_source_dir", 
         type=str, 
         default=None, 
         help="Path to directory containing pre-dumped latents (e.g. from machine A)."
     )
+    parser.add_argument("--strict_latents", action="store_true",
+                        help="fail on missing/unreadable fixed latents instead of drawing random noise")
+    parser.add_argument("--strict_checkpoint", action="store_true",
+                        help="fail if checkpoint contains tensors that the loaded model does not use")
     parser.add_argument(
         "--skip_metrics", 
         action="store_true", 
@@ -474,5 +527,12 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+
+    if args.samples_per_prompt < 1:
+        parser.error("--samples_per_prompt must be positive")
+    if args.gater_lut and args.steps < 1:
+        parser.error("--gater_lut requires --steps matching the exported schedule")
+    if args.strict_latents and not args.latent_source_dir:
+        parser.error("--strict_latents requires --latent_source_dir")
 
     main(args)

@@ -87,23 +87,44 @@ class IBTMDiTBlockHook(BaseDiTBlockHook):
             if self.layer_idx < int(total_layers * 0.25) or self.layer_idx > int(total_layers * 0.75):
                 self.enable = False
                 print(f"  - Layer {self.layer_idx} is not enabled")
+        elif self.model_type == 'pixart-sigma':
+            # Official IBTM PixArt patch applies to blocks 7..20 only.
+            # https://github.com/cvlab-stonybrook/importance-token-merge/blob/main/tomesd/patch_pixart.py
+            self.enable = self.enable and 7 <= self.layer_idx < 21
+
+    @staticmethod
+    def pixart_importance(cfg_hidden_state, height, width):
+        """Noise-only CFG heat map, area pooled in the original spatial order."""
+        if cfg_hidden_state is None or cfg_hidden_state.shape[0] != 1:
+            raise ValueError("IBTM PixArt currently requires one prompt with CFG enabled")
+        if cfg_hidden_state.shape[1] != 8:
+            raise ValueError("Expected PixArt's 4 noise + 4 learned-variance channels")
+        # Match pipe_pixart.py: discard learned sigma, average channels, then
+        # area downsample the latent grid to the transformer patch grid.
+        heat = cfg_hidden_state[:, :4].mean(dim=1, keepdim=True)
+        return F.interpolate(heat, size=(height, width), mode='area').flatten()
 
     @torch.no_grad()
     def select_dst_src_ind_tokens(self, x, r, generator: torch.Generator = None, **kwargs):
         if r == 0:
-            global_context.importance_unmerge = None
-            return x
+            empty = torch.empty(0, dtype=torch.long, device=x.device)
+            return torch.arange(x.shape[1], device=x.device), empty, empty, empty
 
         B, N, C = x.shape
 
         cfg_hidden_state = global_context.last_cfg_hidden_state # (1, C, H, W)
-        H, W = cfg_hidden_state.shape[-2:]
-        c = cfg_hidden_state.shape[1]
-        patch_H = H // global_context.hidden_seq_height
-        patch_W = W // global_context.hidden_seq_width
-        cfg_hidden_state = cfg_hidden_state.view(1, -1, patch_H, global_context.hidden_seq_height, patch_W, global_context.hidden_seq_width).permute(0, 3, 5, 2, 4, 1)
-        importance = cfg_hidden_state.reshape(1, N, c * patch_H * patch_W) # (1, N, C * patch_H * patch_W)
-        importance = importance.sum(dim=-1).squeeze(0) # (N)
+        if self.model_type == 'pixart-sigma':
+            importance = self.pixart_importance(
+                cfg_hidden_state, global_context.hidden_seq_height,
+                global_context.hidden_seq_width)
+        else:
+            H, W = cfg_hidden_state.shape[-2:]
+            c = cfg_hidden_state.shape[1]
+            patch_H = H // global_context.hidden_seq_height
+            patch_W = W // global_context.hidden_seq_width
+            cfg_hidden_state = cfg_hidden_state.view(1, -1, patch_H, global_context.hidden_seq_height, patch_W, global_context.hidden_seq_width).permute(0, 3, 5, 2, 4, 1)
+            importance = cfg_hidden_state.reshape(1, N, c * patch_H * patch_W)
+            importance = importance.sum(dim=-1).squeeze(0)
 
         N_final = N - r
         N_dst = int(N * self.dst_ratio_k)

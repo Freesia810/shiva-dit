@@ -1,0 +1,19 @@
+{
+  "training_mode": "hook_only",
+  "model_type": "pixart-sigma",
+  "hook_info": {
+    "class_name": "IBTMDiTBlockHook",
+    "config": {
+      "merged_ratio": 0.2,
+      "merge_config": {
+        "self-attn": true,
+        "cross-attn": true,
+        "ffn": false,
+        "parallel": false
+      },
+      "pool_param": 0.0,
+      "dst_ratio_k": 0.25,
+      "prune_timestep_ratio": 0.2
+    }
+  }
+}

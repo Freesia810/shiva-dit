@@ -217,6 +217,18 @@ class HookManager:
         return cls._hook_map
 
     @classmethod
+    def remove_hook(cls, name: str):
+        hook = cls._hook_map.pop(name)
+        block = cls._weak_blocks.pop(name, None)
+        if block is not None:
+            for module in block.modules():
+                processor = getattr(module, "processor", None)
+                if getattr(processor, "_hook", None) is hook:
+                    processor.register_hook(None, None)
+            block._hook = None
+        hook.close()
+
+    @classmethod
     def set_global(cls, key: str, value: Any):
         if not cls._enabled:
             print("[HookManager] Warning: Disabled, skipping set_global.")
