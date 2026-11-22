@@ -1,28 +1,24 @@
 # Shiva-DiT
 
-**Residual-Based Differentiable Top-k Selection for Efficient Diffusion Transformers**
+Residual-Based Differentiable Top-k Selection for Efficient Diffusion Transformers
 
-Transactions on Machine Learning Research, November 2026 · [Paper and reviews](https://openreview.net/forum?id=uAAaT1KajI)
+Published in Transactions on Machine Learning Research, November 2026. [Paper](https://openreview.net/forum?id=uAAaT1KajI)
 
-Shiva-DiT learns which image tokens to process and how many to retain in each diffusion transformer block. A context-aware router scores the tokens, and a layer- and timestep-dependent ratio policy determines the budget. The block processes the selected tokens and returns the others along the residual path. During training, a residual-based straight-through estimator propagates gradients to both the scores and the budget from a single sparse backbone pass.
+## Environment
 
-## Environment and installation
+Use Python 3.10 and CUDA-enabled PyTorch. The dependencies specify PyTorch 2.6, Transformers 4.57.1, and PEFT 0.17.1.
 
-Use Python 3.10 and a CUDA-enabled PyTorch installation for training, image generation, and latency measurement. The pinned environment uses PyTorch 2.6, Transformers 4.57.1, and PEFT 0.17.1.
+## Install
+
+Run the following command from the repository root.
 
 ```bash
-conda create -n shiva python=3.10
-conda activate shiva
 python -m pip install -r requirements.txt
 ```
 
-Run the examples from this repository's root. The checkout includes the modified Diffusers modules used by Shiva's hooks. Keep this checkout on the Python import path when running the scripts. [Third-party code](THIRD_PARTY.md)
+## Usage
 
-To check the SD3 hook, checkpoint loading, and LUT locally without downloading model weights, run `python -m unittest test.test_inference_pipeline`.
-
-## Quick start
-
-The example uses an SD3-Medium base model in Diffusers format and a compatible Shiva checkpoint. Use your own checkpoint or train one with the [training guide](shiva_dit/training/README.md).
+To generate images with Shiva-DiT, set the paths to your SD3-Medium base model and Shiva checkpoint.
 
 ```bash
 export BASE_MODEL=/path/to/stable-diffusion-3-medium-diffusers
@@ -37,28 +33,20 @@ python -m benchmark.generation \
     --samples_per_prompt 1 --steps 50 --skip_metrics
 ```
 
-The output includes `runs/quickstart/p0000_s00.png`. Pass `--gater_lut path/to/lut.pt` to use a saved schedule for the same model and denoising grid. The [benchmark guide](benchmark/README.md) covers LUT export, matched-latent generation, quality metrics, and latency.
+To use a cached ratio schedule, pass `--gater_lut` with a LUT exported for the same backbone and denoising steps. See the benchmark guide for LUT export, image quality evaluation, and latency measurement. [Benchmark guide](benchmark/README.md)
 
-## Pipeline
+Training recipes are available for SD3-Medium, FLUX.1-dev, and PixArt-Σ. The training guide covers dataset preparation and launching a recipe with Accelerate. [Training guide](shiva_dit/training/README.md)
 
-| Component | Implementation |
-| --- | --- |
-| Context-aware router and ratio policy | [Router](shiva_dit/modules/router.py) · [Policy](shiva_dit/modules/gater.py) |
-| Residual-based differentiable top-k | [Pruner](shiva_dit/modules/pruner.py) · [Autograd functions](shiva_dit/utils/ste.py) |
-| Hook injection, sparse block execution, and restoration | [Installer](shiva_dit/shiva_installer.py) · [Block hook](shiva_dit/shiva_hook.py) |
-| Staged training and checkpoint saving | [Training guide](shiva_dit/training/README.md) |
-| Generation, evaluation, and latency | [Benchmark guide](benchmark/README.md) |
-| Paper figures | [Plotting guide](scripts/viz/README.md) |
+## Features
 
-## Models and data
+- **Context-aware routing and adaptive ratios.** The router scores image tokens using the prompt, timestep, and layer. The ratio policy allocates a retention budget to each layer and denoising step. [Router](shiva_dit/modules/router.py) · [Ratio policy](shiva_dit/modules/gater.py)
+- **Residual-based differentiable top-k.** The block processes the selected tokens and carries the remaining tokens along the residual path. The estimator propagates gradients to the scores and the budget through a single sparse backbone pass. [Pruner](shiva_dit/modules/pruner.py) · [Estimator](shiva_dit/utils/ste.py)
 
-| Backbone | Model assets | Training recipe |
-| --- | --- | --- |
-| SD3-Medium | [Stability AI](https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers) | [Shiva-60](scripts/train/shiva_sd3_60.py) · [Shiva-80](scripts/train/shiva_sd3_80.py) |
-| FLUX.1-dev | [Black Forest Labs](https://huggingface.co/black-forest-labs/FLUX.1-dev) | [FLUX recipe](scripts/train/shiva_flux.py) |
-| PixArt-Σ | [PixArt-α](https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS) | [PixArt recipe](scripts/train/shiva_pixart.py) |
+## Contributing
 
-This is a source-code release. Obtain base models and training data from their respective providers. The same training and evaluation workflow supports new runs. Exact reproduction of the paper tables requires the original checkpoints, LUTs, prompt split, fixed latents, and FID reference statistics. [MJHQ-30K](https://huggingface.co/datasets/playgroundai/MJHQ-30K)
+### Other Methods for Diffusion Models
+
+For comparison, we implement the training-free methods ToMeSD<sup>[1]</sup>, ToFu<sup>[2]</sup>, SDTM<sup>[3]</sup>, ToMA<sup>[4]</sup>, and IBTM<sup>[5]</sup>, as well as the trained methods DiffCR<sup>[6]</sup>, DyDiT<sup>[7]</sup>, SparseDiT<sup>[8]</sup>, and NeuralSort<sup>[9]</sup>. [Baseline guide](baselines/README.md)
 
 ## Citation
 
@@ -73,6 +61,22 @@ This is a source-code release. Obtain base models and training data from their r
 }
 ```
 
-## License
+## References
 
-Shiva-DiT source code is released under the [Apache License 2.0](LICENSE). Bundled components retain their existing notices. [Third-party code](THIRD_PARTY.md)
+[1] Daniel Bolya and Judy Hoffman. *Token Merging for Fast Stable Diffusion.* CVPR Workshops, 2023. [Paper](https://openaccess.thecvf.com/content/CVPR2023W/ECV/html/Bolya_Token_Merging_for_Fast_Stable_Diffusion_CVPRW_2023_paper.html)
+
+[2] Minchul Kim, Shangqian Gao, Yen-Chang Hsu, Yilin Shen, and Hongxia Jin. *Token Fusion: Bridging the Gap Between Token Pruning and Token Merging.* WACV, 2024. [Paper](https://openaccess.thecvf.com/content/WACV2024/html/Kim_Token_Fusion_Bridging_the_Gap_Between_Token_Pruning_and_Token_WACV_2024_paper.html)
+
+[3] Haipeng Fang, Sheng Tang, Juan Cao, Enshuo Zhang, Fan Tang, and Tong-Yee Lee. *Attend to Not Attended: Structure-then-Detail Token Merging for Post-training DiT Acceleration.* CVPR, 2025. [Paper](https://arxiv.org/abs/2505.11707)
+
+[4] Wenbo Lu, Shaoyi Zheng, Yuxuan Xia, and Shengjie Wang. *ToMA: Token Merge with Attention for Diffusion Models.* ICML, 2025. [Paper](https://proceedings.mlr.press/v267/lu25v.html)
+
+[5] Haoyu Wu, Jingyi Xu, Hieu Le, and Dimitris Samaras. *Importance-Based Token Merging for Efficient Image and Video Generation.* ICCV, 2025. [Paper](https://openaccess.thecvf.com/content/ICCV2025/html/Wu_Importance-Based_Token_Merging_for_Efficient_Image_and_Video_Generation_ICCV_2025_paper.html)
+
+[6] Haoran You et al. *Layer- and Timestep-Adaptive Differentiable Token Compression Ratios for Efficient Diffusion Transformers.* CVPR, 2025. [Paper](https://arxiv.org/abs/2412.16822)
+
+[7] Wangbo Zhao et al. *Dynamic Diffusion Transformer.* ICLR, 2025. [Paper](https://proceedings.iclr.cc/paper_files/paper/2025/hash/a44a70acd5d0abc1a252ada9719dd06d-Abstract-Conference.html)
+
+[8] Shuning Chang, Pichao Wang, Jiasheng Tang, Fan Wang, and Yi Yang. *SparseDiT: Token Sparsification for Efficient Diffusion Transformer.* NeurIPS, 2025. [Paper](https://proceedings.neurips.cc/paper_files/paper/2025/hash/83fe5a77502e3d4cfab5960aed0ee6c3-Abstract-Conference.html)
+
+[9] Aditya Grover, Eric Wang, Aaron Zweig, and Stefano Ermon. *Stochastic Optimization of Sorting Networks via Continuous Relaxations.* ICLR, 2019. [Paper](https://arxiv.org/abs/1903.08850)
