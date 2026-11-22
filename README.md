@@ -7,8 +7,6 @@
 
 Residual-Based Differentiable Top-k Selection for Efficient Diffusion Transformers
 
-Published in Transactions on Machine Learning Research, November 2026. [TMLR article](https://openreview.net/forum?id=uAAaT1KajI)
-
 Shiva-DiT reduces the number of image tokens processed in each block of a diffusion transformer. The **context-aware router** scores tokens using their features, the prompt, the denoising timestep, and the layer. The **adaptive ratio policy** sets the retention budget for that layer and timestep. The block runs attention and the feed-forward network on the top-$k$ image tokens, carries the remaining tokens through the residual path, and restores the original token layout before the next block.
 
 During training, a **residual-based straight-through estimator** makes this hard selection learnable. It assigns each token a soft rank and uses its position relative to $k$ to approximate its inclusion probability. Gradients from the path each token took propagate through that probability to both the router scores and the budget. This lets both decisions learn from one sparse student forward pass. At inference, the ratio policy can be exported to a lookup table (LUT) because its outputs depend on the layer and timestep. The router continues to score each input.
