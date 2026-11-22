@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 class CeilSTE(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x):
@@ -42,39 +41,9 @@ class ShivaTopkFunc(torch.autograd.Function):
         return soft_ranks
 
     @staticmethod
-    def _selection_probs_residual(logits, k, Ts, Tk, N):
-        """Ours: pairwise soft rank -> sigmoid((k - rank) / tau_sel). Depends on k."""
-        scores_for_soft_rank = torch.sigmoid(logits)
-        noise = torch.randn_like(logits) * 1e-5
-        scores_for_soft_rank = scores_for_soft_rank + noise
-
-        soft_ranks = ShivaTopkFunc._differentiable_rank_descending(
-            scores_for_soft_rank, Ts
-        )
-        dist_to_k = k.unsqueeze(-1) - soft_ranks
-        z = Tk * dist_to_k / float(N)
-        return torch.sigmoid(z), soft_ranks
-
-    @staticmethod
-    def _selection_probs_gumbel(logits, tau):
-        """DyDiT-style Gumbel-Sigmoid: each token relaxed independently, no global ranking.
-
-        pi_i = sigmoid((logit_i + g_i) / tau), g_i logistic noise = log u - log(1-u).
-        Note d(pi)/dk == 0 by construction, so this arm cannot learn the budget --
-        that is the point of the comparison, not a bug.
-        """
-        u = torch.rand_like(logits).clamp_(1e-6, 1.0 - 1e-6)
-        logistic_noise = torch.log(u) - torch.log1p(-u)
-        return torch.sigmoid((logits + logistic_noise) / tau)
-
-    @staticmethod
-    def forward(ctx, x, logits, k_float, Ts, Tk, pi_mode="residual", gumbel_tau=1.0):
+    def forward(ctx, x, logits, k_float, Ts, Tk):
         B, N, D = x.shape
-        ctx.pi_mode = pi_mode
-        ctx.gumbel_tau = gumbel_tau
         idx_sorted = torch.argsort(logits, dim=-1, descending=True)
-
-        # .item() forces a device sync, so this is timed apart from the sort itself
         k_int = int(torch.ceil(k_float).item())
         k_int = max(1, min(k_int, N))
 
@@ -113,15 +82,16 @@ class ShivaTopkFunc(torch.autograd.Function):
         k_detached = k_float.detach().requires_grad_(True)
         
         with torch.enable_grad():
-            if ctx.pi_mode == "gumbel":
-                selection_probs = ShivaTopkFunc._selection_probs_gumbel(
-                    logits_detached, ctx.gumbel_tau
-                )
-                soft_ranks = None
-            else:
-                selection_probs, soft_ranks = ShivaTopkFunc._selection_probs_residual(
-                    logits_detached, k_detached, Ts, Tk, N
-                )
+            scores_for_soft_rank = torch.sigmoid(logits_detached)
+            noise = torch.randn_like(logits_detached) * 1e-5
+            scores_for_soft_rank = scores_for_soft_rank + noise
+
+            soft_ranks = ShivaTopkFunc._differentiable_rank_descending(scores_for_soft_rank, Ts)
+            N_float = float(N)
+
+            dist_to_k = k_detached.unsqueeze(-1) - soft_ranks
+            z = Tk * dist_to_k / N_float
+            selection_probs = torch.sigmoid(z)
 
             grads = torch.autograd.grad(
                 outputs=selection_probs,
@@ -143,10 +113,9 @@ class ShivaTopkFunc(torch.autograd.Function):
                 
                 active_grads = (grad_logits.abs() > 1e-8).float().sum(dim=1).mean().item()
                 
-                rank_spread = soft_ranks.std().item() if soft_ranks is not None else 0.0
+                rank_spread = soft_ranks.std().item()
 
                 ShivaTopkFunc._stats_buffer = {
-                    "pi_mode": ctx.pi_mode,
                     "grad_logits_norm": g_logits_norm,
                     "grad_k_norm": g_k_norm,
                     "grad_k_mean": g_k_val,
@@ -165,12 +134,11 @@ class ShivaTopkFunc(torch.autograd.Function):
                 except:
                     _print_console_stats(ShivaTopkFunc._stats_buffer)
 
-        return grad_x, grad_logits, grad_k, None, None, None, None
+        return grad_x, grad_logits, grad_k, None, None
 
 def _print_console_stats(stats):
     """Auxiliary function for beautiful printing"""
-    mode = stats.get("pi_mode", "residual")
-    print(f"\n{'-'*27} [TopK Autograd Monitor | pi={mode}] {'-'*27}")
+    print(f"\n{'-'*30} [TopK Autograd Monitor] {'-'*30}")
     
     # 1. Gradient Health
     print(f"  > Gradient Health:")

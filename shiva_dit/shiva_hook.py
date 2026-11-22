@@ -1,6 +1,5 @@
 import inspect
 import math
-import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -22,20 +21,6 @@ GATER_STAGE = 99
 
 # Hack
 ACCUMULATION_STEPS = 2
-
-# Controlled-variable knob for the ragged-vs-regular study. When non-zero, the budget
-# read from the LUT is perturbed by +/- K_JITTER tokens, resampled on every call. The
-# model, the pruned modules and the MEAN retention are unchanged -- only the regularity
-# of the tensor shapes differs, which is the single variable that study is about.
-K_JITTER = 0
-
-# Round the retained-token count up to a multiple of this. INT8 tensor-core GEMMs
-# (CUTLASS) require the M dimension to be 16-aligned for int8; an unaligned k does not
-# raise, it faults with a misaligned address mid-kernel. Rounding up keeps at most 15
-# extra tokens (<0.4% at N=4096), leaves the schedule static and offline-enumerable,
-# and is a no-op when set to 1.
-K_ALIGN = 1
-_K_RNG = random.Random(1234)
 
 
 class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
@@ -375,12 +360,6 @@ class ShivaDitBlockHook(BaseDelegator, BaseDiTBlockHook, nn.Module):
                 ratio_f = self._ratio_cpu[self.layer_idx][current_t_index]
                 ratio_f = min(max(ratio_f, 0.01), 1.0)
                 k_python = max(1, min(int(math.ceil(ratio_f * N)), N))
-                if K_ALIGN > 1:
-                    k_python = min(
-                        ((k_python + K_ALIGN - 1) // K_ALIGN) * K_ALIGN, N)
-                if K_JITTER:
-                    k_python = max(
-                        1, min(k_python + _K_RNG.randint(-K_JITTER, K_JITTER), N))
 
             if predicted_ratio is None and k_python is None:
                 if self.image_ratio_policy is not None:

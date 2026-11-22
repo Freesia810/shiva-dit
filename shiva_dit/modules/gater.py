@@ -54,22 +54,10 @@ class ShivaRatioPolicy(nn.Module):
         time_embed_dim: int,
         ratio_bottleneck_dim: int,
         init_ratio: float,
-        policy_mode: str = "additive",
         **kwargs
     ):
         super().__init__()
         self.init_ratio_val = init_ratio
-
-        # "additive" is Eq. 10: logit(r) = Phi_time(e_t) + Phi_layer(e_l) + b_anchor,
-        # which assumes the temporal trend has the same shape at every depth.
-        # "film" is the multiplicative alternative the paper argues against, where the
-        # timestep rescales the layer profile: logit(r) = (1+gamma(t))*Phi_layer(e_l)
-        # + beta(t) + b_anchor. Only the last time_mlp layer widens (1 -> 2 outputs),
-        # so the two variants are matched in capacity to within a handful of weights.
-        if policy_mode not in ("additive", "film"):
-            raise ValueError(f"policy_mode must be 'additive' or 'film', got {policy_mode}")
-        self.policy_mode = policy_mode
-        time_out = 2 if policy_mode == "film" else 1
 
         self.layer_emb = nn.Embedding(total_layers, ratio_bottleneck_dim)
         self.layer_mlp = nn.Sequential(
@@ -81,7 +69,7 @@ class ShivaRatioPolicy(nn.Module):
         self.time_mlp = nn.Sequential(
             nn.Linear(time_embed_dim, ratio_bottleneck_dim),
             nn.SiLU(),
-            nn.Linear(ratio_bottleneck_dim, time_out)
+            nn.Linear(ratio_bottleneck_dim, 1)
         )
 
         self.register_buffer("global_bias", torch.zeros(1))
@@ -120,8 +108,7 @@ class ShivaRatioPolicy(nn.Module):
         nn.init.constant_(self.global_bias, bias_val)
         
         if not dist.is_initialized() or dist.get_rank() == 0:
-            print(f"[ShivaRatioPolicy] Initialized ({self.policy_mode}). "
-                  f"Bias={bias_val:.4f} (Target={self.init_ratio_val})")
+            print(f"[ShivaRatioPolicy] Initialized (Additive). Bias={bias_val:.4f} (Target={self.init_ratio_val})")
 
     def forward(self, temb, layer_idx_tensor):
         # if not self.has_reset:
@@ -147,23 +134,16 @@ class ShivaRatioPolicy(nn.Module):
             == RATIO_LAYER_STAGE
         )
 
-        def combine(l, t):
-            """Fuse the layer and time logits under the configured coupling."""
-            if self.policy_mode == "film":
-                gamma, beta = t[..., :1], t[..., 1:]
-                return (1.0 + gamma) * l + beta + self.global_bias
-            return l + t + self.global_bias
-
         if is_time_stage:
-            final_logits = combine(logits_l, logits_t)
+            final_logits = logits_l + logits_t + self.global_bias
             noise_scale = 1.0
             noise = torch.randn_like(final_logits) * noise_scale
             final_logits = final_logits + noise
         elif is_layer_stage:
             logits_t = logits_t.detach() + logits_t * 0.0
-            final_logits = combine(logits_l, logits_t)
+            final_logits = logits_l + logits_t + self.global_bias
         else:
-            final_logits = combine(logits_l, logits_t)
+            final_logits = logits_l + logits_t + self.global_bias
         
         if self.training:
             clamp_val = 6.0

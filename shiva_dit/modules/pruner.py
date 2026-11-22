@@ -50,15 +50,10 @@ def hard_topk_select(x, logits, k, need_rejected=True, scores_shared=False):
 
 
 class ShivaPrunerExpert(torch.nn.Module):
-    def __init__(self, init_Ts, init_Tk, pi_mode: str = "residual", gumbel_tau: float = 1.0):
+    def __init__(self, init_Ts, init_Tk):
         super().__init__()
         self.register_buffer("Ts", torch.tensor(float(init_Ts)), persistent=False)
         self.register_buffer("Tk", torch.tensor(float(init_Tk)), persistent=False)
-        # "residual" (ours) or "gumbel" (independent Gumbel-Sigmoid, DyDiT-style).
-        # The forward pass -- hard top-k under the same budget -- is identical either way;
-        # only the backward surrogate for pi_i changes.
-        self.pi_mode = pi_mode
-        self.gumbel_tau = gumbel_tau
 
     def forward(self, x, logits, k, need_rejected=True, scores_shared=False):
         # Inference needs neither the custom backward nor a differentiable k, and
@@ -68,9 +63,7 @@ class ShivaPrunerExpert(torch.nn.Module):
         # directly; the forward result is bit-identical.
         if not torch.is_grad_enabled():
             return hard_topk_select(x, logits, k, need_rejected, scores_shared)
-        return ShivaTopkFunc.apply(
-            x, logits, k, self.Ts, self.Tk, self.pi_mode, self.gumbel_tau
-        )
+        return ShivaTopkFunc.apply(x, logits, k, self.Ts, self.Tk)
 
 class ShivaContextPruner(nn.Module):
     def __init__(self, img_dim, txt_dim, proj_dim, init_Ts, init_Tk):
