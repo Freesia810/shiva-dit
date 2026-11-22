@@ -1,0 +1,16 @@
+{
+    "training_mode": "hook_only",
+    "model_type": "sd3",
+    "hook_info": {
+        "class_name": "SDTMDiTBlockHook",
+        "config": {
+            "stride": [2, 2],
+            "switch_step_fraction": 0.4,
+            "init_ratio": 0.5,
+            "deviation": 0.2,
+            "alpha_s": 0.05,
+            "mcw": 0.2,
+            "protected_step_stride": 3
+        }
+    }
+}

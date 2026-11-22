@@ -1,0 +1,1 @@
+nohup mlflow server --host 0.0.0.0 --port 8900 --backend-store-uri file:./mlruns --allowed-hosts "aop-lab.alibaba-inc.com" --default-artifact-root ./mlruns > mlrun.log 2>&1 &

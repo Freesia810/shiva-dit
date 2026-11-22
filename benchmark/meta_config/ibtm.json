@@ -1,0 +1,19 @@
+{
+    "training_mode": "hook_only",
+    "model_type": "sd3",
+    "hook_info": {
+        "class_name": "IBTMDiTBlockHook",
+        "config": {
+            "merged_ratio": 0.2,
+            "merge_config": {
+                "self-attn": true,
+                "cross-attn": false,
+                "ffn": true,
+                "parallel": false
+            },
+            "pool_param": 0.4,
+            "dst_ratio_k": 0.25,
+            "prune_timestep_ratio": 0.12
+        }
+    }
+}
