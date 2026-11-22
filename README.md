@@ -41,18 +41,6 @@ The output includes `runs/quickstart/p0000_s00.png`. Pass `--gater_lut path/to/l
 
 ## Pipeline
 
-```mermaid
-flowchart LR
-    A[DiT block input] --> B[Context-aware router]
-    P[Layer and denoising timestep] --> C[Adaptive ratio policy or LUT]
-    B --> D[Hard top-k selection]
-    C --> D
-    D --> E[Attention and FFN on selected tokens]
-    A --> F[Residual path for unselected tokens]
-    E --> G[Reassemble the full token sequence]
-    F --> G
-```
-
 | Component | Implementation |
 | --- | --- |
 | Context-aware router and ratio policy | [Router](shiva_dit/modules/router.py) · [Policy](shiva_dit/modules/gater.py) |
